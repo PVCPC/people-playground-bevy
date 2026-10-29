@@ -1,5 +1,6 @@
 //! Bit comparisons of the b2 port against UnityPlayer.dll through NativeProbe's raw-call mode.
 
+use super::broadphase::*;
 use super::collide::*;
 use super::distance::*;
 use super::math::{Transform, Vec2};
@@ -22,6 +23,10 @@ const SOLVE_POSITION: u32 = 0xbbee60;
 const SOLVE_TOI_POSITION: u32 = 0xbbf3a0;
 const DISTANCE: u32 = 0xbb08e0;
 const TIME_OF_IMPACT: u32 = 0xbb1c40;
+const CREATE_PROXY: u32 = 0xbac6e0;
+const DESTROY_PROXY: u32 = 0xbac7d0;
+const MOVE_PROXY: u32 = 0xbae4a0;
+const QUERY_BROAD_PHASE: u32 = 0xbb72b0;
 /// b2_velocityThreshold, b2_maxLinearCorrection, b2_baumgarte and b2_toiBaugarte in .data.
 const SOLVER_GLOBALS: [[u32; 2]; 4] = [
     [0x1999c2c, VELOCITY_THRESHOLD.to_bits()],
@@ -637,7 +642,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_manifolds(executable)?;
     compare_solver(executable)?;
     compare_distance(executable)?;
-    compare_toi(executable)
+    compare_toi(executable)?;
+    compare_broad_phase(executable)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {
@@ -693,5 +699,145 @@ fn compare_toi(executable: &std::path::Path) -> Result<(), String> {
     }
     report("TIME OF IMPACT", bad, replies.len(), first)?;
     println!("  (states unknown/failed/overlapped/touching/separated: {states:?})");
+    Ok(())
+}
+
+const PROBE_TREE_CAPACITY: usize = 64;
+const PROBE_BUFFER_CAPACITY: usize = 256;
+
+fn aabb_bytes(aabb: &Aabb) -> Vec<u8> {
+    let mut b = vec![0; 16];
+    put_vec(&mut b, 0, aabb.lower);
+    put_vec(&mut b, 8, aabb.upper);
+    b
+}
+
+/// b2BroadPhase (0x78) with its node array, move buffer and pair buffer as separate linked buffers.
+fn broad_phase_bytes(bp: &BroadPhase, query_id: i32, pairs: &[(i32, i32)]) -> [Vec<u8>; 4] {
+    let tree = &bp.tree;
+    let mut b = vec![0; 0x78];
+    put(&mut b, 0, tree.root as u32);
+    put(&mut b, 0x10, tree.node_count as u32);
+    put(&mut b, 0x14, tree.nodes.len() as u32);
+    put(&mut b, 0x18, tree.free_list as u32);
+    put(&mut b, 0x20, tree.insertion_count as u32);
+    put(&mut b, 0x28, bp.proxy_count as u32);
+    put(&mut b, 0x38, 0x2a);
+    put(&mut b, 0x40, pairs.len() as u32);
+    put(&mut b, 0x48, (PROBE_BUFFER_CAPACITY << 1) as u32);
+    put(&mut b, 0x58, 0x2a);
+    put(&mut b, 0x60, bp.move_buffer.len() as u32);
+    put(&mut b, 0x68, (PROBE_BUFFER_CAPACITY << 1) as u32);
+    put(&mut b, 0x70, query_id as u32);
+    let mut nodes = vec![0; tree.nodes.len() * 0x28];
+    for (i, n) in tree.nodes.iter().enumerate() {
+        let o = i * 0x28;
+        nodes[o..o + 16].copy_from_slice(&aabb_bytes(&n.aabb));
+        nodes[o + 0x10..o + 0x18].copy_from_slice(&(n.user_data as u64).to_le_bytes());
+        put(&mut nodes, o + 0x18, n.parent as u32);
+        put(&mut nodes, o + 0x1c, n.child1 as u32);
+        put(&mut nodes, o + 0x20, n.child2 as u32);
+        put(&mut nodes, o + 0x24, n.height as u32);
+    }
+    let mut moves = vec![0; PROBE_BUFFER_CAPACITY * 4];
+    for (i, &id) in bp.move_buffer.iter().enumerate() {
+        put(&mut moves, i * 4, id as u32);
+    }
+    let mut pair_bytes = vec![0; PROBE_BUFFER_CAPACITY * 8];
+    for (i, &(a, b)) in pairs.iter().enumerate() {
+        put(&mut pair_bytes, i * 8, a as u32);
+        put(&mut pair_bytes, i * 8 + 4, b as u32);
+    }
+    [b, nodes, moves, pair_bytes]
+}
+
+/// The comparable state: struct fields without pointers, every node byte, live move ids and pairs.
+fn broad_phase_state(buffers: &[Vec<u8>]) -> Vec<u32> {
+    let b = &buffers[0];
+    let mut state: Vec<u32> = [0, 0x10, 0x14, 0x18, 0x20, 0x28, 0x40, 0x60].iter().map(|&o| get(b, o)).collect();
+    state.extend(buffers[1].chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+    state.extend((0..get(b, 0x60) as usize).map(|i| get(&buffers[2], i * 4)));
+    state.extend((0..get(b, 0x40) as usize * 2).map(|i| get(&buffers[3], i * 4)));
+    state
+}
+
+fn broad_phase_call(rva: u32, bp: &BroadPhase, query_id: i32, aabb: &Aabb, displacement: Vec2, args: &[&str]) -> Call {
+    let mut d = vec![0; 8];
+    put_vec(&mut d, 0, displacement);
+    let [b, nodes, moves, pairs] = broad_phase_bytes(bp, query_id, &[]);
+    let mut c = call(rva, vec![b, nodes, moves, pairs, aabb_bytes(aabb), d], args);
+    c.links = vec![[0, 8, 1, 0], [0, 0x30, 3, 0], [0, 0x50, 2, 0]];
+    c
+}
+
+/// Random create/move/destroy/query sequences; each native call starts from the port's state before the op.
+fn compare_broad_phase(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_0006);
+    let mut calls = Vec::new();
+    // (op name, expected state, expected returned proxy id)
+    let mut expected: Vec<(&str, Vec<u32>, Option<i32>)> = Vec::new();
+    let random_aabb = |random: &mut Random| {
+        let c = random.vec(5.0);
+        let h = Vec2::new(random.range(0.05, 1.0), random.range(0.05, 1.0));
+        Aabb { lower: c - h, upper: c + h }
+    };
+    let mut pairs_found = 0;
+    for _ in 0..96 {
+        let mut bp = BroadPhase::with_capacity(PROBE_TREE_CAPACITY);
+        let mut live: Vec<(i32, Aabb)> = Vec::new();
+        for step in 0..48 {
+            let roll = random.next() % 10;
+            if live.len() < 4 || (roll < 3 && live.len() < 24) {
+                let aabb = random_aabb(&mut random);
+                let user = 1000 + step;
+                calls.push(broad_phase_call(CREATE_PROXY, &bp, NULL, &aabb, Vec2::ZERO, &["b0", "b4", &format!("i{user}")]));
+                let id = bp.create_proxy(&aabb, user);
+                live.push((id, aabb));
+                expected.push(("create", broad_phase_state(&broad_phase_bytes(&bp, NULL, &[])), Some(id)));
+            } else if roll < 4 {
+                let (id, _) = live.swap_remove(random.next() as usize % live.len());
+                calls.push(broad_phase_call(DESTROY_PROXY, &bp, NULL, &Aabb::default(), Vec2::ZERO, &["b0", &format!("i{id}")]));
+                bp.destroy_proxy(id);
+                expected.push(("destroy", broad_phase_state(&broad_phase_bytes(&bp, NULL, &[])), None));
+            } else if roll < 8 {
+                let k = random.next() as usize % live.len();
+                let (id, old) = live[k];
+                let d = if roll == 4 { random.vec(0.02) } else { random.vec(0.6) };
+                let grow = if roll == 7 { random.range(-0.04, 0.3) } else { 0.0 };
+                let aabb = Aabb { lower: old.lower + d - Vec2::new(grow, grow), upper: old.upper + d + Vec2::new(grow, grow) };
+                live[k].1 = aabb;
+                calls.push(broad_phase_call(MOVE_PROXY, &bp, NULL, &aabb, d, &["b0", &format!("i{id}"), "b4", "b5"]));
+                bp.move_proxy(id, &aabb, d);
+                expected.push(("move", broad_phase_state(&broad_phase_bytes(&bp, NULL, &[])), None));
+            } else {
+                let id = live[random.next() as usize % live.len()].0;
+                let fat = *bp.tree.fat_aabb(id);
+                calls.push(broad_phase_call(QUERY_BROAD_PHASE, &bp, id, &fat, Vec2::ZERO, &["b0", "b0", "b4"]));
+                let mut pairs = Vec::new();
+                bp.query_pairs(id, &mut pairs);
+                pairs_found += pairs.len();
+                expected.push(("query", broad_phase_state(&broad_phase_bytes(&bp, id, &pairs)), None));
+            }
+            if step % 12 == 11 {
+                bp.update_pairs(|_, _| {});
+            }
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let native: Vec<Vec<u8>> = reply.buffers.iter().map(|b| unhex(b)).collect();
+        let (op, rust, id) = &expected[i];
+        let state = broad_phase_state(&native);
+        let id_ok = id.map_or(true, |id| reply.ret as i32 == id);
+        if state != *rust || !id_ok {
+            bad += 1;
+            let at = state.iter().zip(rust).position(|(a, b)| a != b);
+            first.get_or_insert_with(|| format!("call {i} {op}: word {at:?} native={:?} rust={:?} id native={} rust={id:?}", at.map(|a| state[a]), at.map(|a| rust[a]), reply.ret as i32));
+        }
+    }
+    report("BROAD PHASE", bad, replies.len(), first)?;
+    println!("  ({pairs_found} query pairs)");
     Ok(())
 }
