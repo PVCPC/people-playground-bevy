@@ -1,4 +1,4 @@
-//! Bevy side of the b2 port: one b2::World stepped after FixedUpdate (Unity steps physics after the
+//! Bevy side of the b2 rewrite: one b2::World stepped after FixedUpdate (Unity steps physics after the
 //! scripts' FixedUpdate). Entities carry body and joint ids; despawning one destroys it in the world.
 use crate::b2::{
     math::Vec2 as V,

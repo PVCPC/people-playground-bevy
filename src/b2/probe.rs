@@ -1,4 +1,4 @@
-//! Bit comparisons of the b2 port against UnityPlayer.dll through NativeProbe's raw-call mode.
+//! Bit comparisons of the b2 rewrite against UnityPlayer.dll through NativeProbe's raw-call mode.
 
 use super::broadphase::*;
 use super::collide::*;
@@ -773,7 +773,7 @@ fn broad_phase_call(rva: u32, bp: &BroadPhase, query_id: i32, aabb: &Aabb, displ
     c
 }
 
-/// Random create/move/destroy/query sequences; each native call starts from the port's state before the op.
+/// Random create/move/destroy/query sequences; each native call starts from the rewrite's state before the op.
 fn compare_broad_phase(executable: &std::path::Path) -> Result<(), String> {
     let mut random = Random(0x5eed_0006);
     let mut calls = Vec::new();
@@ -1052,7 +1052,7 @@ const REVOLUTE_INIT: u32 = 0xbc29c0;
 const REVOLUTE_SOLVE_VELOCITY: u32 = 0xbc5d10;
 const REVOLUTE_SOLVE_POSITION: u32 = 0xbc4560;
 
-/// b2RevoluteJoint (304 bytes) with the solver temporaries the port keeps in its hinge constraint.
+/// b2RevoluteJoint (304 bytes) with the solver temporaries the rewrite keeps in its hinge constraint.
 fn revolute_bytes(j: &super::revolute::RevoluteJoint) -> Vec<u8> {
     let mut b = vec![0; 304];
     let v = &j.velocity;
@@ -1109,7 +1109,7 @@ fn revolute_call(rva: u32, j: &super::revolute::RevoluteJoint, bodies: [&super::
 }
 
 /// Random hinges (limits at, inside, past and equal; motors; static and fixed-rotation sides; axis locks)
-/// stepped through init, velocity and position solves; each native call starts from the port's state.
+/// stepped through init, velocity and position solves; each native call starts from the rewrite's state.
 fn compare_revolute(executable: &std::path::Path) -> Result<(), String> {
     use super::revolute::*;
     let mut random = Random(0x5eed_0009);

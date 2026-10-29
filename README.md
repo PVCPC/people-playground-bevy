@@ -1,6 +1,6 @@
 # People Playground / Bevy
 
-An early Windows Rust/Bevy ragdoll sandbox prototype. **This is not a complete or verified 1:1 port.**
+An early Windows Rust/Bevy ragdoll sandbox prototype. **This is not a complete or verified 1:1 rewrite.**
 
 Requires your own installed copy of People Playground. Original assets, extracted caches, game DLLs, and recovered C# are not included in this repository.
 
@@ -14,7 +14,7 @@ Requires your own installed copy of People Playground. Original assets, extracte
 - Installation and cache-fingerprint checks at startup.
 - Headless engine tests with no window or desktop control.
 
-Bevy 0.20 handles rendering and Avian 0.8 handles contacts and force accumulation. Custom integration applies acceleration before damping and enforces the original per-step translation/rotation caps. Hinge velocity and position constraints use the recovered native equations; Avian's XPBD joint pass is disabled. Healthy static muscles use the recovered velocity-command calculations. The live hinge velocity pass uses the native engine's coupled 3×3 limit equations, reduced 2×2 solve when a unilateral limit releases, accumulated torque caps, and the native rule that equal limits disable the motor. Matrix construction and warm starting preserve the native arithmetic order; impulse history is retained, rescaled for timestep changes, and cleared according to motor and limit state. It also solves anchor velocities for limp bodies. Fresh caches import the fixed timestep, gravity, velocity/position iteration counts, angular correction limit, and translation/rotation caps from the exported project settings. This installation uses 50 Hz and 16/16 iterations; the port still subdivides each fixed update into 10 physics substeps. Position corrections preserve center-of-mass offsets and do not project corrections into body velocities.
+Bevy 0.20 handles rendering. Physics is a Rust rewrite of the Box2D build inside the game's UnityPlayer.dll (src/b2): broad phase, contacts, island solve, continuous (TOI) solve and hinge joints, each compared bit for bit against the DLL by a private probe. Muscles set HingeJoint2D motor fields and Rigidbody2D forces the way the native setters do. Fresh caches import the fixed timestep, gravity, velocity/position iteration counts and correction limits from the exported project settings (this installation: 50 Hz, 16/16 iterations, no substeps). Full trajectories have not yet been compared against the running game.
 
 Fresh caches resolve each human body's runtime physics material through its physical-properties asset, replacing the prototype coefficients. Imported contacts use geometric-mean friction and maximum restitution mixing. Different materials on colliders within one compound body are rejected rather than silently merged. Native Unity motor-property limits are also applied before storing the speed for the next command: speed is bounded to ±1,000,000 degrees/second and torque to 0–1,000,000.
 
