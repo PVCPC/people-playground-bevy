@@ -111,7 +111,8 @@ pub fn drive_muscles(
             force_multiplier: pose.force_multiplier,
             active: target.is_some(),
             strength_multipliers: vec![],
-        });
+        })
+        .clamp_native_properties();
         muscle.previous_speed = output.speed;
         motor.enabled = output.torque > 0.0;
         motor.target_velocity = -output.speed.to_radians();

@@ -42,6 +42,14 @@ pub struct Part {
     pub layer: i32,
     #[serde(default)]
     pub muscle: Option<MuscleSpec>,
+    #[serde(default)]
+    pub physics_material: Option<PhysicsMaterial>,
+}
+
+#[derive(Deserialize)]
+pub struct PhysicsMaterial {
+    pub friction: f32,
+    pub restitution: f32,
 }
 
 #[derive(Deserialize)]
@@ -172,6 +180,14 @@ impl HumanRig {
                 {
                     return Err(format!("Invalid collider: {}", p.name));
                 }
+            }
+            if let Some(material) = &p.physics_material
+                && (!material.friction.is_finite()
+                    || material.friction < 0.0
+                    || !material.restitution.is_finite()
+                    || !(0.0..=1.0).contains(&material.restitution))
+            {
+                return Err(format!("Invalid physics material: {}", p.name));
             }
             if let Some(muscle) = &p.muscle
                 && (!muscle.strength.is_finite()
@@ -328,6 +344,29 @@ mod tests {
             limits: None,
         });
         assert!(rig.validate().is_err());
+    }
+
+    #[test]
+    fn physics_material_rejects_invalid_contact_coefficients() {
+        for (friction, restitution) in [
+            (-1.0, 0.2),
+            (f32::NAN, 0.2),
+            (1.0, 1.1),
+            (1.0, f32::INFINITY),
+        ] {
+            let mut rig = test_rig();
+            rig.parts[0].physics_material = Some(PhysicsMaterial {
+                friction,
+                restitution,
+            });
+            assert!(rig.validate().is_err());
+        }
+        let mut rig = test_rig();
+        rig.parts[0].physics_material = Some(PhysicsMaterial {
+            friction: 1.0,
+            restitution: 0.2,
+        });
+        assert!(rig.validate().is_ok());
     }
 
     #[test]

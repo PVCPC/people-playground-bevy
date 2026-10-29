@@ -151,6 +151,23 @@ pub struct MotorOutput {
     pub torque: f32,
 }
 
+impl MotorOutput {
+    pub fn clamp_native_properties(mut self) -> Self {
+        // Unity's native HingeJoint2D setter maps NaN to each property's lower bound.
+        self.speed = if self.speed.is_nan() {
+            -1_000_000.0
+        } else {
+            self.speed.clamp(-1_000_000.0, 1_000_000.0)
+        };
+        self.torque = if self.torque.is_nan() {
+            0.0
+        } else {
+            self.torque.clamp(0.0, 1_000_000.0)
+        };
+        self
+    }
+}
+
 pub fn command(input: &MotorInput) -> MotorOutput {
     let mass_ratio = input.mass / input.initial_mass;
     let force = if input.active {
@@ -311,6 +328,21 @@ mod tests {
             strength_multipliers: vec![],
         }
     }
+    #[test]
+    fn native_setter_clamps_motor_fields_before_the_next_command() {
+        for (speed, torque, expected_speed, expected_torque) in [
+            (2_000_000.0, 2_000_000.0, 1_000_000.0, 1_000_000.0),
+            (-2_000_000.0, -1.0, -1_000_000.0, 0.0),
+            (f32::NAN, f32::NAN, -1_000_000.0, 0.0),
+            (f32::INFINITY, f32::INFINITY, 1_000_000.0, 1_000_000.0),
+            (7.0, 9.0, 7.0, 9.0),
+        ] {
+            let result = MotorOutput { speed, torque }.clamp_native_properties();
+            assert_eq!(result.speed, expected_speed);
+            assert_eq!(result.torque, expected_torque);
+        }
+    }
+
     #[test]
     fn original_half_turn_rule_selects_positive_rotation() {
         assert_eq!(command(&input()).speed, 360.0);

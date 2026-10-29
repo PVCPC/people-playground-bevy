@@ -7,7 +7,7 @@ Requires your own installed copy of People Playground. Original assets, extracte
 ## Current behavior
 
 - A human ragdoll imported from the installed game's prefab: 14 bodies and 13 joints.
-- Original skin texture, sprite rectangles, pivots, masses, damping, collider boxes, anchors, and joint limits loaded from a private local cache.
+- Original skin texture, sprite rectangles, pivots, masses, damping, collider boxes, contact materials, anchors, and joint limits loaded from a private local cache.
 - Mouse dragging and throwing, manual joint detachment, human/crate spawning, pause, and reset.
 - Healthy-muscle control with imported Rest, Sitting, and Flat pose targets and strength settings; upright support while grounded.
 - A limp toggle and joint-connectivity checks that disable muscles on disconnected limbs or after brain disconnection.
@@ -15,6 +15,8 @@ Requires your own installed copy of People Playground. Original assets, extracte
 - Headless engine tests with no window or desktop control.
 
 Bevy 0.20 handles rendering and Avian 0.8 handles collision and position constraints. Healthy static muscles use the recovered velocity-command calculations, applied by a sequential hinge velocity pass that co-solves anchor velocities and caps accumulated motor impulse by torque times the substep duration. The simulation uses a 50 Hz fixed update with 10 physics substeps and 16 hinge velocity iterations per substep. This replaces the experimental spring servo.
+
+Fresh caches resolve each human body's runtime physics material through its physical-properties asset, replacing the prototype coefficients. Imported contacts use geometric-mean friction and maximum restitution mixing. Different materials on colliders within one compound body are rejected rather than silently merged. Native Unity motor-property limits are also applied before storing the speed for the next command: speed is bounded to ±1,000,000 degrees/second and torque to 0–1,000,000.
 
 Living physiology, injury-dependent strength, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The velocity pass uses standard [Box2D hinge constraint equations](https://github.com/erincatto/box2d/blob/v2.4.1/src/dynamics/b2_revolute_joint.cpp); this does not identify Unity's native Box2D fork or establish equivalent trajectories. Avian contact/position solving, solver ordering, and warm starting remain differences to investigate. The imported human starts with zero joint reference angles; nonzero-reference rigs have not been validated. Human bodies currently stay awake so small muscle commands continue to run. Pose tracking can be obstructed by floor contact. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
 
@@ -50,6 +52,8 @@ Living physiology, injury-dependent strength, wounds and blood, heat and electri
 The importer resolves the prefab's sprite and texture references and writes `local-cache/`. It refuses to overwrite an existing cache. After a game update, export again and select a fresh directory with `--output`; pass that directory to the app with `--cache`.
 
 Caches prepared before muscle support still load as passive ragdolls. Prepare a fresh cache to import muscle settings and poses.
+
+Caches prepared before contact-material support retain the prototype friction and restitution and print a startup notice. Export and prepare a fresh cache in a new `--output` directory to import the material values; pass that directory with `--cache`.
 
 Generated assets, exports, recovered source, binaries, and caches must stay out of Git. The included `.gitignore` excludes them.
 

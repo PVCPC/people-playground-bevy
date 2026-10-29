@@ -43,6 +43,34 @@ def muscle_settings(components):
             "has_brain": bool(limb["HasBrain"])}
 
 
+def material_settings(body, components, guids):
+    def load(reference):
+        path = guids[reference["guid"]]
+        return documents(path.read_text(encoding="utf-8-sig"))[reference["fileID"]][1]
+
+    reference = body.get("m_Material", {"fileID": 0})
+    if not reference.get("fileID"):
+        properties = next((data["Properties"] for kind, data in components
+                           if kind == "MonoBehaviour" and "Properties" in data), None)
+        if properties is None:
+            raise ValueError("Human physical properties are missing")
+        reference = load(properties)["PhysicMaterial"]
+    if not reference.get("fileID"):
+        raise ValueError("Human physics material is missing; implicit Unity defaults are unsupported")
+    material = load(reference)
+    for kind, collider in components:
+        if kind == "BoxCollider2D" and not collider.get("m_IsTrigger", 0):
+            override = collider.get("m_Material", {"fileID": 0})
+            if override.get("fileID"):
+                other = load(override)
+                if any(other[key] != material[key] for key in ("friction", "bounciness")):
+                    raise ValueError("Different collider materials on one body are unsupported")
+    friction, restitution = float(material["friction"]), float(material["bounciness"])
+    if not math.isfinite(friction) or friction < 0 or not 0 <= restitution <= 1:
+        raise ValueError("Invalid physics material coefficients")
+    return {"friction": friction, "restitution": restitution}
+
+
 def static_poses(objects):
     person = next(data for kind, data in objects.values()
                   if kind == "MonoBehaviour" and "Poses" in data)
@@ -138,7 +166,8 @@ def prepare(game, exported, output, write):
                       "texture": texture_guid + ".png", "rect": [x, height-y-h, w, h],
                       "size": [w/sprite["m_PixelsToUnits"], h/sprite["m_PixelsToUnits"]],
                       "pivot": xy(sprite["m_Pivot"]), "layer": renderer["m_SortingOrder"],
-                      "muscle": muscle_settings(components)})
+                      "muscle": muscle_settings(components),
+                      "physics_material": material_settings(body, components, guids)})
         for kind, data in components:
             if kind != "HingeJoint2D":
                 continue

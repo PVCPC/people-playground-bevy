@@ -107,6 +107,11 @@ fn run() -> Result<(), String> {
     if rig.poses.is_empty() {
         println!("This cache has no muscles or poses; prepare a fresh cache to enable them.");
     }
+    if rig.parts.iter().any(|p| p.physics_material.is_none()) {
+        println!(
+            "This cache has prototype contact materials; prepare a fresh cache to import the game's values."
+        );
+    }
     if headless {
         return headless::test(rig, cache);
     }
@@ -258,6 +263,17 @@ fn spawn_human(
                 })
                 .collect(),
         );
+        let (friction, restitution) = part.physics_material.as_ref().map_or(
+            (Friction::new(0.5), Restitution::new(0.0)),
+            |material| {
+                (
+                    Friction::new(material.friction)
+                        .with_combine_rule(CoefficientCombine::GeometricMean),
+                    Restitution::new(material.restitution)
+                        .with_combine_rule(CoefficientCombine::Max),
+                )
+            },
+        );
         let entity = commands
             .spawn((
                 (
@@ -270,8 +286,8 @@ fn spawn_human(
                 Mass(part.mass),
                 LinearDamping(part.linear_drag),
                 AngularDamping(part.angular_drag),
-                Friction::new(0.5),
-                Restitution::new(0.0),
+                friction,
+                restitution,
                 CollisionLayers::from_bits(group, !group),
                 Position(Vec2::from_array(part.position) + offset),
                 Rotation::radians(part.angle),
