@@ -43,12 +43,16 @@ def simulation_settings(exported):
               "gravity": xy(physics["m_Gravity"]),
               "velocity_iterations": int(physics["m_VelocityIterations"]),
               "position_iterations": int(physics["m_PositionIterations"]),
-              "max_angular_correction_degrees": float(physics["m_MaxAngularCorrection"])}
+              "max_angular_correction_degrees": float(physics["m_MaxAngularCorrection"]),
+              "max_translation": float(physics["m_MaxTranslationSpeed"]),
+              "max_rotation_degrees": float(physics["m_MaxRotationSpeed"])}
     if (not math.isfinite(result["fixed_delta"]) or not 0.0001 <= result["fixed_delta"] <= 1
             or not all(math.isfinite(v) for v in result["gravity"])
             or not 1 <= result["velocity_iterations"] <= 256
             or not 1 <= result["position_iterations"] <= 256
-            or not 0 <= result["max_angular_correction_degrees"] <= 360):
+            or not 0 <= result["max_angular_correction_degrees"] <= 360
+            or not math.isfinite(result["max_translation"]) or result["max_translation"] < 0
+            or not math.isfinite(result["max_rotation_degrees"]) or result["max_rotation_degrees"] < 0):
         raise ValueError("Invalid simulation settings")
     return result
 

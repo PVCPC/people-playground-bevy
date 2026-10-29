@@ -12,14 +12,15 @@ class UnityDocumentTests(unittest.TestCase):
     def test_simulation_settings_follow_export_and_reject_invalid_values(self):
         contents = {
             "TimeManager.asset": "--- !u!5 &1\nTimeManager:\n  Fixed Timestep: 0.01\n",
-            "Physics2DSettings.asset": "--- !u!19 &1\nPhysics2DSettings:\n  m_Gravity: {x: 1, y: -4}\n  m_VelocityIterations: 12\n  m_PositionIterations: 8\n  m_MaxAngularCorrection: 6\n",
+            "Physics2DSettings.asset": "--- !u!19 &1\nPhysics2DSettings:\n  m_Gravity: {x: 1, y: -4}\n  m_VelocityIterations: 12\n  m_PositionIterations: 8\n  m_MaxAngularCorrection: 6\n  m_MaxTranslationSpeed: 50\n  m_MaxRotationSpeed: 180\n",
         }
         with patch.object(Path, "read_text", autospec=True,
                           side_effect=lambda path, **kwargs: contents[path.name]):
             self.assertEqual(module.simulation_settings(Path("export")),
                              {"fixed_delta": 0.01, "gravity": [1.0, -4.0],
                               "velocity_iterations": 12, "position_iterations": 8,
-                              "max_angular_correction_degrees": 6.0})
+                              "max_angular_correction_degrees": 6.0,
+                              "max_translation": 50.0, "max_rotation_degrees": 180.0})
             contents["Physics2DSettings.asset"] = contents["Physics2DSettings.asset"].replace(
                 "m_PositionIterations: 8", "m_PositionIterations: 0")
             with self.assertRaises(ValueError):

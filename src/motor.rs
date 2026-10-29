@@ -1,7 +1,7 @@
 //! Healthy static-pose commands and torque-limited hinge velocity constraints.
 use avian2d::{
     dynamics::{
-        integrator::IntegrationSystems,
+        integrator::{CustomPositionIntegration, CustomVelocityIntegration, IntegrationSystems},
         solver::{
             schedule::SubstepSolverSystems,
             solver_body::{SolverBodies, SolverBodyIndex},
@@ -22,6 +22,20 @@ impl Plugin for PortPhysicsPlugin {
                 PhysicsPlugins::default()
                     .build()
                     .disable::<XpbdSolverPlugin>(),
+            )
+            .register_required_components::<RigidBody, CustomVelocityIntegration>()
+            .register_required_components::<RigidBody, CustomPositionIntegration>()
+            .add_systems(
+                SubstepSchedule,
+                (
+                    crate::integration::integrate_velocities
+                        .in_set(IntegrationSystems::Velocity)
+                        .after(ForceSystems::ApplyLocalAcceleration)
+                        .before(avian2d::dynamics::integrator::integrate_velocities),
+                    crate::integration::integrate_positions
+                        .in_set(IntegrationSystems::Position)
+                        .before(avian2d::dynamics::integrator::integrate_positions),
+                ),
             )
             .add_systems(
                 SubstepSchedule,

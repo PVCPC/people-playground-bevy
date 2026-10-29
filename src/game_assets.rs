@@ -110,12 +110,15 @@ impl Joint {
 }
 
 #[derive(Resource, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct SimulationSettings {
     pub fixed_delta: f64,
     pub gravity: [f32; 2],
     pub velocity_iterations: u32,
     pub position_iterations: u32,
     pub max_angular_correction_degrees: f32,
+    pub max_translation: f32,
+    pub max_rotation_degrees: f32,
 }
 
 impl Default for SimulationSettings {
@@ -126,6 +129,8 @@ impl Default for SimulationSettings {
             velocity_iterations: 16,
             position_iterations: 16,
             max_angular_correction_degrees: 8.0,
+            max_translation: 100.0,
+            max_rotation_degrees: 360.0,
         }
     }
 }
@@ -200,6 +205,10 @@ impl HumanRig {
             || !(1..=256).contains(&simulation.position_iterations)
             || !simulation.max_angular_correction_degrees.is_finite()
             || !(0.0..=360.0).contains(&simulation.max_angular_correction_degrees)
+            || !simulation.max_translation.is_finite()
+            || simulation.max_translation < 0.0
+            || !simulation.max_rotation_degrees.is_finite()
+            || simulation.max_rotation_degrees < 0.0
         {
             return Err("Invalid simulation settings".into());
         }

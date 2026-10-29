@@ -2,6 +2,7 @@ mod desktop;
 mod game_assets;
 mod headless;
 mod hinge;
+mod integration;
 mod living;
 mod motor;
 
@@ -107,7 +108,8 @@ fn run() -> Result<(), String> {
         return motor::compare_reference(&probe);
     }
     if let Some(probe) = native_probe {
-        return hinge::compare_reference(&probe);
+        hinge::compare_reference(&probe)?;
+        return integration::compare_reference(&probe);
     }
     println!("Installed game verified: {}", game.display());
     println!(
