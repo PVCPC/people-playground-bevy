@@ -1,0 +1,1011 @@
+//! b2World as UnityPlayer.dll compiles it with m_UseMultithreading off: Unity's contact manager (TOI/non-TOI
+//! contact arrays), island solve and sleep, using the game's Physics2DSettings. Native linked lists are Vecs
+//! whose head is the LAST element, so `.iter().rev()` walks them in native order.
+
+use super::broadphase::{Aabb, BroadPhase};
+use super::collide::*;
+use super::distance::{distance, DistanceProxy, SimplexCache};
+use super::math::{Rot, Transform, Vec2};
+use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
+use super::solver::*;
+use super::toi::Sweep;
+
+const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
+/// Physics2DSettings (m_MaxTranslationSpeed etc.) as PhysicsManager2D copies them into the b2_ globals.
+const MAX_TRANSLATION: f32 = 100.0;
+const MAX_TRANSLATION_SQUARED: f32 = MAX_TRANSLATION * MAX_TRANSLATION;
+const MAX_ROTATION: f32 = 360.0 * DEG_TO_RAD;
+const MAX_ROTATION_SQUARED: f32 = MAX_ROTATION * MAX_ROTATION;
+const TIME_TO_SLEEP: f32 = 0.5;
+const LINEAR_SLEEP_TOLERANCE: f32 = 0.01;
+const ANGULAR_SLEEP_TOLERANCE: f32 = 2.0 * DEG_TO_RAD;
+
+pub const BODY_ISLAND: u16 = 0x1;
+pub const BODY_AWAKE: u16 = 0x2;
+pub const BODY_AUTO_SLEEP: u16 = 0x4;
+pub const BODY_BULLET: u16 = 0x8;
+pub const BODY_FIXED_ROTATION: u16 = 0x10;
+pub const BODY_ACTIVE: u16 = 0x20;
+/// Unity: created asleep this step, so contact creation does not wake it. Cleared by every Solve.
+pub const BODY_STARTED_ASLEEP: u16 = 0x100;
+
+pub const CONTACT_ISLAND: u32 = 0x1;
+pub const CONTACT_TOUCHING: u32 = 0x2;
+pub const CONTACT_ENABLED: u32 = 0x4;
+pub const CONTACT_FILTER: u32 = 0x8;
+/// Unity: the user disabled the contact, so Update does not re-enable it.
+pub const CONTACT_KEEP_DISABLED: u32 = 0x40;
+/// Unity: a non-sensor contact with a bullet body, kept in the TOI contact array.
+pub const CONTACT_CONTINUOUS: u32 = 0x80;
+
+const WORLD_NEW_FIXTURE: u32 = 0x1;
+const WORLD_LOCKED: u32 = 0x2;
+const WORLD_CLEAR_FORCES: u32 = 0x4;
+
+pub type BodyId = usize;
+pub type FixtureId = usize;
+pub type ContactId = usize;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum BodyType {
+    #[default]
+    Static,
+    Kinematic,
+    Dynamic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shape {
+    Circle(Circle),
+    Polygon(Polygon),
+}
+
+impl Shape {
+    /// b2Shape::Type: circle 0, edge 1, polygon 2, chain 3, capsule 4.
+    fn type_index(&self) -> usize {
+        match self {
+            Shape::Circle(_) => 0,
+            Shape::Polygon(_) => 2,
+        }
+    }
+
+    pub fn radius(&self) -> f32 {
+        match self {
+            Shape::Circle(c) => c.radius,
+            Shape::Polygon(p) => p.radius,
+        }
+    }
+
+    /// b2PolygonShape::ComputeAABB (180bb2bc0) and b2CircleShape::ComputeAABB (180bb2ac0).
+    fn compute_aabb(&self, xf: &Transform) -> Aabb {
+        match self {
+            Shape::Circle(c) => {
+                let p = xf.apply(c.p);
+                Aabb { lower: Vec2::new(p.x - c.radius, p.y - c.radius), upper: Vec2::new(c.radius + p.x, c.radius + p.y) }
+            }
+            Shape::Polygon(polygon) => {
+                let first = xf.apply(polygon.vertices[0]);
+                let (mut lower, mut upper) = (first, first);
+                for &v in &polygon.vertices[1..polygon.count] {
+                    let v = xf.apply(v);
+                    if v.x <= lower.x { lower.x = v.x }
+                    if upper.x <= v.x { upper.x = v.x }
+                    if v.y <= lower.y { lower.y = v.y }
+                    if upper.y <= v.y { upper.y = v.y }
+                }
+                let r = polygon.radius;
+                Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(upper.x + r, upper.y + r) }
+            }
+        }
+    }
+
+    fn compute_mass(&self, density: f32) -> MassData {
+        match self {
+            // ponytail: Box2D 2.3's b2CircleShape::ComputeMass, not yet compared against the DLL.
+            Shape::Circle(c) => {
+                let area = std::f32::consts::PI * c.radius * c.radius;
+                let mass = density * area;
+                MassData { mass, center: c.p, inertia: mass * (0.5 * c.radius * c.radius + (c.p.x * c.p.x + c.p.y * c.p.y)), area }
+            }
+            Shape::Polygon(p) => p.compute_mass(density),
+        }
+    }
+
+    fn proxy(&self) -> DistanceProxy<'_> {
+        match self {
+            Shape::Circle(c) => DistanceProxy { vertices: std::slice::from_ref(&c.p), radius: c.radius },
+            Shape::Polygon(p) => DistanceProxy { vertices: &p.vertices[..p.count], radius: p.radius },
+        }
+    }
+}
+
+/// The Rigidbody2D fields b2Body::ResetMassData (180bb9e80) reads through m_userData.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigidbodyMass {
+    pub use_auto_mass: bool,
+    pub mass: f32,
+    pub inertia: Option<f32>,
+    pub center_of_mass: Option<Vec2>,
+}
+
+impl Default for RigidbodyMass {
+    fn default() -> Self {
+        Self { use_auto_mass: false, mass: 1.0, inertia: None, center_of_mass: None }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BodyDef {
+    pub kind: BodyType,
+    pub position: Vec2,
+    pub angle: f32,
+    pub linear_velocity: Vec2,
+    pub angular_velocity: f32,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub allow_sleep: bool,
+    pub awake: bool,
+    pub fixed_rotation: bool,
+    pub bullet: bool,
+    pub active: bool,
+    pub gravity_scale: f32,
+    pub rigidbody: RigidbodyMass,
+}
+
+impl Default for BodyDef {
+    fn default() -> Self {
+        Self {
+            kind: BodyType::Static,
+            position: Vec2::ZERO,
+            angle: 0.0,
+            linear_velocity: Vec2::ZERO,
+            angular_velocity: 0.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            allow_sleep: true,
+            awake: true,
+            fixed_rotation: false,
+            bullet: false,
+            active: true,
+            gravity_scale: 1.0,
+            rigidbody: RigidbodyMass::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Body {
+    pub kind: BodyType,
+    pub flags: u16,
+    island_index: i32,
+    pub xf: Transform,
+    pub sweep: Sweep,
+    pub linear_velocity: Vec2,
+    pub angular_velocity: f32,
+    pub force: Vec2,
+    pub torque: f32,
+    /// Fixture list, head last.
+    pub fixtures: Vec<FixtureId>,
+    /// Contact edges (other body, contact), head last.
+    contacts: Vec<(BodyId, ContactId)>,
+    pub mass: f32,
+    pub inv_mass: f32,
+    pub axis: Vec2,
+    pub i: f32,
+    pub inv_i: f32,
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    pub sleep_time: f32,
+    pub rigidbody: RigidbodyMass,
+}
+
+impl Body {
+    fn active_and_moving(&self) -> bool {
+        self.flags & BODY_AWAKE != 0 && self.kind != BodyType::Static
+    }
+
+    /// The wake Contact::Update and ContactManager::Destroy inline: static bodies are put to sleep instead.
+    fn wake(&mut self) {
+        self.sleep_time = 0.0;
+        if self.kind == BodyType::Static {
+            self.flags &= !BODY_AWAKE;
+            self.linear_velocity = Vec2::ZERO;
+            self.angular_velocity = 0.0;
+            self.force = Vec2::ZERO;
+            self.torque = 0.0;
+        } else {
+            self.flags |= BODY_AWAKE;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filter {
+    pub category_bits: u16,
+    pub mask_bits: u16,
+    pub group_index: i16,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Self { category_bits: 1, mask_bits: 0xffff, group_index: 0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FixtureDef {
+    pub shape: Shape,
+    pub friction: f32,
+    pub restitution: f32,
+    pub density: f32,
+    pub is_sensor: bool,
+    pub filter: Filter,
+}
+
+#[derive(Clone, Debug)]
+pub struct Fixture {
+    pub body: BodyId,
+    pub shape: Shape,
+    pub density: f32,
+    pub friction: f32,
+    pub restitution: f32,
+    pub is_sensor: bool,
+    pub filter: Filter,
+    /// (aabb, proxy id) per shape child; circles and polygons have one.
+    proxies: Vec<(Aabb, i32)>,
+    pub mass_data: MassData,
+}
+
+#[derive(Clone, Debug)]
+pub struct Contact {
+    pub flags: u32,
+    pub fixture_a: FixtureId,
+    pub fixture_b: FixtureId,
+    pub child_a: usize,
+    pub child_b: usize,
+    island_index_a: usize,
+    island_index_b: usize,
+    pub manifold: Manifold,
+    pub radius_a: f32,
+    pub radius_b: f32,
+    pub toi_count: i32,
+    pub toi: f32,
+    pub friction: f32,
+    pub restitution: f32,
+    pub tangent_speed: f32,
+    manager_index: usize,
+}
+
+pub struct World {
+    pub bodies: Vec<Option<Body>>,
+    pub fixtures: Vec<Option<Fixture>>,
+    pub contacts: Vec<Option<Contact>>,
+    free_contacts: Vec<ContactId>,
+    /// Body list, head last.
+    body_list: Vec<BodyId>,
+    non_static_bodies: Vec<BodyId>,
+    static_bodies: Vec<BodyId>,
+    /// Contact list, head last.
+    contact_list: Vec<ContactId>,
+    contacts_non_toi: Vec<ContactId>,
+    contacts_toi: Vec<ContactId>,
+    pub broad_phase: BroadPhase,
+    flags: u32,
+    pub gravity: Vec2,
+    pub allow_sleep: bool,
+    pub warm_starting: bool,
+    pub continuous_physics: bool,
+    inv_dt0: f32,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self::new(Vec2::new(0.0, -9.81))
+    }
+}
+
+impl World {
+    pub fn new(gravity: Vec2) -> Self {
+        Self {
+            bodies: Vec::new(),
+            fixtures: Vec::new(),
+            contacts: Vec::new(),
+            free_contacts: Vec::new(),
+            body_list: Vec::new(),
+            non_static_bodies: Vec::new(),
+            static_bodies: Vec::new(),
+            contact_list: Vec::new(),
+            contacts_non_toi: Vec::new(),
+            contacts_toi: Vec::new(),
+            broad_phase: BroadPhase::default(),
+            flags: WORLD_CLEAR_FORCES,
+            gravity,
+            allow_sleep: true,
+            warm_starting: true,
+            continuous_physics: true,
+            inv_dt0: 0.0,
+        }
+    }
+
+    pub fn body(&self, id: BodyId) -> &Body {
+        self.bodies[id].as_ref().unwrap()
+    }
+
+    pub fn body_mut(&mut self, id: BodyId) -> &mut Body {
+        self.bodies[id].as_mut().unwrap()
+    }
+
+    fn fixture(&self, id: FixtureId) -> &Fixture {
+        self.fixtures[id].as_ref().unwrap()
+    }
+
+    fn contact(&self, id: ContactId) -> &Contact {
+        self.contacts[id].as_ref().unwrap()
+    }
+
+    fn contact_mut(&mut self, id: ContactId) -> &mut Contact {
+        self.contacts[id].as_mut().unwrap()
+    }
+
+    /// b2World::CreateBody (180bb8ac0).
+    pub fn create_body(&mut self, def: &BodyDef) -> BodyId {
+        let mut flags = if def.active { BODY_ACTIVE } else { 0 };
+        if def.bullet { flags |= BODY_BULLET }
+        if def.fixed_rotation { flags |= BODY_FIXED_ROTATION }
+        if def.allow_sleep { flags |= BODY_AUTO_SLEEP }
+        flags |= if def.awake { BODY_AWAKE } else { BODY_STARTED_ASLEEP };
+        let mass = if def.kind == BodyType::Dynamic { 1.0 } else { 0.0 };
+        let body = Body {
+            kind: def.kind,
+            flags,
+            island_index: -1,
+            xf: Transform { p: def.position, q: Rot::new(def.angle) },
+            sweep: Sweep { local_center: Vec2::ZERO, c0: def.position, c: def.position, a0: def.angle, a: def.angle, alpha0: 0.0 },
+            linear_velocity: def.linear_velocity,
+            angular_velocity: def.angular_velocity,
+            force: Vec2::ZERO,
+            torque: 0.0,
+            fixtures: Vec::new(),
+            contacts: Vec::new(),
+            mass,
+            inv_mass: mass,
+            axis: Vec2::new(1.0, 1.0),
+            i: 0.0,
+            inv_i: 0.0,
+            linear_damping: def.linear_damping,
+            angular_damping: def.angular_damping,
+            gravity_scale: def.gravity_scale,
+            sleep_time: 0.0,
+            rigidbody: def.rigidbody,
+        };
+        let id = self.bodies.len();
+        self.bodies.push(Some(body));
+        self.body_list.push(id);
+        if def.kind == BodyType::Static { self.static_bodies.push(id) } else { self.non_static_bodies.push(id) }
+        id
+    }
+
+    /// b2Body::CreateFixture (180bb8d60) with Fixture::CreateProxies (180bb9040).
+    pub fn create_fixture(&mut self, body_id: BodyId, def: &FixtureDef, reset_mass: bool) -> FixtureId {
+        let id = self.fixtures.len();
+        let body = self.body(body_id);
+        let proxies = if body.flags & BODY_ACTIVE != 0 {
+            let aabb = def.shape.compute_aabb(&body.xf);
+            vec![(aabb, self.broad_phase.create_proxy(&aabb, id))]
+        } else {
+            Vec::new()
+        };
+        self.fixtures.push(Some(Fixture {
+            body: body_id,
+            shape: def.shape,
+            density: def.density,
+            friction: def.friction,
+            restitution: def.restitution,
+            is_sensor: def.is_sensor,
+            filter: def.filter,
+            proxies,
+            mass_data: MassData::default(),
+        }));
+        self.body_mut(body_id).fixtures.push(id);
+        if reset_mass && 0.0 < def.density {
+            self.reset_mass_data(body_id);
+        }
+        self.flags |= WORLD_NEW_FIXTURE;
+        id
+    }
+
+    /// b2Body::ResetMassData (180bb9e80): Unity takes the mass, inertia and centre from the Rigidbody2D.
+    pub fn reset_mass_data(&mut self, body_id: BodyId) {
+        let masses: Vec<(FixtureId, MassData)> = self
+            .body(body_id)
+            .fixtures
+            .iter()
+            .rev()
+            .map(|&f| (f, self.fixture(f)))
+            .filter(|(_, f)| f.density != 0.0 && !f.is_sensor)
+            .map(|(id, f)| (id, f.shape.compute_mass(f.density)))
+            .collect();
+        for &(f, md) in &masses {
+            self.fixtures[f].as_mut().unwrap().mass_data = md;
+        }
+        let b = self.body_mut(body_id);
+        b.mass = 0.0;
+        b.inv_mass = 0.0;
+        b.i = 0.0;
+        b.inv_i = 0.0;
+        b.sweep.local_center = Vec2::ZERO;
+        if b.kind < BodyType::Dynamic {
+            b.sweep.c0 = b.xf.p;
+            b.sweep.c = b.xf.p;
+            b.sweep.a0 = b.sweep.a;
+            return;
+        }
+        let mut center = Vec2::ZERO;
+        for (_, md) in &masses {
+            b.mass = md.mass + b.mass;
+            center.x = center.x + md.center.x * md.mass;
+            center.y = center.y + md.center.y * md.mass;
+            b.i = md.inertia + b.i;
+        }
+        if b.mass <= 0.0 {
+            b.mass = 1.0;
+        } else {
+            let inv = 1.0 / b.mass;
+            center = Vec2::new(center.x * inv, center.y * inv);
+        }
+        if b.rigidbody.use_auto_mass {
+            let lo = f32::from_bits(0x38d1_b717);
+            let hi = f32::from_bits(0x4974_2400);
+            b.mass = if lo <= b.mass && b.mass <= hi { b.mass } else if lo <= b.mass { hi } else { lo };
+            b.rigidbody.mass = b.mass;
+        }
+        if b.flags & BODY_FIXED_ROTATION == 0 {
+            if b.i <= 0.0 {
+                b.i = b.rigidbody.inertia.unwrap_or(1.0);
+            } else {
+                let computed = b.mass;
+                b.i = b.i - (center.x * center.x + center.y * center.y) * computed;
+                if b.i < f32::EPSILON {
+                    b.i = f32::EPSILON;
+                }
+                b.i = match b.rigidbody.inertia {
+                    Some(i) => i,
+                    None => (b.rigidbody.mass / computed) * b.i,
+                };
+            }
+            b.mass = b.rigidbody.mass;
+            b.inv_i = 1.0 / b.i;
+        } else {
+            b.mass = b.rigidbody.mass;
+            b.i = 0.0;
+            b.inv_i = 0.0;
+        }
+        b.inv_mass = 1.0 / b.mass;
+        if let Some(c) = b.rigidbody.center_of_mass {
+            center = c;
+        }
+        let old = b.sweep.c;
+        b.sweep.local_center = center;
+        let c = b.xf.apply(center);
+        b.sweep.c0 = c;
+        b.sweep.c = c;
+        let w = b.angular_velocity;
+        b.linear_velocity.y = (c.x - old.x) * w + b.linear_velocity.y;
+        b.linear_velocity.x = -((c.y - old.y) * w) + b.linear_velocity.x;
+    }
+
+    /// b2World::Step (180bbc560) on the single-threaded path.
+    pub fn step(&mut self, dt: f32, velocity_iterations: i32, position_iterations: i32) {
+        if self.flags & WORLD_NEW_FIXTURE != 0 {
+            self.find_new_contacts();
+            self.flags &= !WORLD_NEW_FIXTURE;
+        }
+        self.flags |= WORLD_LOCKED;
+        let inv_dt = if dt <= 0.0 { 0.0 } else { 1.0 / dt };
+        let step = TimeStep { dt, inv_dt, dt_ratio: dt * self.inv_dt0, velocity_iterations, position_iterations, warm_starting: self.warm_starting };
+        self.collide(false);
+        self.collide(true);
+        if 0.0 < dt {
+            self.solve(&step);
+        }
+        if self.continuous_physics && 0.0 < dt {
+            // ponytail: b2World::SolveTOI (180bbb7a0) not ported yet; bullets tunnel.
+        }
+        if 0.0 < dt {
+            self.inv_dt0 = inv_dt;
+        }
+        if self.flags & WORLD_CLEAR_FORCES != 0 {
+            for &id in self.body_list.iter().rev() {
+                let b = self.bodies[id].as_mut().unwrap();
+                b.force = Vec2::ZERO;
+                b.torque = 0.0;
+            }
+        }
+        // Unity keeps sensor contacts of moving bodies current.
+        let sensors: Vec<ContactId> = self
+            .contact_list
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&c| {
+                let c = self.contact(c);
+                let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+                c.flags & CONTACT_ENABLED != 0
+                    && (self.body(fa.body).active_and_moving() || self.body(fb.body).active_and_moving())
+                    && (fa.is_sensor || fb.is_sensor)
+            })
+            .collect();
+        for c in sensors {
+            self.update_contact(c);
+        }
+        self.flags &= !WORLD_LOCKED;
+    }
+
+    /// UpdatePairs (180bb7af0) with b2ContactManager::AddPair inlined.
+    fn find_new_contacts(&mut self) {
+        let mut pairs = Vec::new();
+        self.broad_phase.update_pairs(|a, b| pairs.push((a, b)));
+        for (fa, fb) in pairs {
+            self.add_pair(fa, fb);
+        }
+    }
+
+    fn add_pair(&mut self, fa: FixtureId, fb: FixtureId) {
+        let (body_a, body_b) = (self.fixture(fa).body, self.fixture(fb).body);
+        if body_a == body_b {
+            return;
+        }
+        for &(other, c) in self.body(body_b).contacts.iter().rev() {
+            if other == body_a {
+                let c = self.contact(c);
+                if (c.fixture_a == fa && c.fixture_b == fb) || (c.fixture_a == fb && c.fixture_b == fa) {
+                    return;
+                }
+            }
+        }
+        if self.body(body_b).kind == BodyType::Static && self.body(body_a).kind == BodyType::Static {
+            return;
+        }
+        // ponytail: joints' collideConnected and Unity's layer contact filter are not modelled yet.
+        if !should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) {
+            return;
+        }
+        let c = self.create_contact(fa, fb);
+        self.on_contact_create(c);
+    }
+
+    /// b2Contact::Create (180bbcce0) and the b2Contact constructor (180bbc9f0); polygon-circle puts the polygon first.
+    fn create_contact(&mut self, fa: FixtureId, fb: FixtureId) -> ContactId {
+        let (fa, fb) = if self.fixture(fa).shape.type_index() < self.fixture(fb).shape.type_index() { (fb, fa) } else { (fa, fb) };
+        let (a, b) = (self.fixture(fa), self.fixture(fb));
+        let contact = Contact {
+            flags: CONTACT_ENABLED,
+            fixture_a: fa,
+            fixture_b: fb,
+            child_a: 0,
+            child_b: 0,
+            island_index_a: usize::MAX,
+            island_index_b: usize::MAX,
+            manifold: Manifold::default(),
+            radius_a: a.shape.radius(),
+            radius_b: b.shape.radius(),
+            toi_count: 0,
+            toi: 0.0,
+            friction: (a.friction * b.friction).sqrt(),
+            restitution: if a.restitution <= b.restitution { b.restitution } else { a.restitution },
+            tangent_speed: 0.0,
+            manager_index: 0,
+        };
+        match self.free_contacts.pop() {
+            Some(id) => {
+                self.contacts[id] = Some(contact);
+                id
+            }
+            None => {
+                self.contacts.push(Some(contact));
+                self.contacts.len() - 1
+            }
+        }
+    }
+
+    /// b2ContactManager::OnContactCreate (180bb98f0).
+    fn on_contact_create(&mut self, id: ContactId) {
+        let c = self.contact(id);
+        let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+        let (sensor_a, sensor_b, body_a, body_b) = (fa.is_sensor, fb.is_sensor, fa.body, fb.body);
+        let bullet = (self.body(body_a).flags | self.body(body_b).flags) & BODY_BULLET != 0;
+        let continuous = !sensor_a && !sensor_b && bullet;
+        let list = if continuous { &mut self.contacts_toi } else { &mut self.contacts_non_toi };
+        let index = list.len();
+        list.push(id);
+        let c = self.contact_mut(id);
+        if continuous {
+            c.flags |= CONTACT_CONTINUOUS;
+        }
+        c.manager_index = index;
+        self.contact_list.push(id);
+        self.body_mut(body_a).contacts.push((body_b, id));
+        self.body_mut(body_b).contacts.push((body_a, id));
+        let static_a = self.body(body_a).kind == BodyType::Static;
+        let static_b = self.body(body_b).kind == BodyType::Static;
+        let wake = (!sensor_a && !sensor_b) || (sensor_a && static_a) || (sensor_b && static_b);
+        if wake {
+            for b in [body_a, body_b] {
+                let b = self.body_mut(b);
+                if b.flags & BODY_STARTED_ASLEEP == 0 {
+                    b.wake();
+                }
+            }
+        }
+    }
+
+    /// b2ContactManager::Destroy (180bb90e0).
+    fn destroy_contact(&mut self, id: ContactId) {
+        let c = self.contacts[id].take().unwrap();
+        self.free_contacts.push(id);
+        let pos = self.contact_list.iter().position(|&x| x == id).unwrap();
+        self.contact_list.remove(pos);
+        let list = if c.flags & CONTACT_CONTINUOUS != 0 { &mut self.contacts_toi } else { &mut self.contacts_non_toi };
+        let last = *list.last().unwrap();
+        list.swap_remove(c.manager_index);
+        if last != id {
+            self.contacts[last].as_mut().unwrap().manager_index = c.manager_index;
+        }
+        let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+        let (body_a, body_b, sensors) = (fa.body, fb.body, fa.is_sensor || fb.is_sensor);
+        for b in [body_a, body_b] {
+            let edges = &mut self.body_mut(b).contacts;
+            let pos = edges.iter().position(|&(_, x)| x == id).unwrap();
+            edges.remove(pos);
+        }
+        if 0 < c.manifold.point_count && !sensors {
+            self.body_mut(body_a).wake();
+            self.body_mut(body_b).wake();
+        }
+    }
+
+    /// b2ContactManager::Collide (180bb88c0) over one of Unity's contact arrays.
+    fn collide(&mut self, toi: bool) {
+        let mut i = 0;
+        while i < if toi { self.contacts_toi.len() } else { self.contacts_non_toi.len() } {
+            let id = if toi { self.contacts_toi[i] } else { self.contacts_non_toi[i] };
+            let c = self.contact(id);
+            let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+            let (body_a, body_b) = (fa.body, fb.body);
+            if c.flags & CONTACT_FILTER != 0 {
+                let both_static = self.body(body_a).kind == BodyType::Static && self.body(body_b).kind == BodyType::Static;
+                if both_static || !should_collide(&fa.filter, &fb.filter) {
+                    self.destroy_contact(id);
+                    continue;
+                }
+                self.contact_mut(id).flags &= !CONTACT_FILTER;
+            }
+            if !self.body(body_a).active_and_moving() && !self.body(body_b).active_and_moving() {
+                i += 1;
+                continue;
+            }
+            let c = self.contact(id);
+            let a = &self.broad_phase.tree.nodes[self.fixture(c.fixture_a).proxies[c.child_a].1 as usize].aabb;
+            let b = &self.broad_phase.tree.nodes[self.fixture(c.fixture_b).proxies[c.child_b].1 as usize].aabb;
+            let apart = 0.0 < b.lower.x - a.upper.x || 0.0 < b.lower.y - a.upper.y || 0.0 < a.lower.x - b.upper.x || 0.0 < a.lower.y - b.upper.y;
+            if apart {
+                self.destroy_contact(id);
+                continue;
+            }
+            self.update_contact(id);
+            i += 1;
+        }
+    }
+
+    /// b2Contact::Update (180bbd6e0) without a listener.
+    fn update_contact(&mut self, id: ContactId) {
+        let c = self.contact(id);
+        let old = c.manifold;
+        let was_touching = c.flags & CONTACT_TOUCHING != 0;
+        let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+        let (body_a, body_b) = (fa.body, fb.body);
+        let (xf_a, xf_b) = (self.body(body_a).xf, self.body(body_b).xf);
+        let sensor = fa.is_sensor || fb.is_sensor;
+        let (shape_a, shape_b) = (fa.shape, fb.shape);
+        let c = self.contact_mut(id);
+        if c.flags & CONTACT_KEEP_DISABLED == 0 {
+            c.flags |= CONTACT_ENABLED;
+        }
+        let touching = if sensor {
+            c.manifold.point_count = 0;
+            test_overlap(&shape_a, &xf_a, &shape_b, &xf_b)
+        } else {
+            c.radius_a = shape_a.radius();
+            c.radius_b = shape_b.radius();
+            evaluate(&mut c.manifold, &shape_a, &xf_a, &shape_b, &xf_b);
+            for point in &mut c.manifold.points[..c.manifold.point_count] {
+                point.normal_impulse = 0.0;
+                point.tangent_impulse = 0.0;
+                if let Some(o) = old.points[..old.point_count].iter().find(|o| o.id.key() == point.id.key()) {
+                    point.normal_impulse = o.normal_impulse;
+                    point.tangent_impulse = o.tangent_impulse;
+                }
+            }
+            let touching = 0 < c.manifold.point_count;
+            if touching != was_touching {
+                self.body_mut(body_a).wake();
+                self.body_mut(body_b).wake();
+            }
+            touching
+        };
+        let c = self.contact_mut(id);
+        if touching { c.flags |= CONTACT_TOUCHING } else { c.flags &= !CONTACT_TOUCHING }
+    }
+
+    /// b2World::Solve (180bbae90): Unity seeds islands from m_nonStaticBodies and skips kinematic-only contacts.
+    fn solve(&mut self, step: &TimeStep) {
+        for &id in &self.body_list {
+            self.bodies[id].as_mut().unwrap().flags &= 0xfefe;
+        }
+        for &id in &self.contact_list {
+            self.contacts[id].as_mut().unwrap().flags &= !CONTACT_ISLAND;
+        }
+        for seed_index in 0..self.non_static_bodies.len() {
+            let seed = self.non_static_bodies[seed_index];
+            let flags = self.body(seed).flags;
+            if flags & BODY_ISLAND != 0 || flags & (BODY_AWAKE | BODY_ACTIVE) != BODY_AWAKE | BODY_ACTIVE {
+                continue;
+            }
+            let mut island_bodies: Vec<BodyId> = Vec::new();
+            let mut island_contacts: Vec<ContactId> = Vec::new();
+            let mut stack = vec![seed];
+            self.body_mut(seed).flags |= BODY_ISLAND;
+            while let Some(b) = stack.pop() {
+                self.body_mut(b).island_index = island_bodies.len() as i32;
+                island_bodies.push(b);
+                if self.body(b).kind == BodyType::Static {
+                    continue;
+                }
+                self.body_mut(b).flags |= BODY_AWAKE;
+                let edges: Vec<(BodyId, ContactId)> = self.body(b).contacts.iter().rev().copied().collect();
+                for (other, cid) in edges {
+                    let c = self.contact(cid);
+                    let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+                    let joins = c.flags & CONTACT_ISLAND == 0
+                        && c.flags & (CONTACT_TOUCHING | CONTACT_ENABLED) == CONTACT_TOUCHING | CONTACT_ENABLED
+                        && !fa.is_sensor
+                        && !fb.is_sensor
+                        && (self.body(fa.body).kind == BodyType::Dynamic || self.body(fb.body).kind == BodyType::Dynamic);
+                    if !joins {
+                        continue;
+                    }
+                    island_contacts.push(cid);
+                    self.contact_mut(cid).flags |= CONTACT_ISLAND;
+                    if self.body(other).flags & BODY_ISLAND == 0 {
+                        stack.push(other);
+                        self.body_mut(other).flags |= BODY_ISLAND;
+                    }
+                }
+                // ponytail: joint edges are not walked yet; jointed bodies only join through contacts.
+            }
+            for &cid in &island_contacts {
+                let c = self.contact(cid);
+                let a = self.body(self.fixture(c.fixture_a).body).island_index as usize;
+                let b = self.body(self.fixture(c.fixture_b).body).island_index as usize;
+                let c = self.contact_mut(cid);
+                c.island_index_a = a;
+                c.island_index_b = b;
+            }
+            for &b in &island_bodies {
+                self.body_mut(b).island_index = -1;
+            }
+            self.solve_island(&island_bodies, &island_contacts, step);
+            for &b in &island_bodies {
+                let b = self.body_mut(b);
+                if b.kind == BodyType::Static {
+                    b.flags &= !BODY_ISLAND;
+                }
+            }
+        }
+        for i in 0..self.non_static_bodies.len() {
+            let id = self.non_static_bodies[i];
+            if self.body(id).flags & BODY_ISLAND != 0 {
+                self.synchronize_fixtures(id);
+            }
+        }
+        self.find_new_contacts();
+    }
+
+    /// b2Island::Solve (180bba770) without joints.
+    fn solve_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], step: &TimeStep) {
+        let h = step.dt;
+        let gravity = self.gravity;
+        let mut positions = Vec::with_capacity(island_bodies.len());
+        let mut velocities = Vec::with_capacity(island_bodies.len());
+        for &id in island_bodies {
+            let b = self.body_mut(id);
+            b.sweep.c0 = b.sweep.c;
+            b.sweep.a0 = b.sweep.a;
+            let (mut v, mut w) = (b.linear_velocity, b.angular_velocity);
+            if b.kind == BodyType::Dynamic {
+                let damping = 1.0 / (h * b.linear_damping + 1.0);
+                v.x = (v.x + (b.gravity_scale * gravity.x + b.inv_mass * b.force.x) * h) * damping;
+                v.y = (v.y + (b.gravity_scale * gravity.y + b.inv_mass * b.force.y) * h) * damping;
+                w = (h * b.inv_i * b.torque + w) * (1.0 / (h * b.angular_damping + 1.0));
+            }
+            positions.push(Position { c: b.sweep.c, a: b.sweep.a });
+            velocities.push(Velocity { v: Vec2::new(v.x * b.axis.x, v.y * b.axis.y), w });
+        }
+        let solver_contacts: Vec<SolverContact> = island_contacts
+            .iter()
+            .map(|&cid| {
+                let c = self.contact(cid);
+                let solver_body = |f: FixtureId| {
+                    let b = self.body(self.fixture(f).body);
+                    SolverBody { inv_mass: b.inv_mass, axis: b.axis, inv_i: b.inv_i, local_center: b.sweep.local_center }
+                };
+                SolverContact {
+                    manifold: c.manifold,
+                    radius_a: c.radius_a,
+                    radius_b: c.radius_b,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                    tangent_speed: c.tangent_speed,
+                    index_a: c.island_index_a,
+                    index_b: c.island_index_b,
+                    body_a: solver_body(c.fixture_a),
+                    body_b: solver_body(c.fixture_b),
+                }
+            })
+            .collect();
+        let mut solver = ContactSolver::new(*step, &solver_contacts);
+        solver.initialize_velocity_constraints(&positions, &velocities);
+        if step.warm_starting {
+            solver.warm_start(&mut velocities);
+        }
+        for _ in 0..step.velocity_iterations {
+            solver.solve_velocity_constraints(&mut velocities);
+        }
+        let mut manifolds: Vec<Manifold> = solver_contacts.iter().map(|c| c.manifold).collect();
+        solver.store_impulses(&mut manifolds);
+        for (&cid, m) in island_contacts.iter().zip(&manifolds) {
+            self.contact_mut(cid).manifold = *m;
+        }
+        for (i, &id) in island_bodies.iter().enumerate() {
+            let Velocity { mut v, mut w } = velocities[i];
+            let (tx, ty) = (v.x * h, v.y * h);
+            let t2 = ty * ty + tx * tx;
+            if MAX_TRANSLATION_SQUARED < t2 {
+                let ratio = MAX_TRANSLATION / t2.sqrt();
+                v = Vec2::new(v.x * ratio, v.y * ratio);
+            }
+            let rotation = w * h;
+            if MAX_ROTATION_SQUARED < rotation * rotation {
+                w = w * (MAX_ROTATION / rotation.abs());
+            }
+            let axis = self.body(id).axis;
+            let p = &mut positions[i];
+            p.c = Vec2::new(p.c.x + v.x * axis.x * h, p.c.y + v.y * axis.y * h);
+            p.a = w * h + p.a;
+            velocities[i] = Velocity { v, w };
+        }
+        let mut position_solved = false;
+        for _ in 0..step.position_iterations {
+            if solver.solve_position_constraints(&mut positions) {
+                position_solved = true;
+                break;
+            }
+        }
+        for (i, &id) in island_bodies.iter().enumerate() {
+            let b = self.body_mut(id);
+            if b.kind == BodyType::Static {
+                continue;
+            }
+            b.sweep.c = positions[i].c;
+            b.sweep.a = positions[i].a;
+            b.linear_velocity = velocities[i].v;
+            b.angular_velocity = velocities[i].w;
+            let q = Rot::new(b.sweep.a);
+            b.xf = Transform { p: b.sweep.c - q.apply(b.sweep.local_center), q };
+        }
+        if !self.allow_sleep {
+            return;
+        }
+        let mut min_sleep_time = f32::MAX;
+        let linear = LINEAR_SLEEP_TOLERANCE * LINEAR_SLEEP_TOLERANCE;
+        let angular = ANGULAR_SLEEP_TOLERANCE * ANGULAR_SLEEP_TOLERANCE;
+        for &id in island_bodies {
+            let b = self.body_mut(id);
+            if b.kind == BodyType::Static {
+                continue;
+            }
+            let v = b.linear_velocity;
+            if b.flags & BODY_AUTO_SLEEP == 0 || angular < b.angular_velocity * b.angular_velocity || linear < v.y * v.y + v.x * v.x {
+                b.sleep_time = 0.0;
+                min_sleep_time = 0.0;
+            } else {
+                b.sleep_time = h + b.sleep_time;
+                if b.sleep_time <= min_sleep_time {
+                    min_sleep_time = b.sleep_time;
+                }
+            }
+        }
+        if TIME_TO_SLEEP <= min_sleep_time && position_solved {
+            for &id in island_bodies {
+                let b = self.body_mut(id);
+                b.flags &= !BODY_AWAKE;
+                b.sleep_time = 0.0;
+                b.linear_velocity = Vec2::ZERO;
+                b.angular_velocity = 0.0;
+                b.force = Vec2::ZERO;
+                b.torque = 0.0;
+            }
+        }
+    }
+
+    /// b2Body::SynchronizeFixtures (180bbc900) with Fixture::Synchronize (180bbc7d0).
+    fn synchronize_fixtures(&mut self, id: BodyId) {
+        let b = self.body(id);
+        let q = Rot::new(b.sweep.a0);
+        let lc = b.sweep.local_center;
+        let xf1 = Transform { p: Vec2::new(b.sweep.c0.x - (lc.x * q.c - lc.y * q.s), b.sweep.c0.y - (lc.y * q.c + lc.x * q.s)), q };
+        let xf2 = b.xf;
+        let displacement = xf2.p - xf1.p;
+        for f in b.fixtures.iter().rev().copied().collect::<Vec<_>>() {
+            let fixture = self.fixtures[f].as_mut().unwrap();
+            for (aabb, proxy) in &mut fixture.proxies {
+                *aabb = Aabb::combine(&fixture.shape.compute_aabb(&xf1), &fixture.shape.compute_aabb(&xf2));
+                self.broad_phase.move_proxy(*proxy, aabb, displacement);
+            }
+        }
+    }
+}
+
+/// b2ContactFilter::ShouldCollide.
+fn should_collide(a: &Filter, b: &Filter) -> bool {
+    if a.group_index == b.group_index && a.group_index != 0 {
+        return 0 < a.group_index;
+    }
+    a.mask_bits & b.category_bits != 0 && a.category_bits & b.mask_bits != 0
+}
+
+/// The b2*Contact::Evaluate natives: polygons with a rounded radius take the radial path.
+fn evaluate(manifold: &mut Manifold, a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
+    match (a, b) {
+        (Shape::Polygon(a), Shape::Polygon(b)) if a.radius <= POLYGON_RADIUS && b.radius <= POLYGON_RADIUS => collide_polygons(manifold, a, xf_a, b, xf_b),
+        (Shape::Polygon(a), Shape::Polygon(b)) => collide_radial_polygons(manifold, a, xf_a, b, xf_b),
+        (Shape::Polygon(a), Shape::Circle(b)) => collide_polygon_and_circle(manifold, a, xf_a, b, xf_b),
+        (Shape::Circle(a), Shape::Circle(b)) => collide_circles(manifold, a, xf_a, b, xf_b),
+        (Shape::Circle(_), Shape::Polygon(_)) => unreachable!("create_contact puts the polygon first"),
+    }
+}
+
+/// ponytail: Box2D 2.3's b2TestOverlap; Unity's 180bb1970 not yet compared.
+fn test_overlap(a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) -> bool {
+    let mut cache = SimplexCache::default();
+    distance(&mut cache, &a.proxy(), xf_a, &b.proxy(), xf_b, true).distance < 10.0 * f32::EPSILON
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::b2::shape::{box_corners, Polygon};
+
+    fn box_fixture(size: Vec2) -> FixtureDef {
+        let shape = Shape::Polygon(Polygon::from_points(&box_corners(Vec2::ZERO, size), POLYGON_RADIUS));
+        FixtureDef { shape, friction: 0.4, restitution: 0.0, density: 1.0, is_sensor: false, filter: Filter::default() }
+    }
+
+    #[test]
+    fn box_lands_on_ground_and_sleeps() {
+        let mut world = World::default();
+        let ground = world.create_body(&BodyDef::default());
+        world.create_fixture(ground, &box_fixture(Vec2::new(20.0, 1.0)), true);
+        let def = BodyDef { kind: BodyType::Dynamic, position: Vec2::new(0.0, 3.0), ..BodyDef::default() };
+        let crate_ = world.create_body(&def);
+        world.create_fixture(crate_, &box_fixture(Vec2::new(1.0, 1.0)), true);
+        for _ in 0..300 {
+            world.step(1.0 / 60.0, 16, 16);
+        }
+        let b = world.body(crate_);
+        assert!((b.xf.p.y - 1.0).abs() < 0.05, "rest height {}", b.xf.p.y);
+        assert!(b.xf.p.x.abs() < 1e-3 && b.sweep.a.abs() < 1e-3);
+        assert_eq!(b.flags & BODY_AWAKE, 0, "should sleep");
+    }
+}

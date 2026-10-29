@@ -9,3 +9,4 @@ pub mod probe;
 pub mod shape;
 pub mod solver;
 pub mod toi;
+pub mod world;

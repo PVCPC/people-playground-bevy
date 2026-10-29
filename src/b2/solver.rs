@@ -8,7 +8,8 @@ use super::math::{cross, Rot, Transform, Vec2};
 pub const VELOCITY_THRESHOLD: f32 = 1.0;
 pub const BAUMGARTE: f32 = 0.2;
 pub const TOI_BAUMGARTE: f32 = 0.75;
-pub const MAX_LINEAR_CORRECTION: f32 = 0.2;
+/// Physics2DSettings.m_MaxLinearCorrection, stored unscaled.
+pub const MAX_LINEAR_CORRECTION: f32 = 16.0;
 const LINEAR_SLOP: f32 = 0.005;
 const MAX_CONDITION_NUMBER: f32 = 1000.0;
 

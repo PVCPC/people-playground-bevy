@@ -14,7 +14,7 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    fn combine(a: &Aabb, b: &Aabb) -> Aabb {
+    pub fn combine(a: &Aabb, b: &Aabb) -> Aabb {
         let lo = |x: f32, y: f32| if y <= x { y } else { x };
         let hi = |x: f32, y: f32| if x <= y { y } else { x };
         Aabb { lower: Vec2::new(lo(a.lower.x, b.lower.x), lo(a.lower.y, b.lower.y)), upper: Vec2::new(hi(a.upper.x, b.upper.x), hi(a.upper.y, b.upper.y)) }
