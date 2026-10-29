@@ -225,7 +225,7 @@ impl Game {
             (pick(p.OxygenLevel), pick(p.Consciousness), pick(p.PainLevel), pick(p.AdrenalineLevel), pick(p.ShockLevel));
         let mut num6 = mathf::lerp(0.0, 95.0, num4 + num5 + num3);
         num6 += if connected { mathf::clamp(p.SeizureTime * 0.5, 0.0, 30.0) } else { 0.0 };
-        num6 += mathf::perlin(self.time.time / 7.0, self.limbs[l].randomOffset) * 10.0;
+        num6 = (d(num6) + d(mathf::perlin(self.time.time / 7.0, self.limbs[l].randomOffset)) * 10.0f32).f();
         let v = mathf::max(
             c.ArtificialHeartbeat,
             (mathf::lerp(0.0, 70.0 - (1.0 - num2) * 22.0, t) + num6) * mathf::lerp(0.5, 1.0, t2) * num,
@@ -472,9 +472,9 @@ impl Game {
         if c.IsPump {
             c.BloodFlow = c.TotalLiquidAmount;
         } else if c.WasInitiallyPumping {
-            c.BloodFlow -= dt * 0.2;
+            c.BloodFlow = (d(c.BloodFlow) - d(dt) * 0.2f32).f();
         } else {
-            c.BloodFlow -= dt * 0.05;
+            c.BloodFlow = (d(c.BloodFlow) - d(dt) * 0.05f32).f();
         }
         c.BloodFlow = mathf::clamp(c.BloodFlow, 0.0, c.TotalLiquidAmount);
     }
@@ -492,7 +492,7 @@ impl Game {
         let c = &mut self.circulations[l];
         if c.BleedingRate > 0.05 && temperature > 0.0 {
             if c.BleedingRate < 1.0 {
-                c.BleedingRate -= self.time.deltaTime * 0.05;
+                c.BleedingRate = (d(c.BleedingRate) - d(self.time.deltaTime) * 0.05f32).f();
             }
             let amount = dt / mathf::lerp(60.0, 20.0, c.BloodFlow) * c.BleedingRate * 0.2;
             self.drain(l, amount);

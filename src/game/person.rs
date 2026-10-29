@@ -214,21 +214,21 @@ impl Game {
         // Vector2.Dot(Vector3 -> Vector2, Vector2.right)
         self.people[person].BalanceOffset = (dir[0] * 1.0 + dir[1] * 0.0) * self.people[person].localScale[0];
         if self.person_is_alive(person) {
-            self.people[person].Consciousness += dt / 120.0;
+            self.people[person].Consciousness = (d(self.people[person].Consciousness) + d(dt) / 120.0f32).f();
             if self.physicals[self.limbs[head].PhysicalBehaviour].Wetness < 0.5 {
                 self.people[person].OxygenLevel +=
                     mathf::pow(mathf::sin(self.time.time * 3.0), 16.0) * 0.5 / 40.0 * (dt * 60.0);
             }
         } else {
-            self.people[person].Consciousness -= dt / 60.0;
-            self.people[person].OxygenLevel -= dt / 40.0;
+            self.people[person].Consciousness = (d(self.people[person].Consciousness) - d(dt) / 60.0f32).f();
+            self.people[person].OxygenLevel = (d(self.people[person].OxygenLevel) - d(dt) / 40.0f32).f();
         }
         let p = &mut self.people[person];
         p.OxygenLevel = mathf::clamp01(p.OxygenLevel);
         p.Consciousness = mathf::clamp01(p.Consciousness);
-        p.ShockLevel -= dt / 25.0;
+        p.ShockLevel = (d(p.ShockLevel) - d(dt) / 25.0f32).f();
         p.ShockLevel = mathf::clamp01(p.ShockLevel);
-        p.PainLevel -= dt / 5.0;
+        p.PainLevel = (d(p.PainLevel) - d(dt) / 5.0f32).f();
         p.PainLevel = mathf::clamp01(p.PainLevel);
         p.AdrenalineLevel -= dt;
         p.AdrenalineLevel = mathf::max(0.0, mathf::min(20.0, p.AdrenalineLevel));
@@ -269,7 +269,7 @@ impl Game {
     fn all_limb_loop_checks(&mut self, person: usize) {
         let mut num = 0.0f32;
         for &l in &self.people[person].Limbs {
-            num += self.limbs[l].Health / self.limbs[l].InitialHealth;
+            num = (d(num) + d(self.limbs[l].Health) / self.limbs[l].InitialHealth).f();
         }
         num /= 1.0;
         self.people[person].AverageHealth = num;
@@ -296,7 +296,7 @@ impl Game {
                 if let Some(h) = head {
                     let ib = self.circulations[h].InternalBleedingIntensity;
                     if ib > mathf::EPSILON {
-                        self.limbs[l].Numbness += ib * self.time.deltaTime;
+                        self.limbs[l].Numbness = (d(self.limbs[l].Numbness) + d(ib) * self.time.deltaTime).f();
                     }
                 }
             }
@@ -351,8 +351,8 @@ impl Game {
     }
 }
 
-/// Vector3.normalized (Vector3.Normalize: float squares, Math.Sqrt in double).
+/// Vector3.normalized (Vector3.Magnitude: one double chain under Math.Sqrt, rounded at its return).
 pub fn normalized(v: [f32; 3]) -> [f32; 3] {
-    let num = mathf::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    let num = (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).0.sqrt() as f32;
     if num > 1e-5 { [v[0] / num, v[1] / num, v[2] / num] } else { [0.0, 0.0, 0.0] }
 }

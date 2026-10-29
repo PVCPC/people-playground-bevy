@@ -247,21 +247,19 @@ impl Game {
             }
             let ph = &mut self.physicals[p];
             if ph.OnFire {
-                ph.BurnProgress += mathf::max(0.0, ph.Temperature - props.BurningTemperatureThreshold)
-                    * 6e-5
-                    * (props.Burnrate / 2.0)
-                    * ph.BurningProgressionMultiplier;
+                let m = mathf::max(0.0, ph.Temperature - props.BurningTemperatureThreshold);
+                ph.BurnProgress = (d(ph.BurnProgress) + d(m) * 6e-5f32 * (d(props.Burnrate) / 2.0f32) * ph.BurningProgressionMultiplier).f();
             }
             if ph.Temperature < props.BurningTemperatureThreshold {
                 if flag && ph.OnFire {
-                    ph.BurnProgress += 2.5e-5 * (props.Burnrate / 2.0) * ph.BurningProgressionMultiplier;
+                    ph.BurnProgress = (d(ph.BurnProgress) + d(2.5e-5) * (d(props.Burnrate) / 2.0f32) * ph.BurningProgressionMultiplier).f();
                 }
                 if ph.OnFire && self.random.value() > 0.995 {
                     self.extinguish(p);
                 }
             }
             let ph = &mut self.physicals[p];
-            ph.Temperature += ph.Charge() * 0.0008 / props.HeatTransferSpeedMultiplier;
+            ph.Temperature = (d(ph.Temperature) + d(ph.Charge()) * 0.0008f32 / props.HeatTransferSpeedMultiplier).f();
             // The original passes its arguments as Clamp(-273.15, Temperature, 5000000).
             ph.Temperature = mathf::clamp(-273.15, ph.Temperature, 5_000_000.0);
         }

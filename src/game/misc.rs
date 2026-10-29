@@ -1,6 +1,6 @@
 //! The small per-limb scripts: ConnectedNodeBehaviour, SkinMaterialHandler, GForceMeasureBehaviour,
 //! GripBehaviour, BleedingParticleBehaviour and FancyBloodSplatController.
-use super::{mathf, script, Game};
+use super::{d, mathf, script, Game};
 
 /// FixedIntervalDistributor
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -295,12 +295,12 @@ impl Game {
             && !(self.physicals[limb.PhysicalBehaviour].Temperature < -50.0)
         {
             let dt = self.time.deltaTime;
-            let mut num = 0.0;
+            let mut num = 0.0f32;
             if limb.Health < 0.05 {
-                num += dt * 0.002;
+                num = (d(num) + d(dt) * 0.002f32).f();
             }
             if limb.IsZombie {
-                num += dt * 0.02;
+                num = (d(num) + d(dt) * 0.02f32).f();
             }
             let v = self.skins[l].rottenProgress + num;
             self.skins[l].set_rotten(v);
@@ -325,12 +325,12 @@ impl Game {
             let dt = self.time.deltaTime;
             let (flow, mult, total) = (c.BloodFlow, c.BloodLossRateMultiplier, c.TotalLiquidAmount);
             let bp = &mut self.bleeding[b];
-            bp.fakeHeartClock += dt * flow * bp.PulseSpeed;
-            let num2 = bp.SpeedMultiplier * (flow * flow * flow * 2.0) * mult * mathf::lerp(0.7, 1.0, bp.Laminarity);
+            bp.fakeHeartClock = (d(bp.fakeHeartClock) + d(dt) * flow * bp.PulseSpeed).f();
+            let num2 = (d(bp.SpeedMultiplier) * (d(flow) * flow * flow * 2.0f32) * mult * mathf::lerp(0.7, 1.0, bp.Laminarity)).f();
             let num3 = bp.PulseIntensity * flow;
-            bp.startSpeedMultiplier = num2 * (1.0 + num3 * (1.0 - bp.fakeHeartClock % 1.0));
+            bp.startSpeedMultiplier = (d(num2) * (d(1.0) + d(num3) * (d(1.0) - bp.fakeHeartClock % 1.0))).f();
             let num4 = if total > mathf::EPSILON { mathf::min(mult * num, 1.0) } else { 0.0 };
-            bp.rateOverTimeMultiplier = if flag { 0.0 } else { mathf::lerp(18.0, 32.0, bp.Laminarity) * num4 * bp.RateMultiplier };
+            bp.rateOverTimeMultiplier = if flag { 0.0 } else { (d(mathf::lerp(18.0, 32.0, bp.Laminarity)) * num4 * bp.RateMultiplier).f() };
             bp.emission_enabled = true;
             if let Some(s) = bp.BloodSplatController {
                 let speed = bp.startSpeedMultiplier;
@@ -339,7 +339,7 @@ impl Game {
                 splat.SpawningChance = if flag { 0.0 } else { total * 0.5 };
             }
             let bp = &mut self.bleeding[b];
-            let flag2 = bp.DripSounds.is_some() && bp.visible && num4 * bp.RateMultiplier >= bp.DripSoundRateThreshold;
+            let flag2 = bp.DripSounds.is_some() && bp.visible && (d(num4) * bp.RateMultiplier).0 >= bp.DripSoundRateThreshold as f64;
             if !flag2 {
                 return;
             }
@@ -383,8 +383,8 @@ impl Game {
         for p in &mut self.splats[s].particles {
             p.PositionX += p.VelocityX;
             p.PositionY += p.VelocityY;
-            p.VelocityX += g.x * fdt / 10.0;
-            p.VelocityY += g.y * fdt / 10.0;
+            p.VelocityX = (d(p.VelocityX) + d(g.x) * fdt / 10.0f32).f();
+            p.VelocityY = (d(p.VelocityY) + d(g.y) * fdt / 10.0f32).f();
             p.Life -= fdt;
             // ponytail: Physics2D.OverlapPoint + "Decal" message; decals are visual and not rewritten yet.
         }
@@ -414,7 +414,7 @@ impl Game {
             1 => [sp.Direction[0], sp.Direction[1], 0.0],
             2 => {
                 let num = mathf::max(sp.AmountRange[0], sp.AmountRange[1]) as i32;
-                let f = (360 / num) as f32 * index as f32 * (std::f32::consts::PI / 180.0);
+                let f = (d((360 / num) as f32) * index as f32 * (std::f32::consts::PI / 180.0)).f();
                 [(f as f64).cos() as f32, (f as f64).sin() as f32, 0.0]
             }
             _ => mathf::rotate(sp.rotation, [sp.Direction[0], sp.Direction[1], 0.0]),

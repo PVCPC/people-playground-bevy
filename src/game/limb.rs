@@ -295,13 +295,13 @@ impl Game {
         }
         let person = self.limbs[l].Person;
         if self.nodes[l].IsConnectedToRoot {
-            self.people[person].ShockLevel += self.random.value() * 5.0;
+            self.people[person].ShockLevel = (d(self.people[person].ShockLevel) + d(self.random.value()) * 5.0f32).f();
             let i = self.random.value() * 150.0;
             self.person_wince(person, i);
         }
         if self.limbs[l].IsLethalToBreak {
-            let d = self.limbs[l].Health + 1.0;
-            self.limb_damage(l, d);
+            let damage = self.limbs[l].Health + 1.0;
+            self.limb_damage(l, damage);
         }
         if self.random.value() as f64 > 0.9 {
             self.circulations[l].InternalBleedingIntensity += self.random.value();
@@ -490,23 +490,23 @@ impl Game {
             let ib = self.circulations[l].InternalBleedingIntensity;
             match self.limbs[l].RoughClassification {
                 HEAD => {
-                    let d = (if self.random.value() > 5.0 / ib { 20.0 } else { 0.0004 }) * ib;
-                    self.limb_damage(l, d);
+                    let damage = (if self.random.value() as f64 > 5.0 / ib as f64 { 20.0 } else { 0.0004 }) * ib;
+                    self.limb_damage(l, damage);
                     if self.circulations[l].InternalBleedingIntensity > 0.0 {
-                        self.people[person].OxygenLevel -= 0.0001 * ib;
-                        self.people[person].Consciousness -= 0.0001 * ib;
+                        self.people[person].OxygenLevel = (d(self.people[person].OxygenLevel) - d(0.0001) * ib).f();
+                        self.people[person].Consciousness = (d(self.people[person].Consciousness) - d(0.0001) * ib).f();
                     }
                 }
                 TORSO => self.limb_damage(l, 0.0015 * ib),
                 LEGS | ARMS => {
-                    self.limbs[l].Numbness += 0.2 * ib;
+                    self.limbs[l].Numbness = (d(self.limbs[l].Numbness) + d(0.2) * ib).f();
                     self.limb_damage(l, 0.001 * ib);
                 }
                 _ => {}
             }
             if self.limb_is_considered_alive(l) {
                 if self.random.value() > 0.9999 {
-                    self.people[person].Consciousness -= 0.001 * ib;
+                    self.people[person].Consciousness = (d(self.people[person].Consciousness) - d(0.001) * ib).f();
                 }
                 if self.random.value() as f64 > 0.99 {
                     let i = self.random.value() * self.circulations[l].InternalBleedingIntensity * 60.0;
@@ -516,9 +516,9 @@ impl Game {
         }
         self.calculate_joint_stress(l);
         if (self.limbs[l].InternalTemperature - self.limbs[l].BodyTemperature).abs() >= 3.0 {
-            self.limbs[l].Numbness += 0.001 * self.random.value();
-            let d = 0.005 * self.random.value();
-            self.limb_damage(l, d);
+            self.limbs[l].Numbness = (d(self.limbs[l].Numbness) + d(0.001) * self.random.value()).f();
+            let damage = 0.005 * self.random.value();
+            self.limb_damage(l, damage);
         }
         let limb = &self.limbs[l];
         if limb.InternalTemperature >= limb.DiscomfortingHeatTemperature || limb.InternalTemperature <= limb.BodyTemperature - 3.0 {
@@ -535,14 +535,14 @@ impl Game {
             }
         }
         if self.physicals[p].Charge() > mathf::EPSILON && !self.limbs[l].IsZombie {
-            let d = self.physicals[p].Charge() * 0.01;
-            self.limb_damage(l, d);
+            let damage = self.physicals[p].Charge() * 0.01;
+            self.limb_damage(l, damage);
         }
         let threshold = self.properties[self.physicals[p].Properties].BurningTemperatureThreshold;
         if self.physicals[p].Temperature > threshold {
             self.limb_wince(l, 0.1);
-            let d = 0.0015 + (self.physicals[p].Temperature - threshold) / 1000.0;
-            self.limb_damage(l, d);
+            let damage = (d(0.0015) + (d(self.physicals[p].Temperature) - threshold) / 1000.0f32).f();
+            self.limb_damage(l, damage);
         } else if self.physicals[p].Temperature < self.limbs[l].FreezingTemperature {
             if self.skins[l].acidProgress < 0.5 + self.limbs[l].randomOffset / 90000.0 {
                 { let v = self.skins[l].acidProgress + 0.0005; self.skins[l].set_acid(v); }
@@ -566,8 +566,9 @@ impl Game {
             if self.physicals[p].OnFire {
                 let fdt = self.time.fixedDeltaTime;
                 { let v = self.skins[l].acidProgress + fdt * 0.01; self.skins[l].set_acid(v); }
-                self.physicals[p].BurnProgress += fdt * 0.01;
-                self.limbs[l].Health -= self.time.deltaTime * 0.5 * if self.limbs[l].IsZombie { 0.01 } else { 1.0 };
+                self.physicals[p].BurnProgress = (d(self.physicals[p].BurnProgress) + d(fdt) * 0.01f32).f();
+                let z: f32 = if self.limbs[l].IsZombie { 0.01 } else { 1.0 };
+                self.limbs[l].Health = (d(self.limbs[l].Health) - d(self.time.deltaTime) * 0.5f32 * z).f();
                 if !self.limbs[l].IsZombie && !self.limb_is_paralysed(l) {
                     if self.prefs.StopAnimationOnDamage {
                         self.people[person].OverridePoseIndex = -1;
@@ -578,7 +579,7 @@ impl Game {
             }
             if self.prefs.AutoHealWounds && self.limbs[l].RegenerateBurnProgressSpeed > mathf::EPSILON && self.physicals[p].BurnProgress > 0.0 {
                 let ph = &mut self.physicals[p];
-                ph.BurnProgress -= self.time.fixedDeltaTime * self.limbs[l].RegenerateBurnProgressSpeed * 0.001;
+                ph.BurnProgress = (d(ph.BurnProgress) - d(self.time.fixedDeltaTime) * self.limbs[l].RegenerateBurnProgressSpeed * 0.001f32).f();
                 ph.BurnProgress = mathf::max(0.0, ph.BurnProgress);
             }
         }
@@ -665,13 +666,13 @@ impl Game {
         }
         let limb = &mut self.limbs[l];
         if flag && limb.Health < limb.InitialHealth {
-            limb.Health += limb.RegenerationSpeed * dt;
+            limb.Health = (d(limb.Health) + d(limb.RegenerationSpeed) * dt).f();
         }
         self.handle_drowning(l);
-        self.limbs[l].Numbness -= dt / 20.0;
+        self.limbs[l].Numbness = (d(self.limbs[l].Numbness) - d(dt) / 20.0f32).f();
         if !self.nodes[l].IsConnectedToRoot && self.limbs[l].Health > 0.0 {
             let limb = &mut self.limbs[l];
-            limb.Health -= dt / 20.0 * limb.InitialHealth;
+            limb.Health = (d(limb.Health) - d(dt) / 20.0f32 * limb.InitialHealth).f();
         }
         if let Some(g) = self.limbs[l].GripBehaviour {
             if self.grips[g].isHolding && self.prefs.DropOnDeath && !self.limb_is_considered_alive(l) {
@@ -687,7 +688,7 @@ impl Game {
         let limb = &self.limbs[l];
         if limb.HasLungs && limb.LungsPunctured && self.limb_is_considered_alive(l) && !limb.IsZombie && !limb.IsAndroid {
             self.add_pain(person, 2.0);
-            self.people[person].OxygenLevel -= dt * 0.5;
+            self.people[person].OxygenLevel = (d(self.people[person].OxygenLevel) - d(dt) * 0.5f32).f();
         }
         // ponytail: stab-wound blood decals arrive with stabbing.
         assert!(self.physicals[p].stabWoundCount == 0, "stabbing is not rewritten yet");
@@ -711,9 +712,9 @@ impl Game {
         if !self.limbs[l].HasBrain || self.physicals[self.limbs[l].PhysicalBehaviour].Wetness < 0.5 {
             return;
         }
-        self.people[person].OxygenLevel -= dt / 40.0;
+        self.people[person].OxygenLevel = (d(self.people[person].OxygenLevel) - d(dt) / 40.0f32).f();
         if self.people[person].OxygenLevel < 0.9 {
-            self.people[person].Consciousness -= dt / 40.0 * 0.5;
+            self.people[person].Consciousness = (d(self.people[person].Consciousness) - d(dt) / 40.0f32 * 0.5f32).f();
             if !self.limbs[l].IsZombie {
                 self.add_pain(person, dt * 0.9);
             }
