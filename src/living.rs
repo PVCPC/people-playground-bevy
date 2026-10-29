@@ -102,7 +102,7 @@ pub fn drive_muscles(
             )
             .to_degrees(),
             reference_angle: motor.reference_angle.to_degrees(),
-            target_angle: target.map_or(0.0, |t| t.angle.to_degrees()),
+            target_angle: target.map_or(0.0, |t| t.degrees()),
             previous_speed: muscle.previous_speed,
             rigidity: pose.rigidity,
             rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),

@@ -17,23 +17,24 @@ pub struct PortPhysicsPlugin;
 
 impl Plugin for PortPhysicsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(
-            PhysicsPlugins::default()
-                .build()
-                .disable::<XpbdSolverPlugin>(),
-        )
-        .add_systems(
-            SubstepSchedule,
-            solve_velocity_motors
-                .after(SubstepSolverSystems::SolveConstraints)
-                .before(IntegrationSystems::Position),
-        )
-        .add_systems(
-            SubstepSchedule,
-            solve_joint_positions
-                .after(SubstepSolverSystems::Relax)
-                .before(SubstepSolverSystems::Damping),
-        );
+        app.init_resource::<crate::game_assets::SimulationSettings>()
+            .add_plugins(
+                PhysicsPlugins::default()
+                    .build()
+                    .disable::<XpbdSolverPlugin>(),
+            )
+            .add_systems(
+                SubstepSchedule,
+                solve_velocity_motors
+                    .after(SubstepSolverSystems::SolveConstraints)
+                    .before(IntegrationSystems::Position),
+            )
+            .add_systems(
+                SubstepSchedule,
+                solve_joint_positions
+                    .after(SubstepSolverSystems::Relax)
+                    .before(SubstepSolverSystems::Damping),
+            );
     }
 }
 
@@ -67,6 +68,7 @@ pub fn solve_velocity_motors(
     >,
     mut joints: Query<(&RevoluteJoint, &mut VelocityMotor), Without<JointDisabled>>,
     time: Res<Time>,
+    settings: Res<crate::game_assets::SimulationSettings>,
 ) {
     for (joint, mut motor) in &mut joints {
         motor.prepared = None;
@@ -210,7 +212,7 @@ pub fn solve_velocity_motors(
         motor.prepared = Some((a, b));
     }
     // shortcut: Avian contacts and substeps remain; native full-frame trajectories are unverified.
-    for _ in 0..16 {
+    for _ in 0..settings.velocity_iterations {
         for (_, mut motor) in &mut joints {
             let Some((a, b)) = motor.prepared else {
                 continue;
@@ -245,8 +247,9 @@ fn solve_joint_positions(
     mut bodies: ResMut<SolverBodies>,
     frames: Query<(&Position, &Rotation, &ComputedCenterOfMass), Without<RigidBodyDisabled>>,
     joints: Query<(&RevoluteJoint, &VelocityMotor), Without<JointDisabled>>,
+    settings: Res<crate::game_assets::SimulationSettings>,
 ) {
-    for _ in 0..16 {
+    for _ in 0..settings.position_iterations {
         let mut solved = true;
         for (joint, motor) in &joints {
             let Some((a, b)) = motor.prepared else {
@@ -298,7 +301,7 @@ fn solve_joint_positions(
                 }),
                 limit_enabled: velocity.limit_enabled,
                 limit_state: velocity.limit_state,
-                max_angular_correction: 8.0f32.to_radians(),
+                max_angular_correction: settings.max_angular_correction_degrees.to_radians(),
             };
             solved &= constraint.solve();
             for (index, old, new, rotation) in [

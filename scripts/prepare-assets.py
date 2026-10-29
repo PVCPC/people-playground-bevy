@@ -26,6 +26,33 @@ def xy(value):
     return [float(value["x"]), float(value["y"])]
 
 
+def radians_f32(degrees):
+    def single(value):
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+    return single(single(degrees) * single(0.017453292))
+
+
+def simulation_settings(exported):
+    def load(filename, kind):
+        objects = documents((exported / "ProjectSettings" / filename).read_text(encoding="utf-8-sig"))
+        return next(data for name, data in objects.values() if name == kind)
+
+    time = load("TimeManager.asset", "TimeManager")
+    physics = load("Physics2DSettings.asset", "Physics2DSettings")
+    result = {"fixed_delta": float(time["Fixed Timestep"]),
+              "gravity": xy(physics["m_Gravity"]),
+              "velocity_iterations": int(physics["m_VelocityIterations"]),
+              "position_iterations": int(physics["m_PositionIterations"]),
+              "max_angular_correction_degrees": float(physics["m_MaxAngularCorrection"])}
+    if (not math.isfinite(result["fixed_delta"]) or not 0.0001 <= result["fixed_delta"] <= 1
+            or not all(math.isfinite(v) for v in result["gravity"])
+            or not 1 <= result["velocity_iterations"] <= 256
+            or not 1 <= result["position_iterations"] <= 256
+            or not 0 <= result["max_angular_correction_degrees"] <= 360):
+        raise ValueError("Invalid simulation settings")
+    return result
+
+
 def source_stamp(game, relative):
     stat = (game / relative).stat()
     return {"path": relative, "bytes": stat.st_size, "modified_ns": stat.st_mtime_ns}
@@ -85,7 +112,8 @@ def static_poses(objects):
                        "stand_upright": bool(pose["ShouldStandUpright"]),
                        "upright_multiplier": float(pose["UprightForceMultiplier"]),
                        "drag_influence": float(pose["DragInfluence"]),
-                       "angles": [{"part": angle["Name"], "angle": math.radians(angle["Angle"]),
+                       "angles": [{"part": angle["Name"], "angle": radians_f32(angle["Angle"]),
+                                   "angle_degrees": float(angle["Angle"]),
                                    "rigidity_modifier": float(angle["PoseRigidityModifier"])}
                                   for angle in pose["Angles"]]})
     if not result or result[0]["name"] != "Rest":
@@ -174,12 +202,15 @@ def prepare(game, exported, output, write):
             limits = data["m_AngleLimits"]
             joints.append({"a": names[body_id], "b": names[data["m_ConnectedRigidBody"]["fileID"]],
                            "anchor_a": xy(data["m_Anchor"]), "anchor_b": xy(data["m_ConnectedAnchor"]),
-                           "limits": [math.radians(limits[k]) for k in ("m_LowerAngle", "m_UpperAngle")]
+                           "limits": [radians_f32(limits[k]) for k in ("m_LowerAngle", "m_UpperAngle")]
+                           if data["m_UseLimits"] else None,
+                           "limits_degrees": [float(limits[k]) for k in ("m_LowerAngle", "m_UpperAngle")]
                            if data["m_UseLimits"] else None})
     if len({p["name"] for p in parts}) != len(parts) or len(joints) != len(parts) - 1:
         raise ValueError("Human rig is not a single named body tree")
     stamps = [source_stamp(game, p) for p in required]
-    rig = {"source_files": stamps, "parts": parts, "joints": joints, "poses": static_poses(objects)}
+    rig = {"source_files": stamps, "parts": parts, "joints": joints, "poses": static_poses(objects),
+           "simulation": simulation_settings(exported)}
     print(json.dumps({"preview": not write, "bodies": len(parts), "joints": len(joints),
                       "textures": list(textures), "destination": str(output)}))
     if write:

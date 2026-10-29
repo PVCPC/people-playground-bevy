@@ -9,6 +9,32 @@ spec.loader.exec_module(module)
 
 
 class UnityDocumentTests(unittest.TestCase):
+    def test_simulation_settings_follow_export_and_reject_invalid_values(self):
+        contents = {
+            "TimeManager.asset": "--- !u!5 &1\nTimeManager:\n  Fixed Timestep: 0.01\n",
+            "Physics2DSettings.asset": "--- !u!19 &1\nPhysics2DSettings:\n  m_Gravity: {x: 1, y: -4}\n  m_VelocityIterations: 12\n  m_PositionIterations: 8\n  m_MaxAngularCorrection: 6\n",
+        }
+        with patch.object(Path, "read_text", autospec=True,
+                          side_effect=lambda path, **kwargs: contents[path.name]):
+            self.assertEqual(module.simulation_settings(Path("export")),
+                             {"fixed_delta": 0.01, "gravity": [1.0, -4.0],
+                              "velocity_iterations": 12, "position_iterations": 8,
+                              "max_angular_correction_degrees": 6.0})
+            contents["Physics2DSettings.asset"] = contents["Physics2DSettings.asset"].replace(
+                "m_PositionIterations: 8", "m_PositionIterations: 0")
+            with self.assertRaises(ValueError):
+                module.simulation_settings(Path("export"))
+
+    def test_static_pose_preserves_original_degree_value_and_single_precision_radians(self):
+        person = {"Poses": [{"Name": "Rest", "Rigidity": 1, "ForceMultiplier": 1,
+                             "ShouldStandUpright": 0, "UprightForceMultiplier": 1,
+                             "DragInfluence": 0,
+                             "Angles": [{"Name": "Leg", "Animated": 0, "Angle": 0.1,
+                                         "PoseRigidityModifier": 0}]}]}
+        angle = module.static_poses({1: ("MonoBehaviour", person)})[0]["angles"][0]
+        self.assertEqual(angle["angle_degrees"], 0.1)
+        self.assertEqual(angle["angle"], 0.001745329238474369)
+
     def test_material_follows_runtime_properties_and_rejects_mixed_fixtures(self):
         contents = {
             "human.asset": "--- !u!114 &11400000\nMonoBehaviour:\n  PhysicMaterial: {fileID: 6200000, guid: body}\n",

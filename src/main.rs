@@ -126,6 +126,7 @@ fn run() -> Result<(), String> {
     if headless {
         return headless::test(rig, cache);
     }
+    let simulation = rig.simulation;
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -145,6 +146,7 @@ fn run() -> Result<(), String> {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugins(motor::PortPhysicsPlugin)
+        .insert_resource(simulation)
         .insert_resource(rig)
         .insert_resource(Session {
             overlay: false,
@@ -154,9 +156,9 @@ fn run() -> Result<(), String> {
             smoke,
             frames: 0,
         })
-        .insert_resource(Time::<Fixed>::from_hz(50.0))
+        .insert_resource(Time::<Fixed>::from_seconds(simulation.fixed_delta))
         .insert_resource(SubstepCount(10))
-        .insert_resource(Gravity(Vec2::new(0.0, -9.81)))
+        .insert_resource(Gravity(Vec2::from_array(simulation.gravity)))
         .insert_resource(ClearColor(BACKGROUND))
         .init_resource::<Pointer>()
         .init_resource::<Drag>()
@@ -345,7 +347,7 @@ fn spawn_human(
             .with_local_anchor1(Vec2::from_array(joint.anchor_a))
             .with_local_anchor2(Vec2::from_array(joint.anchor_b));
         // Native FetchBodyA is attached; FetchBodyB is connected. Both solvers measure B minus A.
-        if let Some([min, max]) = joint.limits {
+        if let Some([min, max]) = joint.radians_limits() {
             hinge = hinge.with_angle_limits(min + reference, max + reference);
         }
         let mut velocity_motor = motor::VelocityMotor::default();

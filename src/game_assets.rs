@@ -63,7 +63,20 @@ pub struct MuscleSpec {
 pub struct PoseAngle {
     pub part: String,
     pub angle: f32,
+    #[serde(default)]
+    pub angle_degrees: Option<f32>,
     pub rigidity_modifier: f32,
+}
+
+impl PoseAngle {
+    pub fn degrees(&self) -> f32 {
+        self.angle_degrees
+            .unwrap_or_else(|| self.angle.to_degrees())
+    }
+
+    pub fn radians(&self) -> f32 {
+        self.angle_degrees.map_or(self.angle, f32::to_radians)
+    }
 }
 
 #[derive(Deserialize)]
@@ -84,6 +97,37 @@ pub struct Joint {
     pub anchor_a: [f32; 2],
     pub anchor_b: [f32; 2],
     pub limits: Option<[f32; 2]>,
+    #[serde(default)]
+    pub limits_degrees: Option<[f32; 2]>,
+}
+
+impl Joint {
+    pub fn radians_limits(&self) -> Option<[f32; 2]> {
+        self.limits_degrees
+            .map(|v| v.map(f32::to_radians))
+            .or(self.limits)
+    }
+}
+
+#[derive(Resource, Clone, Copy, Deserialize)]
+pub struct SimulationSettings {
+    pub fixed_delta: f64,
+    pub gravity: [f32; 2],
+    pub velocity_iterations: u32,
+    pub position_iterations: u32,
+    pub max_angular_correction_degrees: f32,
+}
+
+impl Default for SimulationSettings {
+    fn default() -> Self {
+        Self {
+            fixed_delta: 0.02,
+            gravity: [0.0, -9.81],
+            velocity_iterations: 16,
+            position_iterations: 16,
+            max_angular_correction_degrees: 8.0,
+        }
+    }
 }
 
 #[derive(Resource, Deserialize)]
@@ -93,6 +137,8 @@ pub struct HumanRig {
     pub joints: Vec<Joint>,
     #[serde(default)]
     pub poses: Vec<HumanPose>,
+    #[serde(default)]
+    pub simulation: SimulationSettings,
 }
 
 fn is_relative_file(path: &Path) -> bool {
@@ -146,6 +192,17 @@ impl HumanRig {
     }
 
     fn validate(&self) -> Result<(), String> {
+        let simulation = &self.simulation;
+        if !simulation.fixed_delta.is_finite()
+            || !(0.0001..=1.0).contains(&simulation.fixed_delta)
+            || !simulation.gravity.iter().all(|v| v.is_finite())
+            || !(1..=256).contains(&simulation.velocity_iterations)
+            || !(1..=256).contains(&simulation.position_iterations)
+            || !simulation.max_angular_correction_degrees.is_finite()
+            || !(0.0..=360.0).contains(&simulation.max_angular_correction_degrees)
+        {
+            return Err("Invalid simulation settings".into());
+        }
         let names: HashSet<_> = self.parts.iter().map(|p| p.name.as_str()).collect();
         if self.parts.is_empty() || self.parts.len() > 128 || names.len() != self.parts.len() {
             return Err("Invalid or duplicate human bodies".into());
@@ -216,6 +273,8 @@ impl HumanRig {
                 if !names.contains(angle.part.as_str())
                     || !posed.insert(angle.part.as_str())
                     || !angle.angle.is_finite()
+                    || !angle.degrees().is_finite()
+                    || !angle.radians().is_finite()
                     || !angle.rigidity_modifier.is_finite()
                 {
                     return Err(format!("Invalid limb target in pose: {}", pose.name));
@@ -231,6 +290,8 @@ impl HumanRig {
                 || !names.contains(j.b.as_str())
                 || !j.anchor_a.iter().chain(&j.anchor_b).all(|v| v.is_finite())
                 || j.limits
+                    .is_some_and(|v| !v[0].is_finite() || !v[1].is_finite() || v[0] > v[1])
+                || j.radians_limits()
                     .is_some_and(|v| !v[0].is_finite() || !v[1].is_finite() || v[0] > v[1])
             {
                 return Err("Invalid human joint".into());
@@ -342,8 +403,69 @@ mod tests {
             anchor_a: [0.0; 2],
             anchor_b: [0.0; 2],
             limits: None,
+            limits_degrees: None,
         });
         assert!(rig.validate().is_err());
+    }
+
+    #[test]
+    fn original_degrees_take_priority_without_breaking_legacy_caches() {
+        let mut target: PoseAngle = serde_json::from_value(serde_json::json!({
+            "part": "A", "angle": 0.001745329238474369f32,
+            "angle_degrees": 0.1, "rigidity_modifier": 0
+        }))
+        .unwrap();
+        assert_eq!(target.degrees().to_bits(), 0.1f32.to_bits());
+        assert_eq!(target.radians().to_bits(), 0.1f32.to_radians().to_bits());
+        target.angle_degrees = None;
+        assert_eq!(target.radians(), target.angle);
+        assert_eq!(target.degrees(), target.angle.to_degrees());
+
+        let mut rig = test_rig();
+        rig.joints[0].limits_degrees = Some([-0.1, 0.1]);
+        assert_eq!(
+            rig.joints[0].radians_limits(),
+            Some([-0.1f32.to_radians(), 0.1f32.to_radians()])
+        );
+        rig.joints[0].limits_degrees = Some([1.0, -1.0]);
+        assert!(rig.validate().is_err());
+    }
+
+    #[test]
+    fn simulation_settings_have_legacy_defaults_and_reject_invalid_inputs() {
+        let rig = test_rig();
+        assert_eq!(rig.simulation.fixed_delta, 0.02);
+        assert_eq!(rig.simulation.position_iterations, 16);
+        for settings in [
+            SimulationSettings {
+                fixed_delta: f64::NAN,
+                ..default()
+            },
+            SimulationSettings {
+                fixed_delta: 0.0,
+                ..default()
+            },
+            SimulationSettings {
+                gravity: [0.0, f32::INFINITY],
+                ..default()
+            },
+            SimulationSettings {
+                velocity_iterations: 0,
+                ..default()
+            },
+            SimulationSettings {
+                position_iterations: 257,
+                ..default()
+            },
+            SimulationSettings {
+                max_angular_correction_degrees: -1.0,
+                ..default()
+            },
+        ] {
+            let mut rig = test_rig();
+            rig.simulation = settings;
+            assert!(rig.validate().is_err());
+        }
     }
 
     #[test]

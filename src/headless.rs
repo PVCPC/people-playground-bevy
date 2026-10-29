@@ -3,6 +3,7 @@ use bevy::{ecs::system::RunSystemOnce, mesh::MeshPlugin, time::TimeUpdateStrateg
 use std::time::Duration;
 
 pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
+    let simulation = rig.simulation;
     let expected_bodies = rig.parts.len() + 1;
     let expected_joints = rig.joints.len();
     let mut app = App::new();
@@ -17,12 +18,13 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         TransformPlugin,
         motor::PortPhysicsPlugin,
     ))
-    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
-        20,
+    .insert_resource(simulation)
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        simulation.fixed_delta,
     )))
-    .insert_resource(Time::<Fixed>::from_hz(50.0))
+    .insert_resource(Time::<Fixed>::from_seconds(simulation.fixed_delta))
     .insert_resource(SubstepCount(10))
-    .insert_resource(Gravity(Vec2::new(0.0, -9.81)))
+    .insert_resource(Gravity(Vec2::from_array(simulation.gravity)))
     .insert_resource(rig)
     .insert_resource(Session {
         overlay: false,
@@ -216,7 +218,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         .iter()
         .find(|a| a.part == "UpperLeg")
         .unwrap()
-        .angle;
+        .radians();
     let error = (relative - target + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
         - std::f32::consts::PI;
     println!(
@@ -245,7 +247,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
             .angles
             .iter()
             .find(|a| a.part == *name)
-            .map_or(0.0, |a| 2.0 * motor.reference_angle + a.angle);
+            .map_or(0.0, |a| 2.0 * motor.reference_angle + a.radians());
         let pose_error = ((b - a - target + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI)
