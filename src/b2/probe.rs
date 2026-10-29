@@ -54,6 +54,8 @@ struct Call {
 struct Reply {
     buffers: Vec<String>,
     ret: i64,
+    #[serde(default)]
+    ret_f: u32,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -637,6 +639,37 @@ fn compare_distance(executable: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+const PERLIN_NOISE: u32 = 0x975490;
+
+/// Mathf.PerlinNoise (crate::unity) on random, negative, large, integer and half-integer inputs.
+fn compare_perlin(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed);
+    let mut inputs: Vec<(f32, f32)> = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (255.5, 256.25), (-3.7, 2.2), (1e6, 1e-3), (-0.0, 7.0)];
+    for i in 0..20000 {
+        let scale = [1.0, 10.0, 300.0, 1e4, 1e7][i % 5];
+        inputs.push((random.range(-scale, scale), random.range(-scale, scale)));
+    }
+    let calls: Vec<Call> = inputs
+        .iter()
+        .map(|(x, y)| call(PERLIN_NOISE, vec![], &[&format!("f{}", x.to_bits()), &format!("f{}", y.to_bits())]))
+        .collect();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, inputs.len())?;
+    let mut first = None;
+    let mismatches = inputs
+        .iter()
+        .zip(&replies)
+        .filter(|((x, y), r)| {
+            let ours = crate::unity::perlin_noise(*x, *y).to_bits();
+            let bad = ours != r.ret_f;
+            if bad && first.is_none() {
+                first = Some(format!("PerlinNoise({x}, {y}): engine {:08x}, rewrite {ours:08x}", r.ret_f));
+            }
+            bad
+        })
+        .count();
+    report("Mathf.PerlinNoise", mismatches, inputs.len(), first)
+}
+
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
     compare_manifolds(executable)?;
@@ -646,7 +679,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_broad_phase(executable)?;
     compare_island_solve(executable, false)?;
     compare_island_solve(executable, true)?;
-    compare_revolute(executable)
+    compare_revolute(executable)?;
+    compare_perlin(executable)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {

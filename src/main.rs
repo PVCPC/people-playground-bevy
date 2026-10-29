@@ -8,6 +8,7 @@ mod living;
 mod motor;
 mod physics;
 mod replay;
+mod unity;
 
 use b2::{
     math::Vec2 as V,
