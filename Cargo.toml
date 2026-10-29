@@ -1,0 +1,22 @@
+[package]
+name = "people-playground-bevy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+bevy = { version = "=0.20.0", default-features = false, features = ["2d", "ui", "default_font", "multi_threaded"] }
+avian2d = { version = "=0.8.0", default-features = false, features = ["2d", "parry-f32", "xpbd_joints"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+raw-window-handle = "0.6.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
+[profile.dev]
+opt-level = 1
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 2

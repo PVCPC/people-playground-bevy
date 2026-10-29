@@ -1,0 +1,17 @@
+# Locally generated reference material and original game content.
+/assets/
+/unity-export/
+/decompiled/
+/ghidra/
+/tools/
+/source-sha256.json
+/asset-manifest.json
+/local-cache/
+/LOCAL_REFERENCE.md
+/start-ghidra.ps1
+/AGENTS.md
+*.log
+
+# Build output.
+/target/
+__pycache__/
