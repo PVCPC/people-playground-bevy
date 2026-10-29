@@ -217,7 +217,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     let hip = named(app, "LowerBody");
     let relative = app.world().get::<Rotation>(hip).unwrap().as_radians()
         - app.world().get::<Rotation>(thigh).unwrap().as_radians();
-    let target = -app.world().resource::<HumanRig>().poses[sitting]
+    let target = app.world().resource::<HumanRig>().poses[sitting]
         .angles
         .iter()
         .find(|a| a.part == "UpperLeg")
@@ -231,9 +231,9 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     );
     let mut max_pose_error = 0.0f32;
     let mut max_relative_speed = 0.0f32;
-    for (joint, muscle) in app
+    for (joint, muscle, motor) in app
         .world_mut()
-        .query::<(&RevoluteJoint, &living::MuscleJoint)>()
+        .query::<(&RevoluteJoint, &living::MuscleJoint, &motor::VelocityMotor)>()
         .iter(app.world())
     {
         let name = &app.world().resource::<HumanRig>().parts[muscle.definition].name;
@@ -251,7 +251,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
             .angles
             .iter()
             .find(|a| a.part == *name)
-            .map_or(0.0, |a| muscle.reference_angle - a.angle);
+            .map_or(0.0, |a| 2.0 * motor.reference_angle + a.angle);
         let pose_error = ((b - a - target + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI)

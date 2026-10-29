@@ -11,10 +11,12 @@ pub struct VelocityMotor {
     pub enabled: bool,
     pub target_velocity: f32,
     pub max_torque: f32,
+    pub reference_angle: f32,
     constraint: crate::hinge::VelocityConstraint,
     prepared: Option<(SolverBodyIndex, SolverBodyIndex)>,
     previous_angle: Option<f32>,
     angle: f32,
+    previous_inverse_dt: f32,
 }
 
 pub fn solve_velocity_motors(
@@ -103,14 +105,25 @@ pub fn solve_velocity_motors(
             wrapped
         };
         motor.previous_angle = Some(wrapped);
-        let state = joint.angle_limit.map_or(0, |limit| {
-            if inv_a + inv_b == 0.0 {
-                0
-            } else {
-                crate::hinge::limit_state(motor.angle, limit.min, limit.max)
-            }
-        });
+        let history = (
+            motor.constraint.impulse,
+            motor.constraint.motor_impulse,
+            motor.constraint.limit_state,
+        );
+        let velocity = |index| {
+            bodies.get(index).map_or([0.0; 3], |body| {
+                [
+                    body.linear_velocity.x,
+                    body.linear_velocity.y,
+                    body.angular_velocity,
+                ]
+            })
+        };
         motor.constraint = crate::hinge::VelocityConstraint {
+            velocity_a: velocity(a),
+            velocity_b: velocity(b),
+            impulse: history.0,
+            motor_impulse: history.1,
             inverse_mass_a: if bodies.get(a).is_some_and(|b| b.flags.is_dynamic()) {
                 mass_a.inverse()
             } else {
@@ -129,13 +142,38 @@ pub fn solve_velocity_motors(
             axis_b: axis(b),
             motor_enabled: motor.enabled,
             limit_enabled: joint.angle_limit.is_some(),
-            limit_state: state,
+            limit_state: history.2,
             target_velocity: motor.target_velocity,
             max_torque: motor.max_torque,
             dt: time.delta_secs(),
             ..default()
         };
-        motor.constraint.prepare_matrix();
+        let dt_ratio = time.delta_secs() * motor.previous_inverse_dt;
+        let reference = motor.reference_angle;
+        let angle = motor.angle - reference;
+        motor.constraint.initialize(
+            angle,
+            joint
+                .angle_limit
+                .map(|limit| [limit.min - reference, limit.max - reference]),
+            dt_ratio,
+            true,
+        );
+        motor.previous_inverse_dt = if time.delta_secs() > 0.0 {
+            1.0 / time.delta_secs()
+        } else {
+            0.0
+        };
+        if let Some(body) = bodies.get_mut(a) {
+            let [x, y, w] = motor.constraint.velocity_a;
+            body.linear_velocity = Vec2::new(x, y);
+            body.angular_velocity = w;
+        }
+        if let Some(body) = bodies.get_mut(b) {
+            let [x, y, w] = motor.constraint.velocity_b;
+            body.linear_velocity = Vec2::new(x, y);
+            body.angular_velocity = w;
+        }
         motor.prepared = Some((a, b));
     }
     // shortcut: Avian contacts/positions and substeps remain; native full-frame trajectories are unverified.
@@ -468,34 +506,29 @@ mod tests {
         app.finish();
         app.cleanup();
         let mut previous = 0.0;
-        for _ in 0..250 {
-            let mut case = input();
-            case.current_angle = app
-                .world()
-                .get::<Rotation>(child)
-                .unwrap()
-                .as_radians()
-                .to_degrees();
-            case.target_angle = 0.0;
-            case.rigidity = 2.0;
-            case.previous_speed = previous;
-            let output = command(&case);
-            previous = output.speed;
-            let mut motor = app.world_mut().get_mut::<VelocityMotor>(hinge).unwrap();
-            *motor = VelocityMotor {
-                enabled: true,
-                target_velocity: -output.speed.to_radians(),
-                max_torque: output.torque,
-                ..default()
-            };
-            app.update();
+        for target in [0.0f32, 90.0] {
+            for _ in 0..250 {
+                let mut case = input();
+                let attached = app.world().get::<Rotation>(child).unwrap().as_radians();
+                case.current_angle = crate::hinge::joint_angle(attached, 0.0, 0.0).to_degrees();
+                case.target_angle = target;
+                case.rigidity = 2.0;
+                case.previous_speed = previous;
+                let output = command(&case);
+                previous = output.speed;
+                let mut motor = app.world_mut().get_mut::<VelocityMotor>(hinge).unwrap();
+                motor.enabled = true;
+                motor.target_velocity = output.speed.to_radians();
+                motor.max_torque = output.torque;
+                app.update();
+            }
+            let angle = app.world().get::<Rotation>(child).unwrap().as_radians();
+            let speed = app.world().get::<AngularVelocity>(child).unwrap().0;
+            assert!(
+                (angle + target.to_radians()).abs() < 0.01 && speed.abs() < 0.02,
+                "angle={angle}, speed={speed}"
+            );
         }
-        let angle = app.world().get::<Rotation>(child).unwrap().as_radians();
-        let speed = app.world().get::<AngularVelocity>(child).unwrap().0;
-        assert!(
-            angle.abs() < 0.01 && speed.abs() < 0.02,
-            "angle={angle}, speed={speed}"
-        );
     }
 
     #[test]

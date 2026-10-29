@@ -1,6 +1,10 @@
 //! Prepared hinge velocity constraints in the installed engine's operation order.
 use serde::{Deserialize, Serialize};
 
+pub fn joint_angle(attached: f32, connected: f32, reference: f32) -> f32 {
+    (connected - attached) - reference
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct VelocityConstraint {
     pub velocity_a: [f32; 3],
@@ -60,6 +64,55 @@ fn solve33(m: &[f32; 9], b: [f32; 3]) -> [f32; 3] {
 }
 
 impl VelocityConstraint {
+    pub fn initialize(
+        &mut self,
+        angle: f32,
+        limits: Option<[f32; 2]>,
+        dt_ratio: f32,
+        warm_starting: bool,
+    ) {
+        self.prepare_matrix();
+        let fixed = self.inverse_inertia_a + self.inverse_inertia_b == 0.0;
+        if !self.motor_enabled || fixed {
+            self.motor_impulse = 0.0;
+        }
+        let old_state = self.limit_state;
+        self.limit_enabled = limits.is_some();
+        self.limit_state = if let Some([lower, upper]) = limits.filter(|_| !fixed) {
+            let state = limit_state(angle, lower, upper);
+            if state == 0 || ((state == 1 || state == 2) && state != old_state) {
+                self.impulse[2] = 0.0;
+            }
+            state
+        } else {
+            0
+        };
+        if warm_starting {
+            for value in &mut self.impulse {
+                *value = dt_ratio * *value;
+            }
+            self.motor_impulse = dt_ratio * self.motor_impulse;
+            let [x, y, z] = self.impulse;
+            self.velocity_a[0] -= x * self.inverse_mass_a;
+            self.velocity_a[1] -= y * self.inverse_mass_a;
+            self.velocity_a[2] -=
+                ((y * self.anchor_a[0] - x * self.anchor_a[1]) + self.motor_impulse + z)
+                    * self.inverse_inertia_a;
+            self.velocity_b[0] += x * self.inverse_mass_b;
+            self.velocity_b[1] += y * self.inverse_mass_b;
+            self.velocity_b[2] +=
+                ((y * self.anchor_b[0] - x * self.anchor_b[1]) + self.motor_impulse + z)
+                    * self.inverse_inertia_b;
+        } else {
+            self.impulse = [0.0; 3];
+            self.motor_impulse = 0.0;
+        }
+        self.velocity_a[0] *= self.axis_a[0];
+        self.velocity_a[1] *= self.axis_a[1];
+        self.velocity_b[0] *= self.axis_b[0];
+        self.velocity_b[1] *= self.axis_b[1];
+    }
+
     pub fn prepare_matrix(&mut self) {
         let [ax, ay] = self.anchor_a;
         let [bx, by] = self.anchor_b;
@@ -69,10 +122,11 @@ impl VelocityConstraint {
             self.inverse_inertia_a,
             self.inverse_inertia_b,
         );
-        let xx = ay * ay * ia + mb + ma + by * by * ib;
+        let mass_sum = mb + ma;
+        let xx = ay * ay * ia + mass_sum + by * by * ib;
         let xy = -(ay * ax * ia) - by * bx * ib;
         let xz = -(ay * ia) - by * ib;
-        let yy = ax * ax * ia + mb + ma + bx * bx * ib;
+        let yy = ax * ax * ia + mass_sum + bx * bx * ib;
         let yz = bx * ib + ax * ia;
         self.matrix = [xx, xy, xz, xy, yy, yz, xz, yz, ia + ib];
         self.motor_mass = if ia + ib > 0.0 { 1.0 / (ia + ib) } else { 0.0 };
@@ -274,7 +328,117 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
         ));
     }
     println!(
-        "NATIVE HINGE REFERENCE PASSED: {} prepared velocity-constraint iterations match the installed engine bit-for-bit. Integration, contacts, preparation and position solving are outside this check.",
+        "NATIVE HINGE VELOCITY PASSED: {} prepared velocity-constraint iterations match the installed engine bit-for-bit.",
+        cases.len()
+    );
+    compare_initialization(executable, &cases)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct InitializationCase {
+    #[serde(flatten)]
+    constraint: VelocityConstraint,
+    initialize: bool,
+    iterations: u32,
+    warm_starting: bool,
+    dt_ratio: f32,
+    reference_angle: f32,
+    position_a: [f32; 3],
+    position_b: [f32; 3],
+    local_center_a: [f32; 2],
+    local_center_b: [f32; 2],
+    limits: [f32; 2],
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct InitializationBits {
+    #[serde(flatten)]
+    velocity: NativeBits,
+    matrix_bits: [u32; 9],
+    motor_mass_bits: u32,
+    limit_state: u32,
+    anchor_a_bits: [u32; 2],
+    anchor_b_bits: [u32; 2],
+    joint_angle_bits: u32,
+}
+
+fn compare_initialization(
+    executable: &std::path::Path,
+    source: &[VelocityConstraint],
+) -> Result<(), String> {
+    let cases: Vec<_> = source
+        .iter()
+        .take(1024)
+        .enumerate()
+        .map(|(i, c)| InitializationCase {
+            constraint: c.clone(),
+            initialize: true,
+            iterations: 0,
+            warm_starting: i % 3 != 0,
+            dt_ratio: [0.5, 1.0, 2.0][i % 3],
+            reference_angle: [-0.5, 0.0, 0.5][i % 3],
+            position_a: [0.0, 0.0, c.velocity_a[0] * 0.25],
+            position_b: [0.0, 0.0, c.velocity_b[0] * 0.25],
+            local_center_a: [0.125, -0.25],
+            local_center_b: [-0.125, 0.0],
+            limits: match i % 4 {
+                0 => [-1.0, 1.0],
+                1 => [0.25, 1.0],
+                2 => [-1.0, -0.25],
+                _ => [0.0, 0.0],
+            },
+        })
+        .collect();
+    let expected: Vec<InitializationBits> = crate::motor::run_reference(executable, &cases)?;
+    let mut failures = 0;
+    for (i, (c, reference)) in cases.iter().zip(&expected).enumerate() {
+        let mut state = c.constraint.clone();
+        let rotate = |angle: f32, anchor: [f32; 2], center: [f32; 2]| {
+            let (sine, cosine) = angle.sin_cos();
+            let (x, y) = (anchor[0] - center[0], anchor[1] - center[1]);
+            [x * cosine - y * sine, y * cosine + x * sine]
+        };
+        state.anchor_a = rotate(c.position_a[2], state.anchor_a, c.local_center_a);
+        state.anchor_b = rotate(c.position_b[2], state.anchor_b, c.local_center_b);
+        state.initialize(
+            (c.position_b[2] - c.position_a[2]) - c.reference_angle,
+            if state.limit_enabled {
+                Some(c.limits)
+            } else {
+                None
+            },
+            c.dt_ratio,
+            c.warm_starting,
+        );
+        let bits = InitializationBits {
+            velocity: NativeBits::from(&state),
+            matrix_bits: state.matrix.map(f32::to_bits),
+            motor_mass_bits: state.motor_mass.to_bits(),
+            limit_state: state.limit_state,
+            anchor_a_bits: state.anchor_a.map(f32::to_bits),
+            anchor_b_bits: state.anchor_b.map(f32::to_bits),
+            joint_angle_bits: joint_angle(c.position_a[2], c.position_b[2], c.reference_angle)
+                .to_degrees()
+                .to_bits(),
+        };
+        if bits != *reference {
+            failures += 1;
+            if failures <= 3 {
+                eprintln!(
+                    "Native initialization mismatch {i}: Rust={bits:?}, original={reference:?}"
+                );
+            }
+        }
+    }
+    if failures != 0 {
+        return Err(format!(
+            "Native hinge initialization failed: {failures}/{} cases differ",
+            cases.len()
+        ));
+    }
+    println!(
+        "NATIVE HINGE INITIALIZATION PASSED: {} matrix, limit-state and warm-start cases match the installed engine bit-for-bit.",
         cases.len()
     );
     Ok(())
@@ -283,6 +447,34 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn joint_angle_uses_connected_minus_attached_minus_reference() {
+        let angle = joint_angle(90f32.to_radians(), 0.0, 15f32.to_radians()).to_degrees();
+        assert!((angle + 105.0).abs() < 0.00001);
+    }
+    #[test]
+    fn warm_start_scales_history_and_cold_start_discards_it() {
+        let mut state = VelocityConstraint {
+            inverse_mass_a: 1.0,
+            inverse_mass_b: 1.0,
+            inverse_inertia_a: 1.0,
+            inverse_inertia_b: 1.0,
+            axis_a: [1.0; 2],
+            axis_b: [1.0; 2],
+            motor_enabled: true,
+            impulse: [2.0, -4.0, 0.0],
+            motor_impulse: 2.0,
+            ..Default::default()
+        };
+        state.initialize(0.0, None, 0.5, true);
+        assert_eq!(state.impulse, [1.0, -2.0, 0.0]);
+        assert_eq!(state.motor_impulse, 1.0);
+        assert_eq!(state.velocity_a, [-1.0, 2.0, -1.0]);
+        assert_eq!(state.velocity_b, [1.0, -2.0, 1.0]);
+        state.initialize(0.0, None, 1.0, false);
+        assert_eq!(state.impulse, [0.0; 3]);
+        assert_eq!(state.motor_impulse, 0.0);
+    }
     #[test]
     fn limit_states_preserve_the_native_slop_boundary() {
         assert_eq!(limit_state(0.0, -1.0, 1.0), 0);

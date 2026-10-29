@@ -341,28 +341,30 @@ fn spawn_human(
         connected: Default::default(),
     });
     for joint in &rig.joints {
-        let mut hinge = RevoluteJoint::new(entities[joint.a.as_str()], entities[joint.b.as_str()])
-            .with_local_anchor1(Vec2::from_array(joint.anchor_a))
-            .with_local_anchor2(Vec2::from_array(joint.anchor_b));
-        // Unity measures child minus parent; Avian measures body2 minus body1.
-        if let Some([min, max]) = joint.limits {
-            hinge = hinge.with_angle_limits(-max, -min);
-        }
         let definition = rig
             .parts
             .iter()
             .position(|part| part.name == joint.a)
             .unwrap();
         let parent = rig.parts.iter().find(|part| part.name == joint.b).unwrap();
+        let reference = parent.angle - rig.parts[definition].angle;
+        let mut hinge = RevoluteJoint::new(entities[joint.a.as_str()], entities[joint.b.as_str()])
+            .with_local_anchor1(Vec2::from_array(joint.anchor_a))
+            .with_local_anchor2(Vec2::from_array(joint.anchor_b));
+        // Native FetchBodyA is attached; FetchBodyB is connected. Both solvers measure B minus A.
+        if let Some([min, max]) = joint.limits {
+            hinge = hinge.with_angle_limits(min + reference, max + reference);
+        }
+        let mut velocity_motor = motor::VelocityMotor::default();
+        velocity_motor.reference_angle = reference;
         commands.spawn((
             SandboxObject,
             hinge,
             JointCollisionDisabled,
-            motor::VelocityMotor::default(),
+            velocity_motor,
             living::MuscleJoint {
                 owner,
                 definition,
-                reference_angle: parent.angle - rig.parts[definition].angle,
                 previous_speed: 0.0,
             },
         ));

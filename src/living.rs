@@ -27,7 +27,6 @@ pub struct Limb {
 pub struct MuscleJoint {
     pub owner: Entity,
     pub definition: usize,
-    pub reference_angle: f32,
     pub previous_speed: f32,
 }
 
@@ -96,9 +95,13 @@ pub fn drive_muscles(
         let (child, mass) = rotations_and_masses.get(joint.body1).unwrap();
         let (parent, _) = rotations_and_masses.get(joint.body2).unwrap();
         let output = motor::command(&motor::MotorInput {
-            current_angle: (child.as_radians() - parent.as_radians() + muscle.reference_angle)
-                .to_degrees(),
-            reference_angle: -muscle.reference_angle.to_degrees(),
+            current_angle: hinge::joint_angle(
+                child.as_radians(),
+                parent.as_radians(),
+                motor.reference_angle,
+            )
+            .to_degrees(),
+            reference_angle: motor.reference_angle.to_degrees(),
             target_angle: target.map_or(0.0, |t| t.angle.to_degrees()),
             previous_speed: muscle.previous_speed,
             rigidity: pose.rigidity,
@@ -115,7 +118,7 @@ pub fn drive_muscles(
         .clamp_native_properties();
         muscle.previous_speed = output.speed;
         motor.enabled = output.torque > 0.0;
-        motor.target_velocity = -output.speed.to_radians();
+        motor.target_velocity = output.speed.to_radians();
         motor.max_torque = output.torque;
     }
     for (entity, limb, rotation, mut forces) in &mut bodies {
