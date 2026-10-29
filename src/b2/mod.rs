@@ -5,3 +5,4 @@ pub mod collide;
 pub mod math;
 pub mod probe;
 pub mod shape;
+pub mod solver;

@@ -3,6 +3,7 @@
 use super::collide::*;
 use super::math::{Transform, Vec2};
 use super::shape::*;
+use super::solver::*;
 use serde::{Deserialize, Serialize};
 
 const SET: u32 = 0xbb4b90;
@@ -12,6 +13,18 @@ const COLLIDE_POLYGON_AND_CIRCLE: u32 = 0xbaf500;
 const COLLIDE_POLYGONS: u32 = 0xbaf8f0;
 const COLLIDE_RADIAL_POLYGONS: u32 = 0xbaffe0;
 const WORLD_MANIFOLD: u32 = 0xbadb50;
+const INITIALIZE_VELOCITY: u32 = 0xbbe5f0;
+const WARM_START: u32 = 0xbc0780;
+const SOLVE_VELOCITY: u32 = 0xbbf920;
+const SOLVE_POSITION: u32 = 0xbbee60;
+const SOLVE_TOI_POSITION: u32 = 0xbbf3a0;
+/// b2_velocityThreshold, b2_maxLinearCorrection, b2_baumgarte and b2_toiBaugarte in .data.
+const SOLVER_GLOBALS: [[u32; 2]; 4] = [
+    [0x1999c2c, VELOCITY_THRESHOLD.to_bits()],
+    [0x1999c30, MAX_LINEAR_CORRECTION.to_bits()],
+    [0x1999c40, BAUMGARTE.to_bits()],
+    [0x1999c44, TOI_BAUMGARTE.to_bits()],
+];
 
 #[derive(Serialize)]
 struct Batch {
@@ -25,11 +38,13 @@ struct Call {
     buffers: Vec<String>,
     args: Vec<String>,
     returns_float: bool,
+    links: Vec<[usize; 4]>,
 }
 
 #[derive(Deserialize)]
 struct Reply {
     buffers: Vec<String>,
+    ret: i64,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -163,7 +178,7 @@ fn random_transform(random: &mut Random, extent: f32) -> Transform {
 }
 
 fn call(rva: u32, buffers: Vec<Vec<u8>>, args: &[&str]) -> Call {
-    Call { rva, buffers: buffers.iter().map(|b| hex(b)).collect(), args: args.iter().map(|a| a.to_string()).collect(), returns_float: false }
+    Call { rva, buffers: buffers.iter().map(|b| hex(b)).collect(), args: args.iter().map(|a| a.to_string()).collect(), returns_float: false, links: vec![] }
 }
 
 fn report(name: &str, mismatches: usize, total: usize, first: Option<String>) -> Result<(), String> {
@@ -306,7 +321,231 @@ fn compare_manifolds(executable: &std::path::Path) -> Result<(), String> {
     report("WORLD MANIFOLD", bad, replies.len(), first)
 }
 
+fn velocity_constraint_bytes(vc: &VelocityConstraint) -> Vec<u8> {
+    let mut b = vec![0; 0xac];
+    for (j, p) in vc.points.iter().enumerate() {
+        let o = 36 * j;
+        put_vec(&mut b, o, p.r_a);
+        put_vec(&mut b, o + 8, p.r_b);
+        for (k, v) in [p.normal_impulse, p.tangent_impulse, p.normal_mass, p.tangent_mass, p.velocity_bias].iter().enumerate() {
+            put(&mut b, o + 16 + 4 * k, v.to_bits());
+        }
+    }
+    put_vec(&mut b, 0x48, vc.normal);
+    for (o, m) in [(0x50, vc.normal_mass), (0x60, vc.k)] {
+        put_vec(&mut b, o, m.ex);
+        put_vec(&mut b, o + 8, m.ey);
+    }
+    put(&mut b, 0x70, vc.index_a as u32);
+    put(&mut b, 0x74, vc.index_b as u32);
+    put_vec(&mut b, 0x78, vc.axis_a);
+    put_vec(&mut b, 0x80, vc.axis_b);
+    for (k, v) in [vc.inv_mass_a, vc.inv_mass_b, vc.inv_i_a, vc.inv_i_b, vc.friction, vc.restitution, vc.tangent_speed].iter().enumerate() {
+        put(&mut b, 0x88 + 4 * k, v.to_bits());
+    }
+    put(&mut b, 0xa4, vc.point_count as u32);
+    put(&mut b, 0xa8, vc.contact_index as u32);
+    b
+}
+
+fn position_constraint_bytes(pc: &PositionConstraint) -> Vec<u8> {
+    let mut b = vec![0; 0x68];
+    put_vec(&mut b, 0, pc.local_points[0]);
+    put_vec(&mut b, 8, pc.local_points[1]);
+    put_vec(&mut b, 0x10, pc.local_normal);
+    put_vec(&mut b, 0x18, pc.local_point);
+    put(&mut b, 0x20, pc.index_a as u32);
+    put(&mut b, 0x24, pc.index_b as u32);
+    put_vec(&mut b, 0x28, pc.axis_a);
+    put_vec(&mut b, 0x30, pc.axis_b);
+    put(&mut b, 0x38, pc.inv_mass_a.to_bits());
+    put(&mut b, 0x3c, pc.inv_mass_b.to_bits());
+    put_vec(&mut b, 0x40, pc.local_center_a);
+    put_vec(&mut b, 0x48, pc.local_center_b);
+    put(&mut b, 0x50, pc.inv_i_a.to_bits());
+    put(&mut b, 0x54, pc.inv_i_b.to_bits());
+    put(&mut b, 0x58, pc.kind as u32);
+    put(&mut b, 0x5c, pc.radius_a.to_bits());
+    put(&mut b, 0x60, pc.radius_b.to_bits());
+    put(&mut b, 0x64, pc.point_count as u32);
+    b
+}
+
+fn island_bytes(positions: &[Position], velocities: &[Velocity]) -> (Vec<u8>, Vec<u8>) {
+    let mut p = vec![0; 12 * positions.len()];
+    let mut v = vec![0; 12 * velocities.len()];
+    for (i, (x, y)) in positions.iter().zip(velocities).enumerate() {
+        put_vec(&mut p, 12 * i, x.c);
+        put(&mut p, 12 * i + 8, x.a.to_bits());
+        put_vec(&mut v, 12 * i, y.v);
+        put(&mut v, 12 * i + 8, y.w.to_bits());
+    }
+    (p, v)
+}
+
+/// The island state a solver pass leaves: positions, velocities, position and velocity constraints.
+fn solver_state(solver: &ContactSolver, positions: &[Position], velocities: &[Velocity]) -> [Vec<u8>; 4] {
+    let (p, v) = island_bytes(positions, velocities);
+    let pcs = solver.position_constraints.iter().flat_map(position_constraint_bytes).collect();
+    let vcs = solver.velocity_constraints.iter().flat_map(velocity_constraint_bytes).collect();
+    [p, v, pcs, vcs]
+}
+
+/// A b2ContactSolver call over the whole island state: buffers 0 solver, 1 positions, 2 velocities,
+/// 3 position constraints, 4 velocity constraints, 5 contact pointers, 6 contacts (manifold at 0x80).
+fn solver_call(rva: u32, solver: &ContactSolver, contacts: &[SolverContact], positions: &[Position], velocities: &[Velocity], args: &[&str]) -> Call {
+    let mut s = vec![0; 0x58];
+    let step = solver.step;
+    let fields = [step.dt.to_bits(), step.inv_dt.to_bits(), step.dt_ratio.to_bits(), step.velocity_iterations as u32, step.position_iterations as u32, step.warm_starting as u32];
+    for (k, v) in fields.iter().enumerate() {
+        put(&mut s, 8 + 4 * k, *v);
+    }
+    put(&mut s, 0x50, contacts.len() as u32);
+    let [p, v, pcs, vcs] = solver_state(solver, positions, velocities);
+    let mut records = vec![0; 312 * contacts.len()];
+    for (i, c) in contacts.iter().enumerate() {
+        records[312 * i + 0x80..312 * i + 0x80 + 72].copy_from_slice(&manifold_bytes(&c.manifold));
+    }
+    let mut call = call(rva, vec![s, p, v, pcs, vcs, vec![0; 8 * contacts.len()], records], args);
+    call.links = vec![[0, 0x20, 1, 0], [0, 0x28, 2, 0], [0, 0x38, 3, 0], [0, 0x40, 4, 0], [0, 0x48, 5, 0]];
+    call.links.extend((0..contacts.len()).map(|i| [5, 8 * i, 6, 312 * i]));
+    call
+}
+
+/// A small island of overlapping bodies whose manifolds come from the ported narrow phase at the body transforms.
+fn random_island(random: &mut Random, case: usize) -> (Vec<Position>, Vec<Velocity>, Vec<SolverContact>) {
+    const BODIES: usize = 4;
+    let axes = [Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 0.0)];
+    let bodies: Vec<SolverBody> = (0..BODIES)
+        .map(|i| {
+            let fixed = (case + i) % 7 == 0;
+            SolverBody {
+                inv_mass: if fixed { 0.0 } else { random.range(0.1, 3.0) },
+                axis: axes[random.next() as usize % axes.len()],
+                inv_i: if fixed { 0.0 } else { random.range(0.0, 20.0) },
+                local_center: random.vec(0.2),
+            }
+        })
+        .collect();
+    let positions: Vec<Position> = (0..BODIES).map(|_| Position { c: random.vec(0.3), a: random.range(-3.2, 3.2) }).collect();
+    let velocities: Vec<Velocity> = (0..BODIES).map(|_| Velocity { v: random.vec(4.0), w: random.range(-6.0, 6.0) }).collect();
+    let xf = |i: usize| {
+        let q = super::math::Rot::new(positions[i].a);
+        Transform { p: positions[i].c - q.apply(bodies[i].local_center), q }
+    };
+    let mut contacts = Vec::new();
+    while contacts.len() < 3 {
+        let index_a = random.next() as usize % BODIES;
+        let index_b = (index_a + 1 + random.next() as usize % (BODIES - 1)) % BODIES;
+        let (xf_a, xf_b) = (xf(index_a), xf(index_b));
+        let mut manifold = Manifold::default();
+        let k = random.next() as usize;
+        let (radius_a, radius_b) = match k % 4 {
+            0 | 1 => {
+                let a = random_polygon(random, k);
+                let b = random_polygon(random, k / 4);
+                collide_polygons(&mut manifold, &a, &xf_a, &b, &xf_b);
+                (a.radius, b.radius)
+            }
+            2 => {
+                let a = random_polygon(random, k);
+                let b = Circle { radius: random.range(0.02, 0.6), p: random.vec(0.3) };
+                collide_polygon_and_circle(&mut manifold, &a, &xf_a, &b, &xf_b);
+                (a.radius, b.radius)
+            }
+            _ => {
+                let a = Circle { radius: random.range(0.02, 0.6), p: random.vec(0.3) };
+                let b = Circle { radius: random.range(0.02, 0.6), p: random.vec(0.3) };
+                collide_circles(&mut manifold, &a, &xf_a, &b, &xf_b);
+                (a.radius, b.radius)
+            }
+        };
+        if manifold.point_count == 0 {
+            continue;
+        }
+        for point in &mut manifold.points[..manifold.point_count] {
+            point.normal_impulse = random.range(0.0, 0.5);
+            point.tangent_impulse = random.range(-0.2, 0.2);
+        }
+        contacts.push(SolverContact {
+            manifold,
+            radius_a,
+            radius_b,
+            friction: random.range(0.0, 1.0),
+            restitution: if k % 3 == 0 { 0.0 } else { random.range(0.0, 1.0) },
+            tangent_speed: if k % 5 == 0 { random.range(-1.0, 1.0) } else { 0.0 },
+            index_a,
+            index_b,
+            body_a: bodies[index_a],
+            body_b: bodies[index_b],
+        });
+    }
+    (positions, velocities, contacts)
+}
+
+/// Each native solver pass runs on the Rust state just before the matching Rust pass and is compared after it.
+fn compare_solver(executable: &std::path::Path) -> Result<(), String> {
+    const NAMES: [&str; 5] = ["INITIALIZE VELOCITY", "WARM START", "SOLVE VELOCITY", "SOLVE POSITION", "SOLVE TOI POSITION"];
+    let mut random = Random(0x5eed_0003);
+    let mut calls = Vec::new();
+    let mut expected = Vec::new();
+    for case in 0..2048 {
+        let (mut positions, mut velocities, contacts) = random_island(&mut random, case);
+        let step = TimeStep { dt: 1.0 / 60.0, inv_dt: 60.0, dt_ratio: [1.0, 0.75][case % 2], velocity_iterations: 8, position_iterations: 3, warm_starting: case % 8 != 0 };
+        let mut solver = ContactSolver::new(step, &contacts);
+        calls.push(solver_call(INITIALIZE_VELOCITY, &solver, &contacts, &positions, &velocities, &["b0"]));
+        solver.initialize_velocity_constraints(&positions, &velocities);
+        expected.push((solver_state(&solver, &positions, &velocities), false));
+        calls.push(solver_call(WARM_START, &solver, &contacts, &positions, &velocities, &["b0"]));
+        solver.warm_start(&mut velocities);
+        expected.push((solver_state(&solver, &positions, &velocities), false));
+        for _ in 0..case % 3 {
+            solver.solve_velocity_constraints(&mut velocities);
+        }
+        calls.push(solver_call(SOLVE_VELOCITY, &solver, &contacts, &positions, &velocities, &["b0"]));
+        solver.solve_velocity_constraints(&mut velocities);
+        expected.push((solver_state(&solver, &positions, &velocities), false));
+        // Integrate a little so separations land on both sides of the slop.
+        for (p, v) in positions.iter_mut().zip(&velocities) {
+            p.c = p.c + v.v * (1.0 / 60.0);
+            p.a = p.a + v.w * (1.0 / 60.0);
+        }
+        calls.push(solver_call(SOLVE_POSITION, &solver, &contacts, &positions, &velocities, &["b0"]));
+        let ok = solver.solve_position_constraints(&mut positions);
+        expected.push((solver_state(&solver, &positions, &velocities), ok));
+        let (toi_a, toi_b) = (contacts[0].index_a, contacts[0].index_b);
+        calls.push(solver_call(SOLVE_TOI_POSITION, &solver, &contacts, &positions, &velocities, &["b0", &format!("i{toi_a}"), &format!("i{toi_b}")]));
+        let ok = solver.solve_toi_position_constraints(&mut positions, toi_a, toi_b);
+        expected.push((solver_state(&solver, &positions, &velocities), ok));
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: SOLVER_GLOBALS.to_vec(), calls }, count)?;
+    let words = |b: &[u8]| (0..b.len() / 4).map(|k| get(b, 4 * k)).collect::<Vec<u32>>();
+    let mut bad = [0usize; 5];
+    let mut first: [Option<String>; 5] = Default::default();
+    for (i, reply) in replies.iter().enumerate() {
+        let (state, ret) = &expected[i];
+        let mut diffs = Vec::new();
+        for (k, name) in ["positions", "velocities", "pcs", "vcs"].iter().enumerate() {
+            let (rust, native) = (words(&state[k]), words(&unhex(&reply.buffers[k + 1])));
+            if let Some(at) = (0..rust.len()).find(|&w| rust[w] != native[w]) {
+                diffs.push(format!("{name}@0x{:x} native={:08x} rust={:08x}", 4 * at, native[at], rust[at]));
+            }
+        }
+        if i % 5 >= 3 && ((reply.ret & 0xff) != 0) != *ret {
+            diffs.push(format!("ret native={} rust={ret}", reply.ret & 0xff));
+        }
+        if !diffs.is_empty() {
+            bad[i % 5] += 1;
+            first[i % 5].get_or_insert_with(|| format!("case {}: {}", i / 5, diffs.join(", ")));
+        }
+    }
+    let failures: Vec<String> = (0..5).filter_map(|k| report(NAMES[k], bad[k], replies.len() / 5, first[k].take()).err()).collect();
+    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+}
+
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
-    compare_manifolds(executable)
+    compare_manifolds(executable)?;
+    compare_solver(executable)
 }
