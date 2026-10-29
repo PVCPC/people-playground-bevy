@@ -487,6 +487,14 @@ pub fn run_reference<I: Serialize, O: serde::de::DeserializeOwned>(
     executable: &std::path::Path,
     cases: &[I],
 ) -> Result<Vec<O>, String> {
+    run_probe(executable, cases, cases.len())
+}
+
+pub fn run_probe<I: Serialize + ?Sized, O: serde::de::DeserializeOwned>(
+    executable: &std::path::Path,
+    cases: &I,
+    count: usize,
+) -> Result<Vec<O>, String> {
     use std::process::{Command, Stdio};
     let mut process = Command::new(executable);
     process
@@ -511,7 +519,7 @@ pub fn run_reference<I: Serialize, O: serde::de::DeserializeOwned>(
     }
     let expected: Vec<O> = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("Invalid reference output: {e}"))?;
-    if expected.len() != cases.len() {
+    if expected.len() != count {
         return Err("Reference probe returned an incomplete case set".into());
     }
     Ok(expected)

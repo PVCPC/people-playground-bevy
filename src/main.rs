@@ -1,3 +1,4 @@
+mod b2;
 mod desktop;
 mod game_assets;
 mod headless;
@@ -74,6 +75,7 @@ fn run() -> Result<(), String> {
     let mut headless = false;
     let mut reference_probe = None;
     let mut native_probe = None;
+    let mut b2_probe = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -98,8 +100,16 @@ fn run() -> Result<(), String> {
                         .ok_or("--native-reference-test needs a probe path")?,
                 ));
             }
+            "--b2-reference-test" => {
+                b2_probe = Some(PathBuf::from(
+                    arguments.next().ok_or("--b2-reference-test needs a probe path")?,
+                ));
+            }
             _ => return Err(format!("Unknown argument: {argument}")),
         }
+    }
+    if let Some(probe) = b2_probe {
+        return b2::probe::compare_reference(&probe);
     }
     let game = game_assets::find_game(explicit_game)?;
     let rig = HumanRig::load(&cache, &game)?;
