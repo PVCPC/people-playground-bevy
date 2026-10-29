@@ -1,5 +1,8 @@
 //! UnityEngine natives the game scripts call, rewritten from UnityPlayer.dll (Unity 2020.3).
 
+/// The engine's 2 pi constant (0x40c90fdb).
+const TWO_PI: f32 = 6.2831855;
+
 /// UnityEngine.Random: the scripting xorshift128 state (Rand in the engine).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Random {
@@ -33,6 +36,30 @@ impl Random {
     pub fn range(&mut self, min: f32, max: f32) -> f32 {
         let t = self.value();
         (1.0 - t) * max + t * min
+    }
+
+    /// Random.insideUnitCircle (Random_CUSTOM_GetRandomUnitCircle)
+    pub fn inside_unit_circle(&mut self) -> [f32; 2] {
+        let angle = self.range(0.0, TWO_PI);
+        let (cos, sin) = (angle.cos(), angle.sin());
+        let radius = self.range(0.0, 1.0).sqrt();
+        [cos * radius, sin * radius]
+    }
+
+    /// RandomUnitVector(Rand&): Random.onUnitSphere
+    pub fn on_unit_sphere(&mut self) -> [f32; 3] {
+        let t = self.value();
+        let z = (1.0 - t) - t;
+        let angle = self.range(0.0, TWO_PI);
+        let radius = (1.0 - z * z).sqrt();
+        [angle.cos() * radius, angle.sin() * radius, z]
+    }
+
+    /// Random.insideUnitSphere
+    pub fn inside_unit_sphere(&mut self) -> [f32; 3] {
+        let v = self.on_unit_sphere();
+        let scale = self.value().powf(f32::from_bits(0x3eaaaaab));
+        [v[0] * scale, v[1] * scale, v[2] * scale]
     }
 
     /// Random.Range(int, int): max exclusive; min - n when min > max.

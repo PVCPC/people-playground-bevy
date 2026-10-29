@@ -160,7 +160,8 @@ impl Curve {
         let n = self.keys.len() as i32;
         let time = |i: i32| self.keys[i as usize][0];
         // A wrapped time that rounds below the first key gives -1, and the engine then reads the bytes in front of
-        // the key array; the rewrite reads key 0 there instead.
+        // the key array; the rewrite reads key 0 there instead. Unreachable with the game's pose curves: all
+        // ping-pong over [0, 1], whose wrap only divides and multiplies by 2 and so is exact.
         let found = |i: i32| (i.max(0) as usize, (i + 1).min(n - 1) as usize);
         // Branches as compiled: a NaN time steps backward from the hint, then takes the right half of every split.
         let mut i = cache.index;

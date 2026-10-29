@@ -114,6 +114,10 @@ fn run() -> Result<(), String> {
                     arguments.next().ok_or("--b2-reference-test needs a probe path")?,
                 ));
             }
+            "--random-test" => {
+                let path = PathBuf::from(arguments.next().ok_or("--random-test needs a recording")?);
+                return replay::compare_random(&path);
+            }
             "--replay-test" => {
                 replay = Some(PathBuf::from(arguments.next().ok_or("--replay-test needs a recording")?));
             }
