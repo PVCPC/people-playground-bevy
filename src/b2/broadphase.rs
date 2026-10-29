@@ -302,6 +302,18 @@ impl BroadPhase {
         id
     }
 
+    /// A proxy with a dumped fat AABB, for restoring a game world.
+    pub fn restore_proxy(&mut self, fat: &Aabb, user_data: usize) -> i32 {
+        let id = self.tree.allocate_node();
+        let node = self.tree.node_mut(id);
+        node.aabb = *fat;
+        node.user_data = user_data;
+        node.height = 0;
+        self.tree.insert_leaf(id);
+        self.proxy_count += 1;
+        id
+    }
+
     /// DestroyProxy (180bac7d0): Unity swap-removes the id from the move buffer.
     pub fn destroy_proxy(&mut self, id: i32) {
         let mut i = 0;

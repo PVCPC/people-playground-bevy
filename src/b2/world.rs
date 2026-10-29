@@ -332,7 +332,7 @@ pub struct Contact {
     pub friction: f32,
     pub restitution: f32,
     pub tangent_speed: f32,
-    manager_index: usize,
+    pub(crate) manager_index: usize,
 }
 
 pub type JointId = usize;
@@ -372,6 +372,8 @@ pub struct World {
     pub sub_stepping: bool,
     step_complete: bool,
     inv_dt0: f32,
+    /// Physics2D.IgnoreCollision pairs (lower fixture id first), checked where Unity's contact filter runs.
+    pub ignored: std::collections::HashSet<(FixtureId, FixtureId)>,
 }
 
 impl Default for World {
@@ -404,6 +406,7 @@ impl World {
             sub_stepping: false,
             step_complete: true,
             inv_dt0: 0.0,
+            ignored: Default::default(),
         }
     }
 
@@ -423,7 +426,7 @@ impl World {
         self.contacts[id].as_ref().unwrap()
     }
 
-    fn contact_mut(&mut self, id: ContactId) -> &mut Contact {
+    pub(crate) fn contact_mut(&mut self, id: ContactId) -> &mut Contact {
         self.contacts[id].as_mut().unwrap()
     }
 
@@ -725,8 +728,7 @@ impl World {
         if !self.bodies_should_collide(body_b, body_a) {
             return;
         }
-        // ponytail: Unity's layer contact filter is not modelled yet.
-        if !should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) {
+        if !self.fixtures_should_collide(fa, fb) {
             return;
         }
         let c = self.create_contact(fa, fb);
@@ -765,6 +767,57 @@ impl World {
                 self.contacts.len() - 1
             }
         }
+    }
+
+    /// A contact restored from a game dump: created like a new pair, then the caller sets its state.
+    /// Restoring the native list tail first rebuilds the list and every body's edge list in native order.
+    pub(crate) fn restore_contact(&mut self, fa: FixtureId, fb: FixtureId) -> ContactId {
+        let id = self.create_contact(fa, fb);
+        self.on_contact_create(id);
+        id
+    }
+
+    /// After a restore (contact flags and manager indices set): Unity's contact arrays by the CONTINUOUS flag in
+    /// manager-index order, and the dumped move buffer, e_newFixture and m_inv_dt0.
+    pub(crate) fn finish_restore(&mut self, inv_dt0: f32, new_fixture: bool, moves: Vec<i32>) -> Result<(), String> {
+        let mut all: Vec<ContactId> = self.contact_list.clone();
+        all.sort_by_key(|&c| self.contact(c).manager_index);
+        let (toi, non_toi): (Vec<ContactId>, Vec<ContactId>) = all.into_iter().partition(|&c| self.contact(c).flags & CONTACT_CONTINUOUS != 0);
+        for list in [&toi, &non_toi] {
+            if list.iter().enumerate().any(|(i, &c)| self.contact(c).manager_index != i) {
+                return Err("contact manager indices have gaps".into());
+            }
+        }
+        (self.contacts_toi, self.contacts_non_toi) = (toi, non_toi);
+        self.broad_phase.move_buffer = moves;
+        self.flags &= !WORLD_NEW_FIXTURE;
+        if new_fixture {
+            self.flags |= WORLD_NEW_FIXTURE;
+        }
+        self.inv_dt0 = inv_dt0;
+        Ok(())
+    }
+
+    /// A fresh broadphase holding the dumped proxies (fixture, AABB, fat AABB), given in the game's proxy-id order:
+    /// the fresh ids then sort the same, which is all UpdatePairs sees of them.
+    pub(crate) fn restore_proxies(&mut self, proxies: &[(FixtureId, Aabb, Aabb)]) -> Vec<i32> {
+        self.broad_phase = BroadPhase::default();
+        for f in self.fixtures.iter_mut().flatten() {
+            f.proxies.clear();
+        }
+        let mut ids = Vec::new();
+        for &(f, aabb, fat) in proxies {
+            let id = self.broad_phase.restore_proxy(&fat, f);
+            self.fixtures[f].as_mut().unwrap().proxies.push((aabb, id));
+            ids.push(id);
+        }
+        ids
+    }
+
+    /// Unity's b2ContactFilter: the fixture filters, then Physics2D.IgnoreCollision.
+    // ponytail: Unity's layer collision matrix is not modelled yet (every shipped object is on a colliding layer).
+    fn fixtures_should_collide(&self, fa: FixtureId, fb: FixtureId) -> bool {
+        should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(fa.min(fb), fa.max(fb)))
     }
 
     /// b2ContactManager::OnContactCreate (180bb98f0).
@@ -832,7 +885,7 @@ impl World {
             let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
             let (body_a, body_b) = (fa.body, fb.body);
             if c.flags & CONTACT_FILTER != 0 {
-                if !self.bodies_should_collide(body_b, body_a) || !should_collide(&fa.filter, &fb.filter) {
+                if !self.bodies_should_collide(body_b, body_a) || !self.fixtures_should_collide(c.fixture_a, c.fixture_b) {
                     self.destroy_contact(id);
                     continue;
                 }

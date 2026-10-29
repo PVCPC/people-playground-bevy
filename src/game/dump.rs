@@ -10,6 +10,8 @@ use crate::game_assets::{CurveCache, HumanRig};
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod physics;
+
 /// Transform.eulerAngles.z: Internal_ToEulerRad normalizes (divides by the length), then
 /// QuaternionToEuler (kOrderUnityDefault, CRT atan2f of the z row), then Internal_MakePositive
 /// on the degrees. Matches all 1694 dumped transforms bit for bit.

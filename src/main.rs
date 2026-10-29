@@ -123,6 +123,10 @@ fn run() -> Result<(), String> {
             "--replay-test" => {
                 replay = Some(PathBuf::from(arguments.next().ok_or("--replay-test needs a recording")?));
             }
+            "--physics-test" => {
+                let path = PathBuf::from(arguments.next().ok_or("--physics-test needs a PPG_DUMP recording")?);
+                return game::dump::physics::physics_test(&path);
+            }
             "--script-test" => {
                 script = Some(PathBuf::from(arguments.next().ok_or("--script-test needs a PPG_DUMP recording")?));
             }
