@@ -11,6 +11,7 @@
 /LOCAL_REFERENCE.md
 /start-ghidra.ps1
 /AGENTS.md
+/reference-probe/
 *.log
 
 # Build output.

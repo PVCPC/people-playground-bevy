@@ -2,6 +2,7 @@ mod desktop;
 mod game_assets;
 mod headless;
 mod living;
+mod motor;
 
 use avian2d::prelude::*;
 use bevy::{
@@ -69,6 +70,7 @@ fn run() -> Result<(), String> {
     let mut cache = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("local-cache");
     let mut smoke = false;
     let mut headless = false;
+    let mut reference_probe = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -80,12 +82,21 @@ fn run() -> Result<(), String> {
             "--cache" => cache = arguments.next().ok_or("--cache needs a path")?.into(),
             "--smoke-test" => smoke = true,
             "--headless-test" => headless = true,
+            "--reference-test" => {
+                reference_probe =
+                    Some(PathBuf::from(arguments.next().ok_or(
+                        "--reference-test needs the private probe executable path",
+                    )?))
+            }
             _ => return Err(format!("Unknown argument: {argument}")),
         }
     }
     let game = game_assets::find_game(explicit_game)?;
     let rig = HumanRig::load(&cache, &game)?;
     let cache = cache.canonicalize().map_err(|e| e.to_string())?;
+    if let Some(probe) = reference_probe {
+        return motor::compare_reference(&probe);
+    }
     println!("Installed game verified: {}", game.display());
     println!(
         "Imported human: {} rigid bodies, {} joints",

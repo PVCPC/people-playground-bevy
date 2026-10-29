@@ -91,4 +91,12 @@ cargo run -- --headless-test
 
 The headless test requires a local game installation and prepared cache. It simulates passive settling, dragging, and release under gravity, checking body/joint counts, finite physics, floor containment, joint anchor gaps, and render-transform synchronization. With a muscle-enabled cache it also checks upright rest, limp collapse, all sitting-pose motors in free space, limb/brain disconnection, and independence between two humans. It creates no window or renderer.
 
+`src/motor.rs` separately implements healthy, static-pose motor-command calculations in the original degree units. A local comparison against extracted C# methods passed 2,052 deterministic cases with identical float bits for speed and torque, including the exact half-turn boundary. This kernel is not yet connected to the live simulation. The check does not establish native physics, animated-pose, or injury parity.
+
+Development uses a private C# reference executable built from the locally recovered methods and installed Unity managed math library, with engine state stubbed for healthy static limbs. The executable, recovered source, and game libraries are excluded from this repository; the ordinary tests above do not require it. With that private probe available, repeat the comparison without a window:
+
+```powershell
+cargo run -- --reference-test ".\reference-probe\bin\Debug\net9.0\ReferenceProbe.exe"
+```
+
 An optional `--smoke-test` opens a rendered window and checks the original texture, floor collisions, and joints over at least four seconds of simulation. Run that only when explicitly desired.
