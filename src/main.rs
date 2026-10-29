@@ -130,6 +130,7 @@ fn run() -> Result<(), String> {
         }
     }
     if let Some(probe) = b2_probe {
+        unity::compare_trig(&probe)?;
         return b2::probe::compare_reference(&probe);
     }
     let game = game_assets::find_game(explicit_game)?;

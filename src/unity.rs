@@ -41,7 +41,7 @@ impl Random {
     /// Random.insideUnitCircle (Random_CUSTOM_GetRandomUnitCircle)
     pub fn inside_unit_circle(&mut self) -> [f32; 2] {
         let angle = self.range(0.0, TWO_PI);
-        let (cos, sin) = (angle.cos(), angle.sin());
+        let (cos, sin) = (cosf(angle), sinf(angle));
         let radius = self.range(0.0, 1.0).sqrt();
         [cos * radius, sin * radius]
     }
@@ -52,12 +52,13 @@ impl Random {
         let z = (1.0 - t) - t;
         let angle = self.range(0.0, TWO_PI);
         let radius = (1.0 - z * z).sqrt();
-        [angle.cos() * radius, angle.sin() * radius, z]
+        [cosf(angle) * radius, sinf(angle) * radius, z]
     }
 
     /// Random.insideUnitSphere
     pub fn inside_unit_sphere(&mut self) -> [f32; 3] {
         let v = self.on_unit_sphere();
+        // ponytail: host powf; rewrite the CRT powf FMA path if a script ever calls insideUnitSphere.
         let scale = self.value().powf(f32::from_bits(0x3eaaaaab));
         [v[0] * scale, v[1] * scale, v[2] * scale]
     }
@@ -75,6 +76,107 @@ impl Random {
 }
 
 /// Ken Perlin's permutation, as PerlinNoise::p repeats it (512 entries).
+const COS_C: [f64; 4] = [
+    f64::from_bits(0x3fa5555555555555),
+    f64::from_bits(0xbf56c16c16c16c16),
+    f64::from_bits(0x3efa01a01a01a019),
+    f64::from_bits(0xbe927e4fb7789f5c),
+];
+const SIN_C: [f64; 4] = [
+    f64::from_bits(0xbfc5555555555555),
+    f64::from_bits(0x3f81111111111111),
+    f64::from_bits(0xbf2a01a01a01a01a),
+    f64::from_bits(0x3ec71de3a556c734),
+];
+const PI_4: u64 = 0x3fe921fb54442d18;
+
+/// cos kernel on [-pi/4, pi/4]; `fused` = sinf's variant, which fuses 1 - r²/2.
+fn cos_kernel(r: f64, fused: bool) -> f64 {
+    let r2 = r * r;
+    let t = if fused { r2.mul_add(-0.5, 1.0) } else { 1.0 - r2 * 0.5 };
+    let p = r2.mul_add(COS_C[3], COS_C[2]).mul_add(r2, COS_C[1]).mul_add(r2, COS_C[0]);
+    p.mul_add(r2 * r2, t)
+}
+
+fn sin_kernel(r: f64) -> f64 {
+    let r2 = r * r;
+    let p = r2.mul_add(SIN_C[3], SIN_C[2]).mul_add(r2, SIN_C[1]).mul_add(r2, SIN_C[0]);
+    p.mul_add(r * r2, r)
+}
+
+/// Cody-Waite reduction by pi/2 of |x| (FMA path): (r, quadrant).
+fn reduce(a: f64) -> (f64, u32) {
+    let n = a.mul_add(f64::from_bits(0x3fe45f306dc9c883), 0.5) as i32;
+    let nd = n as f64;
+    let r1 = (-nd).mul_add(f64::from_bits(0x3ff921fb54400000), a);
+    (r1 - nd * f64::from_bits(0x3dd0b4611a626331), n as u32 & 3)
+}
+
+/// The engine's statically linked CRT cosf, FMA3 path (taken on every CPU with FMA3/AVX2).
+/// ponytail: |x| >= 3373259520 needs the CRT's Payne-Hanek reduction; script callers pass angles in [0, 2pi].
+pub fn cosf(x: f32) -> f32 {
+    let xd = x as f64;
+    let a = xd.abs();
+    assert!(a < 3373259520.0, "cosf: large-argument reduction not rewritten");
+    if a.to_bits() <= PI_4 {
+        return if a < 0.0001220703125 {
+            1.0
+        } else if a < 0.0078125 {
+            (-(xd * 0.5)).mul_add(xd, 1.0) as f32
+        } else {
+            cos_kernel(xd, false) as f32
+        };
+    }
+    let (r, q) = reduce(a);
+    let v = if q & 1 == 1 { sin_kernel(r) } else { cos_kernel(r, false) };
+    (if (q + 1) & 2 != 0 { -v } else { v }) as f32
+}
+
+/// The engine's statically linked CRT sinf, FMA3 path.
+/// ponytail: |x| >= 16779436 needs the CRT's Payne-Hanek reduction; script callers pass angles in [0, 2pi].
+pub fn sinf(x: f32) -> f32 {
+    let xd = x as f64;
+    let a = xd.abs();
+    assert!(a < 16779436.0, "sinf: large-argument reduction not rewritten");
+    if a.to_bits() <= PI_4 {
+        return if a < 0.0001220703125 {
+            x
+        } else if a < 0.0078125 {
+            (-(xd * xd * xd)).mul_add(1.0 / 6.0, xd) as f32
+        } else {
+            sin_kernel(xd) as f32
+        };
+    }
+    let (r, q) = reduce(a);
+    let v = if q & 1 == 1 { cos_kernel(r, true) } else { sin_kernel(r) };
+    let v = if q >= 2 { -v } else { v };
+    (if xd < 0.0 { -v } else { v }) as f32
+}
+
+/// Checks cosf/sinf against the engine's (NativeProbe `trig`) on every angle Random.Range(0, 2pi) yields.
+pub fn compare_trig(probe: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new(probe).arg("trig").output().map_err(|e| e.to_string())?;
+    let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |v: f32| {
+        for byte in v.to_bits().to_le_bytes() {
+            h = (h ^ byte as u64).wrapping_mul(0x100000001b3);
+        }
+    };
+    for u in 0..1u32 << 23 {
+        let t = u as f32 * f32::from_bits(0x34000001);
+        let a = (1.0 - t) * TWO_PI + t * 0.0;
+        mix(cosf(a));
+        mix(sinf(a));
+    }
+    let actual = format!("{h:016x}");
+    if actual != expected {
+        return Err(format!("cosf/sinf differ from the engine: {actual} vs {expected}"));
+    }
+    println!("cosf/sinf: 2^23 angles bit-exact with the engine");
+    Ok(())
+}
+
 const P: [i32; 256] = [
     151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225,
     140, 36, 103, 30, 69, 142, 8, 99, 37, 240, 21, 10, 23, 190, 6, 148,
