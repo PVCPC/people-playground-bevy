@@ -2,7 +2,9 @@
 #![allow(dead_code)]
 
 pub mod collide;
+pub mod distance;
 pub mod math;
 pub mod probe;
 pub mod shape;
 pub mod solver;
+pub mod toi;

@@ -1,9 +1,11 @@
 //! Bit comparisons of the b2 port against UnityPlayer.dll through NativeProbe's raw-call mode.
 
 use super::collide::*;
+use super::distance::*;
 use super::math::{Transform, Vec2};
 use super::shape::*;
 use super::solver::*;
+use super::toi::*;
 use serde::{Deserialize, Serialize};
 
 const SET: u32 = 0xbb4b90;
@@ -18,6 +20,8 @@ const WARM_START: u32 = 0xbc0780;
 const SOLVE_VELOCITY: u32 = 0xbbf920;
 const SOLVE_POSITION: u32 = 0xbbee60;
 const SOLVE_TOI_POSITION: u32 = 0xbbf3a0;
+const DISTANCE: u32 = 0xbb08e0;
+const TIME_OF_IMPACT: u32 = 0xbb1c40;
 /// b2_velocityThreshold, b2_maxLinearCorrection, b2_baumgarte and b2_toiBaugarte in .data.
 const SOLVER_GLOBALS: [[u32; 2]; 4] = [
     [0x1999c2c, VELOCITY_THRESHOLD.to_bits()],
@@ -544,8 +548,150 @@ fn compare_solver(executable: &std::path::Path) -> Result<(), String> {
     if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
 }
 
+fn vertex_bytes(vertices: &[Vec2]) -> Vec<u8> {
+    let mut b = vec![0; 8 * vertices.len()];
+    for (i, v) in vertices.iter().enumerate() {
+        put_vec(&mut b, 8 * i, *v);
+    }
+    b
+}
+
+fn cache_bytes(cache: &SimplexCache) -> Vec<u8> {
+    let mut b = vec![0; 12];
+    put(&mut b, 0, cache.metric.to_bits());
+    b[4] = cache.count as u8;
+    b[6..9].copy_from_slice(&cache.index_a);
+    b[9..12].copy_from_slice(&cache.index_b);
+    b
+}
+
+/// A polygon, a circle centre or a capsule segment, as (vertices, radius).
+fn random_proxy(random: &mut Random, index: usize) -> (Vec<Vec2>, f32) {
+    match index % 3 {
+        0 => {
+            let polygon = random_polygon(random, index / 3);
+            (polygon.vertices[..polygon.count].to_vec(), polygon.radius)
+        }
+        1 => (vec![random.vec(0.3)], random.range(0.02, 0.6)),
+        _ => (vec![random.vec(0.6), random.vec(0.6)], random.range(0.0, 0.3)),
+    }
+}
+
+/// b2Distance from a cold cache, then again warm-started from the Rust cache at nudged transforms.
+fn compare_distance(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_0004);
+    let mut calls = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..4096 {
+        let (a, ra) = random_proxy(&mut random, i);
+        let (b, rb) = random_proxy(&mut random, i / 3 + 1);
+        let proxy_a = DistanceProxy { vertices: &a, radius: ra };
+        let proxy_b = DistanceProxy { vertices: &b, radius: rb };
+        let use_radii = i % 4 != 0;
+        let mut cache = SimplexCache::default();
+        let mut xf_a = random_transform(&mut random, 1.0);
+        let mut xf_b = random_transform(&mut random, 1.0);
+        for warm in [false, true] {
+            if warm {
+                xf_a = Transform::new(xf_a.p + random.vec(0.05), random.range(-3.2, 3.2));
+                xf_b = Transform::new(xf_b.p + random.vec(0.05), random.range(-3.2, 3.2));
+            }
+            let mut input = vec![0; 0x68];
+            for (o, proxy) in [(0, &proxy_a), (0x20, &proxy_b)] {
+                put(&mut input, o + 0x18, proxy.vertices.len() as u32);
+                put(&mut input, o + 0x1c, proxy.radius.to_bits());
+            }
+            input[0x40..0x50].copy_from_slice(&transform_bytes(&xf_a));
+            input[0x50..0x60].copy_from_slice(&transform_bytes(&xf_b));
+            input[0x60] = use_radii as u8;
+            let mut c = call(DISTANCE, vec![vec![0; 24], cache_bytes(&cache), input, vertex_bytes(&a), vertex_bytes(&b)], &["b0", "b1", "b2"]);
+            c.links = vec![[2, 0x10, 3, 0], [2, 0x30, 4, 0]];
+            calls.push(c);
+            let output = distance(&mut cache, &proxy_a, &xf_a, &proxy_b, &xf_b, use_radii);
+            let mut out = vec![0; 24];
+            put_vec(&mut out, 0, output.point_a);
+            put_vec(&mut out, 8, output.point_b);
+            put(&mut out, 0x10, output.distance.to_bits());
+            put(&mut out, 0x14, output.iterations as u32);
+            expected.push((out, cache_bytes(&cache), output.distance > 0.0));
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let (out, cache, _) = &expected[i];
+        let (native_out, native_cache) = (unhex(&reply.buffers[0]), unhex(&reply.buffers[1]));
+        if &native_out != out || &native_cache != cache {
+            bad += 1;
+            first.get_or_insert_with(|| format!("case {i}: native out={native_out:02x?} cache={native_cache:02x?} rust out={out:02x?} cache={cache:02x?}"));
+        }
+    }
+    report("DISTANCE", bad, replies.len(), first)?;
+    println!("  ({} of them separated)", expected.iter().filter(|e| e.2).count());
+    Ok(())
+}
+
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
     compare_manifolds(executable)?;
-    compare_solver(executable)
+    compare_solver(executable)?;
+    compare_distance(executable)?;
+    compare_toi(executable)
+}
+
+fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {
+    put_vec(b, offset, sweep.local_center);
+    put_vec(b, offset + 8, sweep.c0);
+    put_vec(b, offset + 0x10, sweep.c);
+    put(b, offset + 0x18, sweep.a0.to_bits());
+    put(b, offset + 0x1c, sweep.a.to_bits());
+    put(b, offset + 0x20, sweep.alpha0.to_bits());
+}
+
+/// Fast sweeps that pass through, graze or miss each other, with wound-up angles for Sweep::Normalize.
+fn compare_toi(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_0005);
+    let mut calls = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..4096 {
+        let (a, ra) = random_proxy(&mut random, i);
+        let (b, rb) = random_proxy(&mut random, i / 3 + 1);
+        let sweep = |random: &mut Random| {
+            let c0 = random.vec(2.0);
+            let a0 = random.range(-20.0, 20.0);
+            Sweep { local_center: random.vec(0.2), c0, c: c0 * -1.0 + random.vec(0.5), a0, a: a0 + random.range(-2.0, 2.0), alpha0: 0.0 }
+        };
+        let (sweep_a, sweep_b) = (sweep(&mut random), sweep(&mut random));
+        let t_max = if i % 5 == 0 { random.range(0.2, 1.0) } else { 1.0 };
+        let mut input = vec![0; 0x90];
+        put(&mut input, 0x18, a.len() as u32);
+        put(&mut input, 0x1c, ra.to_bits());
+        put(&mut input, 0x38, b.len() as u32);
+        put(&mut input, 0x3c, rb.to_bits());
+        sweep_bytes(&mut input, 0x40, &sweep_a);
+        sweep_bytes(&mut input, 0x64, &sweep_b);
+        put(&mut input, 0x88, t_max.to_bits());
+        let mut c = call(TIME_OF_IMPACT, vec![vec![0; 8], input, vertex_bytes(&a), vertex_bytes(&b)], &["b0", "b1"]);
+        c.links = vec![[1, 0x10, 2, 0], [1, 0x30, 3, 0]];
+        calls.push(c);
+        let output = time_of_impact(&DistanceProxy { vertices: &a, radius: ra }, &sweep_a, &DistanceProxy { vertices: &b, radius: rb }, &sweep_b, t_max);
+        expected.push(output);
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first, mut states) = (0, None, [0usize; 5]);
+    for (i, reply) in replies.iter().enumerate() {
+        let native = unhex(&reply.buffers[0]);
+        let output = expected[i];
+        states[output.state as usize] += 1;
+        let rust = [output.state as u32, output.t.to_bits()];
+        if [get(&native, 0), get(&native, 4)] != rust {
+            bad += 1;
+            first.get_or_insert_with(|| format!("case {i}: native=[{}, {:08x}] rust=[{}, {:08x}]", get(&native, 0), get(&native, 4), rust[0], rust[1]));
+        }
+    }
+    report("TIME OF IMPACT", bad, replies.len(), first)?;
+    println!("  (states unknown/failed/overlapped/touching/separated: {states:?})");
+    Ok(())
 }
