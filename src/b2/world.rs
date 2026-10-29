@@ -177,7 +177,7 @@ impl Default for BodyDef {
 pub struct Body {
     pub kind: BodyType,
     pub flags: u16,
-    island_index: i32,
+    pub(crate) island_index: i32,
     pub xf: Transform,
     pub sweep: Sweep,
     pub linear_velocity: Vec2,
@@ -187,7 +187,7 @@ pub struct Body {
     /// Fixture list, head last.
     pub fixtures: Vec<FixtureId>,
     /// Contact edges (other body, contact), head last.
-    contacts: Vec<(BodyId, ContactId)>,
+    pub(crate) contacts: Vec<(BodyId, ContactId)>,
     pub mass: f32,
     pub inv_mass: f32,
     pub axis: Vec2,
@@ -264,8 +264,8 @@ pub struct Contact {
     pub fixture_b: FixtureId,
     pub child_a: usize,
     pub child_b: usize,
-    island_index_a: usize,
-    island_index_b: usize,
+    pub(crate) island_index_a: usize,
+    pub(crate) island_index_b: usize,
     pub manifold: Manifold,
     pub radius_a: f32,
     pub radius_b: f32,
@@ -283,11 +283,11 @@ pub struct World {
     pub contacts: Vec<Option<Contact>>,
     free_contacts: Vec<ContactId>,
     /// Body list, head last.
-    body_list: Vec<BodyId>,
+    pub(crate) body_list: Vec<BodyId>,
     non_static_bodies: Vec<BodyId>,
     static_bodies: Vec<BodyId>,
     /// Contact list, head last.
-    contact_list: Vec<ContactId>,
+    pub(crate) contact_list: Vec<ContactId>,
     contacts_non_toi: Vec<ContactId>,
     contacts_toi: Vec<ContactId>,
     pub broad_phase: BroadPhase,
@@ -336,11 +336,11 @@ impl World {
         self.bodies[id].as_mut().unwrap()
     }
 
-    fn fixture(&self, id: FixtureId) -> &Fixture {
+    pub(crate) fn fixture(&self, id: FixtureId) -> &Fixture {
         self.fixtures[id].as_ref().unwrap()
     }
 
-    fn contact(&self, id: ContactId) -> &Contact {
+    pub(crate) fn contact(&self, id: ContactId) -> &Contact {
         self.contacts[id].as_ref().unwrap()
     }
 
@@ -813,7 +813,7 @@ impl World {
     }
 
     /// b2Island::Solve (180bba770) without joints.
-    fn solve_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], step: &TimeStep) {
+    pub(crate) fn solve_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], step: &TimeStep) {
         let h = step.dt;
         let gravity = self.gravity;
         let mut positions = Vec::with_capacity(island_bodies.len());

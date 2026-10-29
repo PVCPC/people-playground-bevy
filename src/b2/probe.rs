@@ -643,7 +643,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_solver(executable)?;
     compare_distance(executable)?;
     compare_toi(executable)?;
-    compare_broad_phase(executable)
+    compare_broad_phase(executable)?;
+    compare_island_solve(executable)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {
@@ -839,5 +840,187 @@ fn compare_broad_phase(executable: &std::path::Path) -> Result<(), String> {
     }
     report("BROAD PHASE", bad, replies.len(), first)?;
     println!("  ({pairs_found} query pairs)");
+    Ok(())
+}
+
+const ISLAND_SOLVE: u32 = 0xbba770;
+const STACK_ALLOCATOR_SIZE: usize = 102_936;
+const DEG: f32 = f32::from_bits(0x3c8e_fa35);
+/// SOLVER_GLOBALS plus the Island::Solve limits and sleep tolerances.
+fn island_globals() -> Vec<[u32; 2]> {
+    let mut g = SOLVER_GLOBALS.to_vec();
+    let max_rotation = 360.0 * DEG;
+    g.extend([
+        [0x1999c38, 100.0f32.to_bits()],
+        [0x1a43874, 10000.0f32.to_bits()],
+        [0x1999c3c, max_rotation.to_bits()],
+        [0x1a43878, (max_rotation * max_rotation).to_bits()],
+        [0x1999c48, 0.5f32.to_bits()],
+        [0x1999c4c, 0.01f32.to_bits()],
+        [0x1999c50, (2.0 * DEG).to_bits()],
+    ]);
+    g
+}
+
+fn body_bytes(b: &mut [u8], o: usize, body: &super::world::Body) {
+    put(b, o, body.kind as u32);
+    put(b, o + 4, body.flags as u32);
+    put(b, o + 8, body.island_index as u32);
+    put_vec(b, o + 0xc, body.xf.p);
+    put(b, o + 0x14, body.xf.q.s.to_bits());
+    put(b, o + 0x18, body.xf.q.c.to_bits());
+    sweep_bytes(b, o + 0x1c, &body.sweep);
+    put_vec(b, o + 0x40, body.linear_velocity);
+    put(b, o + 0x48, body.angular_velocity.to_bits());
+    put_vec(b, o + 0x4c, body.force);
+    put(b, o + 0x54, body.torque.to_bits());
+    let fields = [body.mass, body.inv_mass, body.axis.x, body.axis.y, body.i, body.inv_i, body.linear_damping, body.angular_damping, body.gravity_scale, body.sleep_time];
+    for (k, v) in fields.iter().enumerate() {
+        put(b, o + 0x90 + 4 * k, v.to_bits());
+    }
+}
+
+/// b2Island::Solve over one island: buffers 0 island, 1 stack allocator, 2 arena (body and contact pointer
+/// arrays, positions, velocities, bodies, contacts, two fixtures per contact), 3 step, 4 gravity. Returns the
+/// call, the arena and the arena byte ranges holding pointers or solver scratch.
+fn island_call(world: &super::world::World, bodies: &[usize], contacts: &[usize], step: &TimeStep) -> (Call, Vec<u8>, Vec<(usize, usize)>) {
+    let (n, m) = (bodies.len(), contacts.len());
+    let positions = 8 * n + 8 * m;
+    let body_at = positions + 24 * n;
+    let contact_at = body_at + 200 * n;
+    let fixture_at = contact_at + 312 * m;
+    let mut arena = vec![0; fixture_at + 2 * 88 * m];
+    let mut links = Vec::new();
+    let mut skip = vec![(0, body_at)];
+    let slot = |id: usize| bodies.iter().position(|&b| b == id).unwrap();
+    for (i, &id) in bodies.iter().enumerate() {
+        body_bytes(&mut arena, body_at + 200 * i, world.body(id));
+        links.push([2, 8 * i, 2, body_at + 200 * i]);
+    }
+    for (j, &id) in contacts.iter().enumerate() {
+        let c = world.contact(id);
+        let o = contact_at + 312 * j;
+        links.push([2, 8 * n + 8 * j, 2, o]);
+        put(&mut arena, o + 8, c.flags);
+        put(&mut arena, o + 0x78, c.island_index_a as u32);
+        put(&mut arena, o + 0x7c, c.island_index_b as u32);
+        arena[o + 0x80..o + 0x80 + 72].copy_from_slice(&manifold_bytes(&c.manifold));
+        put(&mut arena, o + 0xc0, c.radius_a.to_bits());
+        put(&mut arena, o + 0xc4, c.radius_b.to_bits());
+        put(&mut arena, o + 0x118, c.friction.to_bits());
+        put(&mut arena, o + 0x11c, c.restitution.to_bits());
+        put(&mut arena, o + 0x120, c.tangent_speed.to_bits());
+        for (k, f) in [c.fixture_a, c.fixture_b].into_iter().enumerate() {
+            let fo = fixture_at + 88 * (2 * j + k);
+            links.push([2, o + 0x60 + 8 * k, 2, fo]);
+            links.push([2, fo + 0x20, 2, body_at + 200 * slot(world.fixture(f).body)]);
+            skip.push((fo + 0x20, fo + 0x28));
+        }
+        skip.push((o + 0x60, o + 0x70));
+    }
+    let mut island = vec![0; 88];
+    put(&mut island, 0x40, n as u32);
+    put(&mut island, 0x48, m as u32);
+    put(&mut island, 0x4c, n as u32);
+    put(&mut island, 0x50, m as u32);
+    let mut s = vec![0; 24];
+    let fields = [step.dt.to_bits(), step.inv_dt.to_bits(), step.dt_ratio.to_bits(), step.velocity_iterations as u32, step.position_iterations as u32, step.warm_starting as u32];
+    for (k, v) in fields.iter().enumerate() {
+        put(&mut s, 4 * k, *v);
+    }
+    let mut g = vec![0; 8];
+    put_vec(&mut g, 0, world.gravity);
+    let sleep = if world.allow_sleep { "i1" } else { "i0" };
+    let mut c = call(ISLAND_SOLVE, vec![island, vec![0; STACK_ALLOCATOR_SIZE], arena.clone(), s, g], &["b0", "b3", "b4", sleep]);
+    c.links = vec![[0, 0, 1, 0], [0, 0x18, 2, 0], [0, 0x20, 2, 8 * n], [0, 0x30, 2, positions], [0, 0x38, 2, positions + 12 * n]];
+    c.links.extend(links);
+    (c, arena, skip)
+}
+
+/// Random stacks of boxes and discs on a ground box, run for a while in the ported world; each case solves
+/// every touching contact as one island, natively and in Rust, from the same state.
+fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
+    use super::world::*;
+    let mut random = Random(0x5eed_0007);
+    let mut calls = Vec::new();
+    let mut expected = Vec::new();
+    for case in 0..192 {
+        let mut world = World::default();
+        let fixture = |shape, random: &mut Random| FixtureDef { shape, friction: random.range(0.0, 1.0), restitution: random.range(0.0, 0.5), density: random.range(0.5, 3.0), is_sensor: false, filter: Filter::default() };
+        let ground = world.create_body(&BodyDef::default());
+        let ground_box = Polygon::from_points(&box_corners(Vec2::ZERO, Vec2::new(30.0, 1.0)), POLYGON_RADIUS);
+        world.create_fixture(ground, &fixture(Shape::Polygon(ground_box), &mut random), true);
+        for i in 0..2 + random.next() as usize % 6 {
+            let def = BodyDef {
+                kind: if (case + i) % 9 == 0 { BodyType::Kinematic } else { BodyType::Dynamic },
+                position: Vec2::new(random.range(-1.5, 1.5), 0.6 + 0.9 * i as f32 + random.range(0.0, 0.3)),
+                angle: random.range(-0.5, 0.5),
+                linear_velocity: random.vec(1.0),
+                angular_velocity: random.range(-2.0, 2.0),
+                linear_damping: random.range(0.0, 0.5),
+                angular_damping: random.range(0.0, 0.5),
+                fixed_rotation: random.next() % 8 == 0,
+                gravity_scale: random.range(0.5, 1.5),
+                ..BodyDef::default()
+            };
+            let id = world.create_body(&def);
+            let shape = if random.next() % 3 == 0 {
+                Shape::Circle(Circle { p: random.vec(0.1), radius: random.range(0.2, 0.5) })
+            } else {
+                Shape::Polygon(Polygon::from_points(&box_corners(random.vec(0.1), Vec2::new(random.range(0.4, 1.2), random.range(0.4, 1.0))), POLYGON_RADIUS))
+            };
+            world.create_fixture(id, &fixture(shape, &mut random), true);
+        }
+        for _ in 0..random.next() % 120 {
+            world.step(1.0 / 60.0, 8, 8);
+        }
+        let bodies = world.body_list.clone();
+        for &id in &bodies {
+            let b = world.body_mut(id);
+            if b.kind == BodyType::Dynamic && random.next() % 2 == 0 {
+                b.force = random.vec(20.0);
+                b.torque = random.range(-5.0, 5.0);
+            }
+        }
+        let touching = CONTACT_TOUCHING | CONTACT_ENABLED;
+        let contacts: Vec<usize> = world.contact_list.iter().copied().filter(|&c| world.contact(c).flags & touching == touching).collect();
+        for &c in &contacts {
+            let slot = |f| bodies.iter().position(|&x| x == world.fixture(f).body).unwrap();
+            let (a, b) = (slot(world.contact(c).fixture_a), slot(world.contact(c).fixture_b));
+            let c = world.contacts[c].as_mut().unwrap();
+            c.island_index_a = a;
+            c.island_index_b = b;
+        }
+        let dt = [1.0 / 60.0, 0.02, 1.0 / 30.0][random.next() as usize % 3];
+        let step = TimeStep {
+            dt,
+            inv_dt: 1.0 / dt,
+            dt_ratio: random.range(0.5, 1.5),
+            velocity_iterations: 1 + random.next() as i32 % 16,
+            position_iterations: 1 + random.next() as i32 % 16,
+            warm_starting: random.next() % 4 != 0,
+        };
+        world.allow_sleep = random.next() % 4 != 0;
+        let (call, _, skip) = island_call(&world, &bodies, &contacts, &step);
+        calls.push(call);
+        world.solve_island(&bodies, &contacts, &step);
+        let (_, after, _) = island_call(&world, &bodies, &contacts, &step);
+        expected.push((after, skip, contacts.len()));
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let (mut bad, mut first, mut touching) = (0, None, 0);
+    for (i, reply) in replies.iter().enumerate() {
+        let native = unhex(&reply.buffers[2]);
+        let (rust, skip, m) = &expected[i];
+        touching += m;
+        let at = (0..rust.len() / 4).map(|k| 4 * k).find(|&o| !skip.iter().any(|&(a, b)| a <= o && o < b) && get(&native, o) != get(rust, o));
+        if let Some(o) = at {
+            bad += 1;
+            first.get_or_insert_with(|| format!("case {i}: arena byte {o:#x} native={:#x} rust={:#x}", get(&native, o), get(rust, o)));
+        }
+    }
+    report("ISLAND SOLVE", bad, replies.len(), first)?;
+    println!("  ({touching} touching contacts)");
     Ok(())
 }
