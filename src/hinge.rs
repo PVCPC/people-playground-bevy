@@ -63,6 +63,106 @@ fn solve33(m: &[f32; 9], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PositionConstraint {
+    pub position_a: [f32; 3],
+    pub position_b: [f32; 3],
+    pub inverse_mass_a: f32,
+    pub inverse_mass_b: f32,
+    pub inverse_inertia_a: f32,
+    pub inverse_inertia_b: f32,
+    pub anchor_a: [f32; 2],
+    pub anchor_b: [f32; 2],
+    pub local_center_a: [f32; 2],
+    pub local_center_b: [f32; 2],
+    pub axis_a: [f32; 2],
+    pub axis_b: [f32; 2],
+    pub motor_mass: f32,
+    pub reference_angle: f32,
+    pub limits: [f32; 2],
+    pub limit_enabled: bool,
+    pub limit_state: u32,
+    pub max_angular_correction: f32,
+}
+
+fn native_clamp(mut value: f32, minimum: f32, maximum: f32) -> f32 {
+    if maximum <= value {
+        value = maximum;
+    }
+    if minimum <= value { value } else { minimum }
+}
+
+impl PositionConstraint {
+    pub fn solve(&mut self) -> bool {
+        let (ma, mb, ia, ib) = (
+            self.inverse_mass_a,
+            self.inverse_mass_b,
+            self.inverse_inertia_a,
+            self.inverse_inertia_b,
+        );
+        let mut a = self.position_a;
+        let mut b = self.position_b;
+        let mut angular_error = 0.0;
+        if self.limit_enabled && self.limit_state != 0 && ia + ib != 0.0 {
+            let angle = joint_angle(a[2], b[2], self.reference_angle);
+            let max = self.max_angular_correction;
+            let slop = f32::from_bits(0x3d0efa36);
+            let correction = match self.limit_state {
+                3 => {
+                    let c = native_clamp(angle - self.limits[0], -max, max);
+                    angular_error = c.abs();
+                    c
+                }
+                1 => {
+                    let c = angle - self.limits[0];
+                    angular_error = -c;
+                    native_clamp(c + slop, -max, 0.0)
+                }
+                2 => {
+                    let c = angle - self.limits[1];
+                    angular_error = c;
+                    native_clamp(c - slop, 0.0, max)
+                }
+                _ => 0.0,
+            };
+            let impulse = -(correction * self.motor_mass);
+            a[2] -= ia * impulse;
+            b[2] += ib * impulse;
+        }
+        let rotate = |angle: f32, anchor: [f32; 2], center: [f32; 2]| {
+            let (s, c) = angle.sin_cos();
+            let (x, y) = (anchor[0] - center[0], anchor[1] - center[1]);
+            [c * x - s * y, s * x + c * y]
+        };
+        let ra = rotate(a[2], self.anchor_a, self.local_center_a);
+        let rb = rotate(b[2], self.anchor_b, self.local_center_b);
+        let cx = ((b[0] + rb[0]) - a[0]) - ra[0];
+        let cy = ((b[1] + rb[1]) - a[1]) - ra[1];
+        let position_error = (cx * cx + cy * cy).sqrt();
+        let mass_sum = mb + ma;
+        let xx = ra[1] * ia * ra[1] + mass_sum + rb[1] * ib * rb[1];
+        let xy = -(ra[0] * ia * ra[1]) - rb[0] * ib * rb[1];
+        let yy = ra[0] * ia * ra[0] + mass_sum + rb[0] * ib * rb[0];
+        let mut det = xx * yy - xy * xy;
+        if det != 0.0 {
+            det = 1.0 / det;
+        }
+        let px = -((cx * yy - cy * xy) * det);
+        let py = -((cy * xx - cx * xy) * det);
+        self.position_a = [
+            a[0] - px * self.axis_a[0] * ma,
+            a[1] - py * self.axis_a[1] * ma,
+            a[2] - (ra[0] * py - ra[1] * px) * ia,
+        ];
+        self.position_b = [
+            b[0] + px * self.axis_b[0] * mb,
+            b[1] + py * self.axis_b[1] * mb,
+            (rb[0] * py - rb[1] * px) * ib + b[2],
+        ];
+        !(f32::from_bits(0x3ba3d70a) < position_error || f32::from_bits(0x3d0efa36) < angular_error)
+    }
+}
+
 impl VelocityConstraint {
     pub fn initialize(
         &mut self,
@@ -332,6 +432,91 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
         cases.len()
     );
     compare_initialization(executable, &cases)?;
+    compare_positions(executable, &cases)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PositionCase {
+    #[serde(flatten)]
+    constraint: PositionConstraint,
+    position_solve: bool,
+    iterations: u32,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct PositionBits {
+    position_a_bits: [u32; 3],
+    position_b_bits: [u32; 3],
+    position_solved: bool,
+}
+
+fn compare_positions(
+    executable: &std::path::Path,
+    source: &[VelocityConstraint],
+) -> Result<(), String> {
+    let cases: Vec<_> = source
+        .iter()
+        .enumerate()
+        .map(|(i, c)| PositionCase {
+            position_solve: true,
+            iterations: 1,
+            constraint: PositionConstraint {
+                position_a: [c.velocity_a[0], c.velocity_a[1], c.velocity_a[2] * 0.25],
+                position_b: [c.velocity_b[0], c.velocity_b[1], c.velocity_b[2] * 0.25],
+                inverse_mass_a: c.inverse_mass_a,
+                inverse_mass_b: c.inverse_mass_b,
+                inverse_inertia_a: c.inverse_inertia_a,
+                inverse_inertia_b: c.inverse_inertia_b,
+                anchor_a: c.anchor_a,
+                anchor_b: c.anchor_b,
+                local_center_a: [0.125, -0.25],
+                local_center_b: [-0.125, 0.0],
+                axis_a: c.axis_a,
+                axis_b: c.axis_b,
+                motor_mass: c.motor_mass,
+                reference_angle: [-0.5, 0.0, 0.5][i % 3],
+                limits: match i % 4 {
+                    0 => [-1.0, 1.0],
+                    1 => [0.25, 1.0],
+                    2 => [-1.0, -0.25],
+                    _ => [0.0, 0.0],
+                },
+                limit_enabled: c.limit_enabled,
+                limit_state: c.limit_state,
+                max_angular_correction: [8f32.to_radians(), 0.125, 0.5][i % 3],
+            },
+        })
+        .collect();
+    let expected: Vec<PositionBits> = crate::motor::run_reference(executable, &cases)?;
+    let mut failures = 0;
+    for (i, (c, reference)) in cases.iter().zip(&expected).enumerate() {
+        let mut state = c.constraint.clone();
+        let solved = state.solve();
+        let bits = PositionBits {
+            position_a_bits: state.position_a.map(f32::to_bits),
+            position_b_bits: state.position_b.map(f32::to_bits),
+            position_solved: solved,
+        };
+        if bits != *reference {
+            failures += 1;
+            if failures <= 3 {
+                eprintln!(
+                    "Native position mismatch {i}: Rust={bits:?}, original={reference:?}; input={state:?}"
+                );
+            }
+        }
+    }
+    if failures != 0 {
+        return Err(format!(
+            "Native hinge position comparison failed: {failures}/{} differ",
+            cases.len()
+        ));
+    }
+    println!(
+        "NATIVE HINGE POSITIONS PASSED: {} position/limit correction cases match every output bit and convergence flag.",
+        cases.len()
+    );
     Ok(())
 }
 

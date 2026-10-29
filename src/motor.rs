@@ -1,10 +1,45 @@
 //! Healthy static-pose commands and torque-limited hinge velocity constraints.
 use avian2d::{
-    dynamics::solver::solver_body::{SolverBodies, SolverBodyIndex},
+    dynamics::{
+        integrator::IntegrationSystems,
+        solver::{
+            schedule::SubstepSolverSystems,
+            solver_body::{SolverBodies, SolverBodyIndex},
+            xpbd::XpbdSolverPlugin,
+        },
+    },
     prelude::*,
 };
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+
+pub struct PortPhysicsPlugin;
+
+impl Plugin for PortPhysicsPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(
+            PhysicsPlugins::default()
+                .build()
+                .disable::<XpbdSolverPlugin>(),
+        )
+        .add_systems(
+            SubstepSchedule,
+            solve_velocity_motors
+                .after(SubstepSolverSystems::SolveConstraints)
+                .before(IntegrationSystems::Position),
+        )
+        .add_systems(
+            SubstepSchedule,
+            solve_joint_positions
+                .after(SubstepSolverSystems::Relax)
+                .before(SubstepSolverSystems::Damping),
+        );
+    }
+}
+
+fn wrap_angle(angle: f32) -> f32 {
+    (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
 
 #[derive(Component, Default)]
 pub struct VelocityMotor {
@@ -93,14 +128,12 @@ pub fn solve_velocity_motors(
                 },
             ]
         };
-        let wrap = |angle: f32| {
-            (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
-        };
         let delta_a = bodies.get(a).map_or(0.0, |b| b.delta_rotation.as_radians());
         let delta_b = bodies.get(b).map_or(0.0, |b| b.delta_rotation.as_radians());
-        let wrapped = wrap(rotation_b.as_radians() - rotation_a.as_radians() + delta_b - delta_a);
+        let wrapped =
+            wrap_angle(rotation_b.as_radians() - rotation_a.as_radians() + delta_b - delta_a);
         motor.angle = if let Some(previous) = motor.previous_angle {
-            motor.angle + wrap(wrapped - previous)
+            motor.angle + wrap_angle(wrapped - previous)
         } else {
             wrapped
         };
@@ -176,7 +209,7 @@ pub fn solve_velocity_motors(
         }
         motor.prepared = Some((a, b));
     }
-    // shortcut: Avian contacts/positions and substeps remain; native full-frame trajectories are unverified.
+    // shortcut: Avian contacts and substeps remain; native full-frame trajectories are unverified.
     for _ in 0..16 {
         for (_, mut motor) in &mut joints {
             let Some((a, b)) = motor.prepared else {
@@ -204,6 +237,82 @@ pub fn solve_velocity_motors(
                 body.linear_velocity = Vec2::new(x, y);
                 body.angular_velocity = w;
             }
+        }
+    }
+}
+
+fn solve_joint_positions(
+    mut bodies: ResMut<SolverBodies>,
+    frames: Query<(&Position, &Rotation, &ComputedCenterOfMass), Without<RigidBodyDisabled>>,
+    joints: Query<(&RevoluteJoint, &VelocityMotor), Without<JointDisabled>>,
+) {
+    for _ in 0..16 {
+        let mut solved = true;
+        for (joint, motor) in &joints {
+            let Some((a, b)) = motor.prepared else {
+                continue;
+            };
+            let Ok((pos_a, rot_a, center_a)) = frames.get(joint.body1) else {
+                continue;
+            };
+            let Ok((pos_b, rot_b, center_b)) = frames.get(joint.body2) else {
+                continue;
+            };
+            let position = |index, pos: &Position, rot: &Rotation, center: Vec2| {
+                let body = bodies.get(index);
+                let com = pos.0 + *rot * center + body.map_or(Vec2::ZERO, |b| b.delta_position);
+                [
+                    com.x,
+                    com.y,
+                    rot.as_radians() + body.map_or(0.0, |b| b.delta_rotation.as_radians()),
+                ]
+            };
+            let position_a = position(a, pos_a, rot_a, center_a.0);
+            let mut position_b = position(b, pos_b, rot_b, center_b.0);
+            // Preserve winding across Avian's normalized rotation representation.
+            let wrapped = wrap_angle(position_b[2] - position_a[2]);
+            position_b[2] = position_a[2]
+                + motor.angle
+                + wrap_angle(wrapped - motor.previous_angle.unwrap_or(wrapped));
+            let velocity = &motor.constraint;
+            let mut constraint = crate::hinge::PositionConstraint {
+                position_a,
+                position_b,
+                inverse_mass_a: velocity.inverse_mass_a,
+                inverse_mass_b: velocity.inverse_mass_b,
+                inverse_inertia_a: velocity.inverse_inertia_a,
+                inverse_inertia_b: velocity.inverse_inertia_b,
+                anchor_a: joint.local_anchor1().unwrap_or(Vec2::ZERO).to_array(),
+                anchor_b: joint.local_anchor2().unwrap_or(Vec2::ZERO).to_array(),
+                local_center_a: center_a.0.to_array(),
+                local_center_b: center_b.0.to_array(),
+                axis_a: velocity.axis_a,
+                axis_b: velocity.axis_b,
+                motor_mass: velocity.motor_mass,
+                reference_angle: motor.reference_angle,
+                limits: joint.angle_limit.map_or([0.0; 2], |limit| {
+                    [
+                        limit.min - motor.reference_angle,
+                        limit.max - motor.reference_angle,
+                    ]
+                }),
+                limit_enabled: velocity.limit_enabled,
+                limit_state: velocity.limit_state,
+                max_angular_correction: 8.0f32.to_radians(),
+            };
+            solved &= constraint.solve();
+            for (index, old, new, rotation) in [
+                (a, position_a, constraint.position_a, rot_a),
+                (b, position_b, constraint.position_b, rot_b),
+            ] {
+                if let Some(body) = bodies.get_mut(index) {
+                    body.delta_position += Vec2::new(new[0] - old[0], new[1] - old[1]);
+                    body.delta_rotation = Rot2::radians(new[2] - rotation.as_radians());
+                }
+            }
+        }
+        if solved {
+            break;
         }
     }
 }
@@ -394,9 +503,6 @@ pub fn run_reference<I: Serialize, O: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use avian2d::dynamics::{
-        integrator::IntegrationSystems, solver::schedule::SubstepSolverSystems,
-    };
     use bevy::{mesh::MeshPlugin, time::TimeUpdateStrategy};
     use std::time::Duration;
     fn input() -> MotorInput {
@@ -459,21 +565,59 @@ mod tests {
             ImagePlugin::default(),
             MeshPlugin,
             TransformPlugin,
-            PhysicsPlugins::default(),
+            PortPhysicsPlugin,
         ))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             20,
         )))
         .insert_resource(Time::<Fixed>::from_hz(50.0))
         .insert_resource(SubstepCount(10))
-        .insert_resource(Gravity(Vec2::ZERO))
-        .add_systems(
-            SubstepSchedule,
-            solve_velocity_motors
-                .after(SubstepSolverSystems::SolveConstraints)
-                .before(IntegrationSystems::Position),
-        );
+        .insert_resource(Gravity(Vec2::ZERO));
         app
+    }
+
+    #[test]
+    fn position_corrections_align_offset_centers_without_adding_velocity() {
+        let mut app = physics_app();
+        app.insert_resource(SubstepCount(1));
+        let parent = app
+            .world_mut()
+            .spawn((RigidBody::Static, Position(Vec2::ZERO)))
+            .id();
+        let child = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                SleepingDisabled,
+                Mass(0.5),
+                AngularInertia(0.1),
+                CenterOfMass(Vec2::new(0.2, -0.1)),
+                Position(Vec2::new(0.8, 0.3)),
+                Rotation::radians(0.7),
+            ))
+            .id();
+        app.world_mut().spawn((
+            RevoluteJoint::new(child, parent)
+                .with_local_anchor1(Vec2::new(0.0, -0.3))
+                .with_local_anchor2(Vec2::ZERO)
+                .with_angle_limits(0.0, 0.0),
+            VelocityMotor::default(),
+        ));
+        app.finish();
+        app.cleanup();
+        for _ in 0..10 {
+            app.update();
+        }
+        let position = app.world().get::<Position>(child).unwrap().0;
+        let rotation = *app.world().get::<Rotation>(child).unwrap();
+        let anchor = position + rotation * Vec2::new(0.0, -0.3);
+        assert!(anchor.length() < 0.005, "anchor={anchor}");
+        assert!(rotation.as_radians().abs() < 0.001);
+        assert_eq!(
+            app.world().get::<LinearVelocity>(child).unwrap().0,
+            Vec2::ZERO
+        );
+        assert_eq!(app.world().get::<AngularVelocity>(child).unwrap().0, 0.0);
     }
 
     #[test]

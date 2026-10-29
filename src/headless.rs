@@ -15,7 +15,7 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         ImagePlugin::default_nearest(),
         MeshPlugin,
         TransformPlugin,
-        PhysicsPlugins::default(),
+        motor::PortPhysicsPlugin,
     ))
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         20,
@@ -34,12 +34,6 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
     })
     .init_resource::<Pointer>()
     .init_resource::<Drag>()
-    .add_systems(
-        SubstepSchedule,
-        motor::solve_velocity_motors
-            .after(SubstepSolverSystems::SolveConstraints)
-            .before(IntegrationSystems::Position),
-    )
     .add_systems(Startup, setup)
     .add_systems(
         FixedUpdate,
