@@ -1,5 +1,5 @@
 //! PhysicalBehaviour and the Utils energy/temperature helpers.
-use super::{mathf, script, Game, Pose, Rigidbody};
+use super::{d, mathf, script, Game, Pose, Rigidbody};
 
 /// PhysicalProperties (ScriptableObject): the material values the scripts read.
 #[derive(Clone, Debug, Default)]
@@ -65,6 +65,14 @@ script! {
         InitialMass: f32 = 0.0,
         InitialGravityScale: f32 = 0.0,
         isDisintegrated: bool = false,
+        ChargeBurns: bool = true,
+        ForceNoChargeParticles: bool = false,
+        Deletable: bool = true,
+        Disintegratable: bool = true,
+        dirtyFire: bool = false,
+        dirtyCharged: bool = false,
+        dirtySmoke: bool = false,
+        dirtyBubble: bool = false,
     }
     links {
         name: String = String::new(),
@@ -271,6 +279,152 @@ impl Game {
         }
     }
 
+    /// PhysicalBehaviour.Ignite(bool)
+    pub fn ignite(&mut self, p: usize, ignore_flammability: bool) {
+        self.ignite_internal(p, ignore_flammability);
+        assert!(!self.physicals[p].has_fire_map, "LocalFirePropagationMap is not rewritten yet");
+    }
+
+    /// PhysicalBehaviour.ManagedUpdate
+    pub fn physical_update(&mut self, p: usize) {
+        let dt = self.time.deltaTime;
+        // audioSource / HandleSlidingSounds: sound only.
+        let ph = &mut self.physicals[p];
+        if ph.sizzleAudioHeat > 0.0 {
+            ph.sizzleAudioHeat -= dt;
+        }
+        if ph.isStatic {
+            return;
+        }
+        let burnrate = self.properties[ph.Properties].Burnrate;
+        if ph.BurnProgress < 0.3 && ph.ChargeBurns {
+            ph.BurnProgress = (d(ph.BurnProgress) + d(burnrate) * ph.Charge() * 0.01f32 * self.time.timeScale).f();
+        }
+        ph.Wetness = mathf::clamp01(ph.Wetness - dt);
+        if ph.OnFire {
+            ph.burnIntensity = (d(ph.burnIntensity) + d(dt) * 0.1f32).f();
+            if ph.BurnProgress >= 0.995 {
+                ph.OnFire = false;
+            }
+            ph.BurnProgress = mathf::clamp01(ph.BurnProgress);
+            if ph.Wetness as f64 > 0.1 {
+                self.extinguish(p);
+                self.physicals[p].burnIntensity = 0.0;
+            }
+        } else {
+            ph.burnIntensity = (d(ph.burnIntensity) - d(dt) * 0.1f32).f();
+        }
+        let ph = &mut self.physicals[p];
+        ph.burnIntensity = mathf::clamp01(ph.burnIntensity);
+        self.set_particle_emission(p);
+        let ph = &mut self.physicals[p];
+        ph.affectSurroundingTimer += dt;
+        if ph.affectSurroundingTimer > 1.0 {
+            ph.affectSurroundingTimer = 0.0;
+            self.affect_surroundings(p);
+            let ph = &mut self.physicals[p];
+            if ph.Deletable && ph.rigidbody.bodyType == 0 {
+                let position = ph.transform.position;
+                if self.BoundingBox.contains_expanded([position[0], position[1]], 50.0) {
+                    ph.outOfBoundsDuration = 0.0;
+                } else {
+                    ph.outOfBoundsDuration += 1.0;
+                    // ponytail: Disintegrate / Destroy(root) are not rewritten yet.
+                    assert!(ph.outOfBoundsDuration < 5.0, "out-of-bounds removal is not rewritten yet");
+                }
+            }
+        }
+        assert!(self.physicals[p].penetrations.is_empty(), "penetrations are not rewritten yet");
+    }
+
+    /// PhysicalBehaviour.SetParticleEmission: only the flags and the fire emission's Random draws matter.
+    fn set_particle_emission(&mut self, p: usize) {
+        let flammability = self.properties[self.physicals[p].Properties].Flammability;
+        let ph = &mut self.physicals[p];
+        if ph.isStatic {
+            return;
+        }
+        if ph.dirtyFire {
+            assert!(!(ph.has_fire_map && ph.burnIntensity > 0.01), "fire propagation emission is not rewritten yet");
+        } else if ph.burnIntensity > 0.05 {
+            ph.dirtyFire = true;
+        }
+        if !ph.dirtyBubble && ph.Wetness as f64 > 0.01 {
+            ph.dirtyBubble = true;
+        }
+        if !ph.ForceNoCharge && !ph.ForceNoChargeParticles {
+            if !ph.dirtyCharged && ph.Charge() > 0.001 {
+                ph.dirtyCharged = true;
+            }
+            if !ph.dirtySmoke && ph.Charge() * flammability > 0.001 {
+                ph.dirtySmoke = true;
+            }
+        }
+    }
+
+    /// PhysicalBehaviour.AffectSurroundings
+    fn affect_surroundings(&mut self, p: usize) {
+        let ph = &self.physicals[p];
+        if ph.isStatic || (!ph.OnFire && !(ph.Charge() > 0.001)) {
+            return;
+        }
+        for item in self.physics_objects_near(p) {
+            let (me, other) = (&self.physicals[p], &self.physicals[item]);
+            if other.IsUnderWater && me.IsUnderWater && me.Charge() > other.Charge() {
+                self.physicals[item].charge = me.Charge();
+            }
+            if self.physicals[p].OnFire && !self.physicals[item].OnFire && self.random.value() > 0.7 {
+                self.ignite(item, false);
+            }
+        }
+    }
+
+    /// Global.GetChunkNear
+    fn chunk_near(&mut self, position: [f32; 3], radius: f32) -> (i32, i32) {
+        let num = radius / 2.0;
+        let c = self.random.inside_unit_circle();
+        let v = [(position[0] + c[0] * num) * (2.0f32 / 3.0), (position[1] + c[1] * num) * (2.0f32 / 3.0)];
+        // Mathf.RoundToInt: Math.Round, ties to even.
+        ((v[0] as f64).round_ties_even() as i32, (v[1] as f64).round_ties_even() as i32)
+    }
+
+    /// Global.GetChunkOf
+    fn chunk_of(&mut self, p: usize) -> (i32, i32) {
+        let ph = &self.physicals[p];
+        self.chunk_near(ph.transform.position, ph.ObjectArea / 2.0)
+    }
+
+    /// Global.GetPhysicsObjectsNear. The game's iterator reads the chunk live; nothing in
+    /// AffectSurroundings changes chunk membership, so a copy is the same.
+    fn physics_objects_near(&mut self, me: usize) -> Vec<usize> {
+        if !self.chunksUpToDate {
+            for chunk in self.physical_chunks.values_mut() {
+                chunk.clear();
+            }
+            for p in 0..self.physicals.len() {
+                if !self.physicals[p].isDisintegrated {
+                    let key = self.chunk_of(p);
+                    let chunk = self.physical_chunks.entry(key).or_insert_with(|| Vec::with_capacity(128));
+                    if chunk.len() < 128 {
+                        chunk.push(p);
+                    }
+                }
+            }
+            self.chunksUpToDate = true;
+        }
+        let key = self.chunk_of(me);
+        let Some(chunk) = self.physical_chunks.get(&key) else { return Vec::new() };
+        chunk.iter().copied().filter(|&o| o != me && !self.physicals[o].isDisintegrated).collect()
+    }
+
+    /// PhysicalBehaviour.ManagedLateUpdate
+    pub fn physical_late_update(&mut self, p: usize) {
+        if !self.physicals[p].isStatic {
+            let v = self.physicals[p].rigidbody.velocity(&self.world);
+            self.physicals[p].previousVelocity = v;
+        }
+    }
+
     /// PhysicalBehaviour.OnCollisionStayWithoutSleep
     fn on_collision_stay_without_sleep(&mut self, p: usize) {
         if self.physicals[p].isStatic {
@@ -304,6 +458,7 @@ impl Game {
     }
 
     /// Transform.TransformPoint for a 2D point of a physical object's transform.
+    /// ponytail: managed-style TRS; the engine's native hierarchy math (parent scale) is not rewritten yet.
     pub fn transform_point(&self, p: usize, local: [f32; 2]) -> [f32; 2] {
         let t = &self.physicals[p].transform;
         let s = [local[0] * t.localScale[0], local[1] * t.localScale[1], 0.0];

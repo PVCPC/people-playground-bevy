@@ -1,5 +1,5 @@
 //! BloodContainer, CirculationBehaviour and the Liquid registry.
-use super::{mathf, script, CsDict, Game};
+use super::{d, mathf, script, CsDict, Game};
 
 /// Liquid.Registry / Liquid.LiquidSet order (Global.Awake); a liquid is its index here.
 pub const LIQUIDS: &[(&str, &str)] = &[
@@ -45,6 +45,67 @@ pub const LIQUIDS: &[(&str, &str)] = &[
     ("TISSUE DECONSTRUCTION AGENT", "TissueDeconstructionAgent"),
     ("DEBUG LIQUID 001", "DebugDiscolorationLiquid"),
 ];
+
+/// Liquid.Color per LIQUIDS entry, as each Liquid constructor builds it.
+pub fn liquid_color(l: usize) -> [f32; 4] {
+    const PINK: [f32; 4] = [1.0, 0.4196079, 0.7944902, 1.0];
+    match LIQUIDS[l].1 {
+        "Blood" => [0.65, 0.0, 0.0, 1.0],
+        "GorseBlood" => [0.03, 0.57, 0.0, 1.0],
+        "Oil" => [0.0, 0.04689861, 0.1803922, 1.0],
+        "Nitroglycerine" => [245.0 / 255.0, 152.0 / 255.0, 66.0 / 255.0, 1.0],
+        "ExoticLiquid" => [0.0, 0.0, 1.0, 1.0],
+        "Tritium" => [0.08 * 2.0, 0.62 * 2.0, 0.28 * 2.0, 2.0],
+        "InertLiquid" => [1.0, 1.0, 1.0, 0.1],
+        "BeverageM04" => [0.91, 0.25, 0.0, 0.5],
+        "Coolant" => [0.0, 0.22, 0.6, 0.74],
+        "ZombiePoisonLiquid" => [0.8835177, 1.0, 0.7122642, 1.0],
+        "AdrenalineLiquid" => [0.45, 0.27, 0.77, 1.0],
+        "AcidLiquid" => [0.49, 0.44, 0.52, 1.0],
+        "BoneHurtingJuiceLiquid" => [1.0, 0.55, 0.22, 1.0],
+        "CoagulationLiquid" => [1.0, 1.0, 0.0, 1.0],
+        "InstantDeathPoisonLiquid" => [1.0, 0.65, 0.63, 1.0],
+        "FreezePoisonLiquid" => [0.8, 1.0, 1.0, 1.0],
+        "KnockoutPoisonLiquid" => [0.68, 0.62, 0.541, 1.0],
+        "LifeSerumLiquid" => [0.6745283, 1.0, 0.7830077, 1.0],
+        "UltraStrengthSerumLiquid" => [0.7604228, 0.7137255, 1.0, 1.0],
+        "MendingSerum" => [0.0, 0.67, 0.5, 1.0],
+        "WaterBreathingSerum" => [0.21, 0.57, 0.96, 1.0],
+        "OsteomorphosisAgent" => [1.0, 0.84, 0.56, 1.0],
+        "ImmortalitySerum" => [0.87, 1.0, 0.0, 1.0],
+        "PainKillerLiquid" => [0.71, 0.75, 0.65, 0.1],
+        "DebugDiscolorationLiquid" => [1.0, 0.0, 1.0, 1.0],
+        // PinkSyringe.PinkSyringeColor
+        _ => PINK,
+    }
+}
+
+/// Color.RGBToHSV
+pub fn rgb_to_hsv(c: [f32; 4]) -> [f32; 3] {
+    let (offset, dominant, one, two) = if c[2] > c[1] && c[2] > c[0] {
+        (4.0, c[2], c[0], c[1])
+    } else if c[1] > c[0] {
+        (2.0, c[1], c[2], c[0])
+    } else {
+        (0.0, c[0], c[1], c[2])
+    };
+    let v = dominant;
+    if v == 0.0 {
+        return [0.0, 0.0, v];
+    }
+    let num = if one > two { two } else { one };
+    let num2 = v - num;
+    let (mut h, s) = if num2 != 0.0 {
+        ((d(offset) + (d(one) - two) / num2).f(), num2 / v)
+    } else {
+        ((d(offset) + (d(one) - two)).f(), 0.0)
+    };
+    h /= 6.0;
+    if h < 0.0 {
+        h += 1.0;
+    }
+    [h, s, v]
+}
 
 pub fn liquid(id: &str) -> usize {
     LIQUIDS.iter().position(|(n, _)| *n == id).unwrap_or_else(|| panic!("no liquid {id}"))
@@ -106,6 +167,7 @@ script! {
         cachedHeartRate: Option<f32> = None,
         TotalLiquidAmount: f32 = 0.0,
         isComputedColourCached: bool = false,
+        cachedComputedColour: [f32; 4] = [0.0, 0.0, 0.0, 0.0],
         MeasuredPressure: f32 = 0.0,
         shouldDeleteEmptyEntries: bool = false,
         timer: f32 = 0.0,
@@ -281,6 +343,39 @@ impl Game {
     }
 
     /// BloodContainer.Update
+    /// BloodContainer.GetComputedColor(Color)
+    pub fn get_computed_color(&mut self, l: usize, fallback: [f32; 4]) -> [f32; 4] {
+        let c = &mut self.circulations[l];
+        if c.isComputedColourCached {
+            return c.cachedComputedColour;
+        }
+        if c.LiquidDistribution.len() == 0 || mathf::approximately(0.0, c.TotalLiquidAmount) {
+            return fallback;
+        }
+        let mut v = [0.0f32; 4];
+        for (liquid, amount) in c.LiquidDistribution.iter() {
+            let num = amount.raw / c.TotalLiquidAmount;
+            let color = liquid_color(*liquid);
+            for i in 0..4 {
+                v[i] += color[i] * num;
+            }
+        }
+        v[3] = mathf::clamp(v[3], 0.1, 1.0);
+        for i in 0..3 {
+            v[i] = mathf::clamp(v[i], 0.0, 10.0);
+        }
+        if self.prefs.GorelessMode {
+            // Utils.ChangeRedToOrange
+            let h = rgb_to_hsv(v)[0];
+            if (h - 0.0).abs() < 0.03 || (h - 1.0).abs() < 0.03 {
+                v = [0.87, 0.6, 0.18, 1.0];
+            }
+        }
+        c.cachedComputedColour = v;
+        c.isComputedColourCached = true;
+        v
+    }
+
     pub fn blood_container_update(&mut self, l: usize) {
         let dt = self.time.deltaTime;
         let c = &mut self.circulations[l];

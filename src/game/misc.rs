@@ -238,11 +238,21 @@ impl Game {
         }
     }
 
+    /// GripBehaviour.Update
+    pub fn grip_update(&mut self, g: usize) {
+        if self.grips[g].isHolding && self.grips[g].CurrentlyHolding.is_none() {
+            // DropObject without a held object: only the (unrewritten) FixedJoint2D goes.
+            self.grips[g].isHolding = false;
+        }
+    }
+
     /// SkinMaterialHandler.Update
     pub fn skin_update(&mut self, l: usize) {
         let dt = self.time.deltaTime;
-        let cycles = self.skins[l].intervalDistributor.calculate_cycle_count(dt);
-        for _ in 0..cycles {
+        // The loop condition re-runs CalculateCycleCount (adding dt again) every iteration.
+        let mut i = 0;
+        while i < self.skins[l].intervalDistributor.calculate_cycle_count(dt) {
+            i += 1;
             let interval = self.skins[l].intervalDistributor.IntervalSeconds;
             if !self.limbs[l].IsZombie && self.prefs.AutoHealWounds && self.limb_is_considered_alive(l) {
                 // RegenerateWounds; Sync only uploads to the material.
@@ -333,13 +343,15 @@ impl Game {
             if !flag2 {
                 return;
             }
-            let cycles = bp.dripSoundClock.calculate_cycle_count(dt);
-            for _ in 0..cycles {
+            // The loop condition re-runs CalculateCycleCount (adding dt again) every iteration.
+            let mut i = 0;
+            while i < self.bleeding[b].dripSoundClock.calculate_cycle_count(dt) {
                 if self.random.value() > 0.2 {
                     // PlayClipOnce(DripSounds.PickRandom(), volume)
                     let n = self.bleeding[b].DripSounds.unwrap();
                     self.pick_random(n);
                 }
+                i += 1;
             }
         } else {
             let bp = &mut self.bleeding[b];

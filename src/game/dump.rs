@@ -344,6 +344,10 @@ impl Game {
             g.grips.push(gr);
         }
         let _ = grip_ids;
+        // ponytail: gore string joints (severed limbs) are not rewritten; their Update returns while Joint is null.
+        if s.of("GoreStringBehaviour").any(|r| r.get("Joint").is_some_and(|j| j != "null")) {
+            return Err("gore string joints are not rewritten yet".into());
+        }
 
         for r in s.of("CirculationBehaviour") {
             let mut c = Circulation::default();
@@ -411,6 +415,26 @@ impl Game {
             b.dripSoundClock = distributor(r.req("dripSoundClock")?);
             g.bleeding.push(b);
         }
+        // Older recordings lack the map scripts.
+        let array_len = |text: &str| if text == "null" { None } else { Some(list(text).len()) };
+        for r in s.of("PlayAudioAtRandom") {
+            let mut a = super::PlayAudioAtRandom::default();
+            load_fields(a.fields(), r)?;
+            a.clips = array_len(r.req("Clips")?);
+            a.isPlaying = r.req("playing")? == "1";
+            g.ambient_audio.push(a);
+        }
+        for r in s.of("MapLightBehaviour") {
+            let mut m = super::MapLight::default();
+            load_fields(m.fields(), r)?;
+            m.switches = array_len(r.req("Switches")?);
+            m.hasAudio = r.req("audio")? == "1";
+            m.wake = match r.req("wake")? {
+                "none" => None,
+                w => Some(f64::from_bits(u64::from_str_radix(w, 16).map_err(|e| e.to_string())?)),
+            };
+            g.map_lights.push(m);
+        }
 
         let r = s.of("PersonBehaviour").next().ok_or("no person")?;
         let mut p = Person { name: r.name.clone(), id: r.id, ..Default::default() };
@@ -433,9 +457,14 @@ impl Game {
             let (k, v) = entry.split_once(':').unwrap();
             p.LinkedPoses[k.parse::<usize>().unwrap()] = pose_named(v)?;
         }
-        let rb = rbs[p.Head.unwrap()];
-        p.localScale = [1.0; 3];
-        let _ = rb;
+        p.localScale = match s.snap.iter().find(|(k, _)| k == "rootScale") {
+            Some((_, v)) => floats(v),
+            // Older recordings: a unit-scale limb's lossyScale, which can be 1 ulp off the root's localScale.
+            None => {
+                let lossy: [f32; 3] = floats(rbs[p.Head.unwrap()].req("lossy")?);
+                [lossy[0], lossy[1], 1.0]
+            }
+        };
         g.people.push(p);
         Ok(g)
     }
@@ -443,14 +472,21 @@ impl Game {
     fn load_time(&mut self, s: &Snapshot) {
         self.time = Time {
             time: f(s.snap("time")),
+            timeAsDouble: s.of("Time").next().and_then(|r| r.get("timeAsDouble")).map_or(f(s.snap("time")) as f64, |w| f64::from_bits(u64::from_str_radix(w, 16).unwrap())),
             fixedTime: f(s.snap("fixedTime")),
             deltaTime: f(s.snap("dt")),
             fixedDeltaTime: f(s.snap("fixedDt")),
             maximumDeltaTime: f(s.snap("maxDt")),
+            timeScale: f(s.snap("timeScale")),
             frameCount: s.snap("frame").parse().unwrap(),
         };
         // Older recordings lack it: the Default map prefab sets Ambient_temperature 20.
         self.AmbientTemperature = s.snap.iter().find(|(k, _)| k == "ambient").map_or(20.0, |(_, v)| f(v));
+        // Older recordings lack it: the Default map's BoundingBoxBehaviour.
+        if let Some((_, v)) = s.snap.iter().find(|(k, _)| k == "bounds") {
+            let b = words(v).iter().map(|&w| f32::from_bits(w)).collect::<Vec<_>>();
+            self.BoundingBox = super::Bounds { center: [b[0], b[1]], extents: [b[2], b[3]] };
+        }
         let w = words(s.snap("random"));
         self.random = Random { state: [w[0], w[1], w[2], w[3]] };
     }
@@ -482,6 +518,63 @@ impl Game {
         }
         for l in 0..self.limbs.len() {
             self.gforce_fixed_update(l);
+        }
+    }
+
+    /// The Update and LateUpdate scripts between SteamworksInitialiser.Update (US) and end of frame (UE),
+    /// in the recorded call order.
+    pub fn update_scripts(&mut self) {
+        // UndoControllerBehaviour.Update, then the map's ambience emitter.
+        for a in 0..self.ambient_audio.len() {
+            self.play_audio_at_random_update(a);
+        }
+        for p in 0..self.physicals.len() {
+            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
+                self.physical_update(p);
+            }
+        }
+        for l in 0..self.limbs.len() {
+            if self.limbs[l].enabled {
+                self.limb_update(l);
+            }
+        }
+        for p in 0..self.people.len() {
+            self.person_update(p);
+        }
+        // Per limb: SkinMaterialHandler, BloodContainer, GripBehaviour, GoreStringBehaviour (no joints: returns).
+        for l in 0..self.limbs.len() {
+            self.skin_update(l);
+            self.blood_container_update(l);
+            if let Some(g) = self.limbs[l].GripBehaviour {
+                self.grip_update(g);
+            }
+        }
+        for b in 0..self.bleeding.len() {
+            self.bleeding_update(b);
+        }
+        self.node_controller_update();
+        // CameraControlBehaviour.Update is the last Update; then the coroutines.
+        self.map_light_coroutines();
+        // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
+        for p in 0..self.physicals.len() {
+            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
+                self.physical_late_update(p);
+            }
+        }
+        for p in 0..self.people.len() {
+            self.person_late_update(p);
+        }
+        for l in 0..self.limbs.len() {
+            self.skin_late_update(l);
+        }
+        // Global.LateUpdate
+        if self.time.frameCount % 2 == 0 {
+            self.chunksUpToDate = false;
+        }
+        // SkinMaterialHandler.OnWillRenderObject (every limb is on screen in the recordings); bloodColor is render state.
+        for l in 0..self.limbs.len() {
+            let blood = super::circulation::liquid_color(super::circulation::liquid(&self.limbs[l].BloodLiquidType));
+            self.get_computed_color(l, blood);
         }
     }
 }
@@ -621,6 +714,19 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     for (x, r) in g.people.iter_mut().zip(s.of("PersonBehaviour")) {
         check(format!("Person {}", r.name), x.fields(), r);
     }
+    for (x, r) in g.ambient_audio.iter_mut().zip(s.of("PlayAudioAtRandom")) {
+        check(format!("PlayAudioAtRandom {}", r.name), x.fields(), r);
+    }
+    for (x, r) in g.map_lights.iter_mut().zip(s.of("MapLightBehaviour")) {
+        check(format!("MapLight {}", r.name), x.fields(), r);
+    }
+    for (x, r) in g.map_lights.iter().zip(s.of("MapLightBehaviour")) {
+        let theirs = r.get("wake").unwrap_or("");
+        let ours = x.wake.map_or("none".to_string(), |w| format!("{:016x}", w.to_bits()));
+        if theirs != ours {
+            out.push(format!("MapLight {}.wake: game {theirs} ours {ours}", r.name));
+        }
+    }
     // Hinge motors, limits and break values.
     for (h, r) in g.hinges.iter().zip(s.of("HingeJoint2D")) {
         let motor = format!("{},{},{}", h.useMotor as i32, h.motor[0].show(), h.motor[1].show());
@@ -660,7 +766,8 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
     let (mut segments, mut failed) = (0, 0);
     let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
     for pair in snaps.windows(2) {
-        if pair[0].pt != "FS" || pair[1].pt != "FM" {
+        let update = pair[0].pt == "US" && pair[1].pt == "UE";
+        if !update && (pair[0].pt != "FS" || pair[1].pt != "FM") {
             continue;
         }
         segments += 1;
@@ -673,7 +780,11 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 return Err(format!("euler {}: game {:08x} ours {:08x}", r.name, theirs.to_bits(), euler_z(q).to_bits()));
             }
         }
-        g.fixed_update_scripts();
+        if update {
+            g.update_scripts();
+        } else {
+            g.fixed_update_scripts();
+        }
         let diffs = compare(&mut g, &pair[1]);
         if let Ok(path) = std::env::var("PPG_DIFFS") {
             use std::io::Write;
@@ -687,12 +798,12 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
             let head = d.split(':').next().unwrap();
             let ty = head.split(' ').next().unwrap();
             let field = head.rsplit('.').next().unwrap();
-            *kinds.entry(format!("{ty}.{field}")).or_default() += 1;
+            *kinds.entry(format!("{} {ty}.{field}", pair[0].pt)).or_default() += 1;
         }
         if !diffs.is_empty() {
             failed += 1;
             if failed <= 1 {
-                eprintln!("segment {} ({} diffs):", pair[0].snap("frame"), diffs.len());
+                eprintln!("segment {} {} ({} diffs):", pair[0].pt, pair[0].snap("frame"), diffs.len());
                 for d in diffs.iter().take(25) {
                     eprintln!("  {d}");
                 }

@@ -6,6 +6,7 @@
 pub mod circulation;
 pub mod dump;
 pub mod limb;
+pub mod map;
 pub mod misc;
 pub mod person;
 pub mod physical;
@@ -18,6 +19,7 @@ use crate::unity::Random;
 
 pub use circulation::Circulation;
 pub use limb::Limb;
+pub use map::{MapLight, PlayAudioAtRandom};
 pub use misc::{BleedingParticle, FancyBloodSplat, GForce, Grip, Node, Skin};
 pub use person::Person;
 pub use physical::{Physical, PhysicalProperties};
@@ -99,6 +101,15 @@ pub mod mathf {
     pub fn sqrt(f: f32) -> f32 {
         (f as f64).sqrt() as f32
     }
+    /// Vector2.normalized (magnitude is (float)Math.Sqrt(x * x + y * y), in double).
+    pub fn normalized2(v: [f32; 2]) -> [f32; 2] {
+        let num = (super::d(v[0]) * v[0] + super::d(v[1]) * v[1]).0.sqrt() as f32;
+        if num > 1e-5 {
+            [v[0] / num, v[1] / num]
+        } else {
+            [0.0, 0.0]
+        }
+    }
     pub fn floor(f: f32) -> f32 {
         (f as f64).floor() as f32
     }
@@ -117,7 +128,7 @@ pub mod mathf {
     }
     /// Utils.MapRange
     pub fn map_range(lower1: f32, upper1: f32, lower2: f32, upper2: f32, value: f32) -> f32 {
-        lower2 + (value - lower1) * (upper2 - lower2) / (upper1 - lower1)
+        (d(lower2) + (d(value) - lower1) * (d(upper2) - lower2) / (d(upper1) - lower1)).f()
     }
     /// Utils.GetLerpFactorDeltaTime
     pub fn lerp_factor_dt(lerp_factor: f32, dt: f32) -> f32 {
@@ -135,8 +146,9 @@ pub mod mathf {
         let l = |a: f32, b: f32| (a as f64 + (b as f64 - a as f64) * t) as f32;
         [l(a[0], b[0]), l(a[1], b[1])]
     }
+    /// Vector2.sqrMagnitude (not inlined: rounded once at its return).
     pub fn sqr_magnitude(v: [f32; 2]) -> f32 {
-        v[0] * v[0] + v[1] * v[1]
+        (d(v[0]) * v[0] + d(v[1]) * v[1]).f()
     }
     /// Quaternion * Vector3 (UnityEngine.Quaternion operator*).
     pub fn rotate(q: [f32; 4], p: [f32; 3]) -> [f32; 3] {
@@ -145,10 +157,11 @@ pub mod mathf {
         let (n4, n5, n6) = (x * n1, y * n2, z * n3);
         let (n7, n8, n9) = (x * n2, x * n3, y * n3);
         let (n10, n11, n12) = (w * n1, w * n2, w * n3);
+        // Each component is one double-evaluated chain (Mono), rounded at the field store.
         [
-            (1.0 - (n5 + n6)) * p[0] + (n7 - n12) * p[1] + (n8 + n11) * p[2],
-            (n7 + n12) * p[0] + (1.0 - (n4 + n6)) * p[1] + (n9 - n10) * p[2],
-            (n8 - n11) * p[0] + (n9 + n10) * p[1] + (1.0 - (n4 + n5)) * p[2],
+            ((d(1.0) - (d(n5) + n6)) * p[0] + (d(n7) - n12) * p[1] + (d(n8) + n11) * p[2]).f(),
+            ((d(n7) + n12) * p[0] + (d(1.0) - (d(n4) + n6)) * p[1] + (d(n9) - n10) * p[2]).f(),
+            ((d(n8) - n11) * p[0] + (d(n9) + n10) * p[1] + (d(1.0) - (d(n4) + n5)) * p[2]).f(),
         ]
     }
 }
@@ -253,11 +266,36 @@ pub(crate) use script;
 #[derive(Clone, Debug, Default)]
 pub struct Time {
     pub time: f32,
+    pub timeAsDouble: f64,
     pub fixedTime: f32,
     pub deltaTime: f32,
     pub fixedDeltaTime: f32,
     pub maximumDeltaTime: f32,
+    pub timeScale: f32,
     pub frameCount: i32,
+}
+
+/// UnityEngine.Bounds in the xy plane.
+#[derive(Clone, Copy, Debug)]
+pub struct Bounds {
+    pub center: [f32; 2],
+    pub extents: [f32; 2],
+}
+
+impl Default for Bounds {
+    /// The Default map prefab's BoundingBoxBehaviour.
+    fn default() -> Self {
+        Bounds { center: [572.5, 496.4], extents: [578.4, 496.6] }
+    }
+}
+
+impl Bounds {
+    /// Utils.ContainsExpanded
+    pub fn contains_expanded(&self, p: [f32; 2], expansion: f32) -> bool {
+        let min = [self.center[0] - self.extents[0], self.center[1] - self.extents[1]];
+        let max = [self.center[0] + self.extents[0], self.center[1] + self.extents[1]];
+        p[0] > min[0] - expansion && p[0] < max[0] + expansion && p[1] > min[1] - expansion && p[1] < max[1] + expansion
+    }
 }
 
 /// UserPreferenceManager.Current: the values the simulation reads (config.json in the game folder).
@@ -591,8 +629,16 @@ pub struct Game {
     pub bleeding: Vec<BleedingParticle>,
     pub splats: Vec<FancyBloodSplat>,
     pub hinges: Vec<Hinge>,
+    /// The map's scripts that draw UnityEngine.Random (scene order).
+    pub ambient_audio: Vec<PlayAudioAtRandom>,
+    pub map_lights: Vec<MapLight>,
     /// Global.main.DynamicSqrdVelocityThreshold
     pub DynamicSqrdVelocityThreshold: f32,
+    /// Global.main.CameraControlBehaviour.BoundingBox
+    pub BoundingBox: Bounds,
+    /// Global.physicalBehaviourChunks (each chunk holds at most 128) and chunksUpToDate.
+    pub physical_chunks: std::collections::HashMap<(i32, i32), Vec<usize>>,
+    pub chunksUpToDate: bool,
 }
 
 impl Default for Random {
