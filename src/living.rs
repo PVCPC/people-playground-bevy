@@ -1,5 +1,6 @@
 use super::*;
 use b2::world::CONTACT_TOUCHING;
+use game_assets::{HumanPose, MuscleSpec, Part};
 use std::collections::HashSet;
 
 #[derive(Component)]
@@ -73,6 +74,35 @@ fn angle_error(current: f32, target: f32) -> f32 {
         - std::f32::consts::PI
 }
 
+/// A healthy muscle's motor inputs; `current` is the joint angle in degrees, `reference` in radians.
+pub fn muscle_input(
+    pose: &HumanPose,
+    part: &Part,
+    spec: &MuscleSpec,
+    current: f32,
+    reference: f32,
+    previous_speed: f32,
+    mass: f32,
+) -> motor::MotorInput {
+    let target = pose.angles.iter().find(|angle| angle.part == part.name);
+    motor::MotorInput {
+        current_angle: current,
+        reference_angle: reference.to_degrees(),
+        target_angle: target.map_or(0.0, |t| t.degrees()),
+        previous_speed,
+        rigidity: pose.rigidity,
+        rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),
+        global_rigidity: 1.0,
+        angle_offset: 1.0,
+        mass,
+        initial_mass: part.mass,
+        base_strength: spec.strength,
+        force_multiplier: pose.force_multiplier,
+        active: target.is_some(),
+        strength_multipliers: vec![],
+    }
+}
+
 pub fn drive_muscles(
     rig: Res<HumanRig>,
     session: Res<Session>,
@@ -103,26 +133,11 @@ pub fn drive_muscles(
         if !human.capable(hinge.body_a) || !human.capable(hinge.body_b) {
             continue;
         }
-        let target = pose.angles.iter().find(|angle| angle.part == part.name);
         let (child, mass) = (world.body(body_a).sweep.a, world.body(body_a).mass);
         let parent = world.body(body_b).sweep.a;
-        let output = motor::command(&motor::MotorInput {
-            current_angle: hinge::joint_angle(child, parent, reference_angle).to_degrees(),
-            reference_angle: reference_angle.to_degrees(),
-            target_angle: target.map_or(0.0, |t| t.degrees()),
-            previous_speed: muscle.previous_speed,
-            rigidity: pose.rigidity,
-            rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),
-            global_rigidity: 1.0,
-            angle_offset: 1.0,
-            mass,
-            initial_mass: part.mass,
-            base_strength: spec.strength,
-            force_multiplier: pose.force_multiplier,
-            active: target.is_some(),
-            strength_multipliers: vec![],
-        })
-        .clamp_native_properties();
+        let current = hinge::joint_angle(child, parent, reference_angle).to_degrees();
+        let output = motor::command(&muscle_input(pose, part, spec, current, reference_angle, muscle.previous_speed, mass))
+            .clamp_native_properties();
         muscle.previous_speed = output.speed;
         let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute.def;
         def.enable_motor = output.torque > 0.0;

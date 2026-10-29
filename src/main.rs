@@ -7,6 +7,7 @@ mod integration;
 mod living;
 mod motor;
 mod physics;
+mod replay;
 
 use b2::{
     math::Vec2 as V,
@@ -82,6 +83,7 @@ fn run() -> Result<(), String> {
     let mut reference_probe = None;
     let mut native_probe = None;
     let mut b2_probe = None;
+    let mut replay = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -111,6 +113,9 @@ fn run() -> Result<(), String> {
                     arguments.next().ok_or("--b2-reference-test needs a probe path")?,
                 ));
             }
+            "--replay-test" => {
+                replay = Some(PathBuf::from(arguments.next().ok_or("--replay-test needs a recording")?));
+            }
             _ => return Err(format!("Unknown argument: {argument}")),
         }
     }
@@ -120,6 +125,9 @@ fn run() -> Result<(), String> {
     let game = game_assets::find_game(explicit_game)?;
     let rig = HumanRig::load(&cache, &game)?;
     let cache = cache.canonicalize().map_err(|e| e.to_string())?;
+    if let Some(recording) = replay {
+        return replay::compare_motors(&rig, &recording);
+    }
     if let Some(probe) = reference_probe {
         return motor::compare_reference(&probe);
     }
