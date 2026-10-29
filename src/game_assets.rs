@@ -135,6 +135,23 @@ impl Default for SimulationSettings {
     }
 }
 
+impl SimulationSettings {
+    /// VideoSettingsInitBehaviour.Sync overrides both Physics2D iteration counts with the user's
+    /// PhysicsIterations preference (Preferences default 32) from config.json in the game folder.
+    // ponytail: no config.json falls back to PlayerPrefs (LoadFromLegacyStorage); keep the project values then.
+    fn apply_preferences(&mut self, game: &Path) {
+        let Ok(text) = std::fs::read_to_string(game.join("config.json")) else {
+            return;
+        };
+        let Ok(preferences) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return;
+        };
+        let iterations = preferences.get("PhysicsIterations").and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+        self.velocity_iterations = iterations;
+        self.position_iterations = iterations;
+    }
+}
+
 #[derive(Resource, Deserialize)]
 pub struct HumanRig {
     pub source_files: Vec<SourceFile>,
@@ -155,8 +172,9 @@ impl HumanRig {
         let text = std::fs::read_to_string(cache.join("human.json")).map_err(|e| {
             format!("Missing human asset cache ({e}). Run scripts/prepare-assets.py first.")
         })?;
-        let rig: Self =
+        let mut rig: Self =
             serde_json::from_str(&text).map_err(|e| format!("Invalid human cache: {e}"))?;
+        rig.simulation.apply_preferences(game);
         rig.validate()?;
         if rig.source_files.len() != REQUIRED.len() {
             return Err("Incomplete installation fingerprint".into());
