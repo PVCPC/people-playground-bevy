@@ -8,7 +8,7 @@ use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
 use super::solver::*;
-use super::toi::Sweep;
+use super::toi::{time_of_impact, Sweep, ToiState};
 
 const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
 /// Physics2DSettings (m_MaxTranslationSpeed etc.) as PhysicsManager2D copies them into the b2_ globals.
@@ -19,6 +19,11 @@ const MAX_ROTATION_SQUARED: f32 = MAX_ROTATION * MAX_ROTATION;
 const TIME_TO_SLEEP: f32 = 0.5;
 const LINEAR_SLEEP_TOLERANCE: f32 = 0.01;
 const ANGULAR_SLEEP_TOLERANCE: f32 = 2.0 * DEG_TO_RAD;
+/// b2_maxSubSteps; SolveTOI also stops when the earliest impact is past 1 - 10 FLT_EPSILON.
+const MAX_SUB_STEPS: i32 = 8;
+const ONE_MINUS_TEN_EPSILON: f32 = f32::from_bits(0x3f7f_ffec);
+const TOI_BODY_CAPACITY: usize = 64;
+const TOI_CONTACT_CAPACITY: usize = 32;
 
 pub const BODY_ISLAND: u16 = 0x1;
 pub const BODY_AWAKE: u16 = 0x2;
@@ -33,6 +38,8 @@ pub const CONTACT_ISLAND: u32 = 0x1;
 pub const CONTACT_TOUCHING: u32 = 0x2;
 pub const CONTACT_ENABLED: u32 = 0x4;
 pub const CONTACT_FILTER: u32 = 0x8;
+/// The contact's toi is current for this sub-step.
+pub const CONTACT_TOI: u32 = 0x20;
 /// Unity: the user disabled the contact, so Update does not re-enable it.
 pub const CONTACT_KEEP_DISABLED: u32 = 0x40;
 /// Unity: a non-sensor contact with a bullet body, kept in the TOI contact array.
@@ -201,6 +208,20 @@ pub struct Body {
 }
 
 impl Body {
+    /// b2Body::SynchronizeTransform: xf from the sweep's current centre and angle.
+    fn synchronize_transform(&mut self) {
+        let q = Rot::new(self.sweep.a);
+        self.xf = Transform { p: self.sweep.c - q.apply(self.sweep.local_center), q };
+    }
+
+    /// b2Body::Advance (180bb87b0): move the body to fraction `alpha` of the step and stop there.
+    fn advance(&mut self, alpha: f32) {
+        self.sweep.advance(alpha);
+        self.sweep.c = self.sweep.c0;
+        self.sweep.a = self.sweep.a0;
+        self.synchronize_transform();
+    }
+
     fn active_and_moving(&self) -> bool {
         self.flags & BODY_AWAKE != 0 && self.kind != BodyType::Static
     }
@@ -296,6 +317,8 @@ pub struct World {
     pub allow_sleep: bool,
     pub warm_starting: bool,
     pub continuous_physics: bool,
+    pub sub_stepping: bool,
+    step_complete: bool,
     inv_dt0: f32,
 }
 
@@ -324,6 +347,8 @@ impl World {
             allow_sleep: true,
             warm_starting: true,
             continuous_physics: true,
+            sub_stepping: false,
+            step_complete: true,
             inv_dt0: 0.0,
         }
     }
@@ -506,11 +531,11 @@ impl World {
         let step = TimeStep { dt, inv_dt, dt_ratio: dt * self.inv_dt0, velocity_iterations, position_iterations, warm_starting: self.warm_starting };
         self.collide(false);
         self.collide(true);
-        if 0.0 < dt {
+        if self.step_complete && 0.0 < dt {
             self.solve(&step);
         }
         if self.continuous_physics && 0.0 < dt {
-            // ponytail: b2World::SolveTOI (180bbb7a0) not ported yet; bullets tunnel.
+            self.solve_toi(&step);
         }
         if 0.0 < dt {
             self.inv_dt0 = inv_dt;
@@ -832,28 +857,7 @@ impl World {
             positions.push(Position { c: b.sweep.c, a: b.sweep.a });
             velocities.push(Velocity { v: Vec2::new(v.x * b.axis.x, v.y * b.axis.y), w });
         }
-        let solver_contacts: Vec<SolverContact> = island_contacts
-            .iter()
-            .map(|&cid| {
-                let c = self.contact(cid);
-                let solver_body = |f: FixtureId| {
-                    let b = self.body(self.fixture(f).body);
-                    SolverBody { inv_mass: b.inv_mass, axis: b.axis, inv_i: b.inv_i, local_center: b.sweep.local_center }
-                };
-                SolverContact {
-                    manifold: c.manifold,
-                    radius_a: c.radius_a,
-                    radius_b: c.radius_b,
-                    friction: c.friction,
-                    restitution: c.restitution,
-                    tangent_speed: c.tangent_speed,
-                    index_a: c.island_index_a,
-                    index_b: c.island_index_b,
-                    body_a: solver_body(c.fixture_a),
-                    body_b: solver_body(c.fixture_b),
-                }
-            })
-            .collect();
+        let solver_contacts = self.solver_contacts(island_contacts);
         let mut solver = ContactSolver::new(*step, &solver_contacts);
         solver.initialize_velocity_constraints(&positions, &velocities);
         if step.warm_starting {
@@ -901,8 +905,7 @@ impl World {
             b.sweep.a = positions[i].a;
             b.linear_velocity = velocities[i].v;
             b.angular_velocity = velocities[i].w;
-            let q = Rot::new(b.sweep.a);
-            b.xf = Transform { p: b.sweep.c - q.apply(b.sweep.local_center), q };
+            b.synchronize_transform();
         }
         if !self.allow_sleep {
             return;
@@ -936,6 +939,252 @@ impl World {
                 b.force = Vec2::ZERO;
                 b.torque = 0.0;
             }
+        }
+    }
+
+    /// What the b2ContactSolver constructor reads from each contact and its bodies.
+    fn solver_contacts(&self, contacts: &[ContactId]) -> Vec<SolverContact> {
+        let solver_body = |f: FixtureId| {
+            let b = self.body(self.fixture(f).body);
+            SolverBody { inv_mass: b.inv_mass, axis: b.axis, inv_i: b.inv_i, local_center: b.sweep.local_center }
+        };
+        contacts
+            .iter()
+            .map(|&cid| {
+                let c = self.contact(cid);
+                SolverContact {
+                    manifold: c.manifold,
+                    radius_a: c.radius_a,
+                    radius_b: c.radius_b,
+                    friction: c.friction,
+                    restitution: c.restitution,
+                    tangent_speed: c.tangent_speed,
+                    index_a: c.island_index_a,
+                    index_b: c.island_index_b,
+                    body_a: solver_body(c.fixture_a),
+                    body_b: solver_body(c.fixture_b),
+                }
+            })
+            .collect()
+    }
+
+    /// b2World::SolveTOI (180bbb7a0): Unity only sweeps contacts in the TOI array, and only when an awake
+    /// body in the pair is a bullet.
+    fn solve_toi(&mut self, step: &TimeStep) {
+        if self.step_complete {
+            for &id in &self.body_list {
+                let b = self.bodies[id].as_mut().unwrap();
+                b.flags &= !BODY_ISLAND;
+                b.sweep.alpha0 = 0.0;
+                b.island_index = -1;
+            }
+            for &id in &self.contacts_toi {
+                let c = self.contacts[id].as_mut().unwrap();
+                c.flags &= !(CONTACT_ISLAND | CONTACT_TOI);
+                c.toi_count = 0;
+                c.toi = 1.0;
+            }
+        }
+        loop {
+            let mut min_contact = None;
+            let mut min_alpha = 1.0f32;
+            for i in 0..self.contacts_toi.len() {
+                let id = self.contacts_toi[i];
+                let c = self.contact(id);
+                if c.flags & CONTACT_ENABLED == 0 || MAX_SUB_STEPS < c.toi_count {
+                    continue;
+                }
+                let alpha = if c.flags & CONTACT_TOI != 0 {
+                    c.toi
+                } else {
+                    let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+                    if fa.is_sensor || fb.is_sensor {
+                        continue;
+                    }
+                    let (ia, ib) = (fa.body, fb.body);
+                    let (a, b) = (self.body(ia), self.body(ib));
+                    let moving = a.active_and_moving() || b.active_and_moving();
+                    if !moving || (a.flags | b.flags) & BODY_BULLET == 0 {
+                        continue;
+                    }
+                    let mut alpha0 = a.sweep.alpha0;
+                    if b.sweep.alpha0 <= alpha0 {
+                        if b.sweep.alpha0 < alpha0 {
+                            self.body_mut(ib).sweep.advance(alpha0);
+                        }
+                    } else {
+                        alpha0 = b.sweep.alpha0;
+                        self.body_mut(ia).sweep.advance(alpha0);
+                    }
+                    let c = self.contact(id);
+                    let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
+                    let proxy_a = DistanceProxy { radius: c.radius_a, ..fa.shape.proxy() };
+                    let proxy_b = DistanceProxy { radius: c.radius_b, ..fb.shape.proxy() };
+                    let output = time_of_impact(&proxy_a, &self.body(ia).sweep, &proxy_b, &self.body(ib).sweep, 1.0);
+                    let mut alpha = 1.0;
+                    if output.state == ToiState::Touching {
+                        alpha = (1.0 - alpha0) * output.t + alpha0;
+                        if !(alpha < 1.0) {
+                            alpha = 1.0;
+                        }
+                    }
+                    let c = self.contact_mut(id);
+                    c.flags |= CONTACT_TOI;
+                    c.toi = alpha;
+                    alpha
+                };
+                if alpha < min_alpha {
+                    min_contact = Some(id);
+                    min_alpha = alpha;
+                }
+            }
+            let Some(min) = min_contact.filter(|_| min_alpha <= ONE_MINUS_TEN_EPSILON) else {
+                self.step_complete = true;
+                break;
+            };
+            let c = self.contact(min);
+            let (ia, ib) = (self.fixture(c.fixture_a).body, self.fixture(c.fixture_b).body);
+            let (backup_a, backup_b) = (self.body(ia).sweep, self.body(ib).sweep);
+            self.body_mut(ia).advance(min_alpha);
+            self.body_mut(ib).advance(min_alpha);
+            self.update_contact(min);
+            let c = self.contact_mut(min);
+            c.flags &= !CONTACT_TOI;
+            c.toi_count += 1;
+            if c.flags & (CONTACT_ENABLED | CONTACT_TOUCHING) != CONTACT_ENABLED | CONTACT_TOUCHING {
+                c.flags &= !CONTACT_ENABLED;
+                for (id, backup) in [(ia, backup_a), (ib, backup_b)] {
+                    let b = self.body_mut(id);
+                    b.sweep = backup;
+                    b.synchronize_transform();
+                }
+                continue;
+            }
+            self.body_mut(ia).wake();
+            self.body_mut(ib).wake();
+            let mut island_bodies = vec![ia, ib];
+            let mut island_contacts = vec![min];
+            self.body_mut(ia).island_index = 0;
+            self.body_mut(ib).island_index = 1;
+            self.body_mut(ia).flags |= BODY_ISLAND;
+            self.body_mut(ib).flags |= BODY_ISLAND;
+            self.contact_mut(min).flags |= CONTACT_ISLAND;
+            for body in [ia, ib] {
+                if self.body(body).kind != BodyType::Dynamic {
+                    continue;
+                }
+                let edges: Vec<(BodyId, ContactId)> = self.body(body).contacts.iter().rev().copied().collect();
+                for (other, cid) in edges {
+                    if island_bodies.len() == TOI_BODY_CAPACITY || island_contacts.len() == TOI_CONTACT_CAPACITY {
+                        break;
+                    }
+                    let c = self.contact(cid);
+                    if c.flags & CONTACT_ISLAND != 0 {
+                        continue;
+                    }
+                    let o = self.body(other);
+                    if o.kind == BodyType::Dynamic && (self.body(body).flags | o.flags) & BODY_BULLET == 0 {
+                        continue;
+                    }
+                    if self.fixture(c.fixture_a).is_sensor || self.fixture(c.fixture_b).is_sensor {
+                        continue;
+                    }
+                    let backup = o.sweep;
+                    if o.flags & BODY_ISLAND == 0 {
+                        self.body_mut(other).advance(min_alpha);
+                    }
+                    self.update_contact(cid);
+                    let c = self.contact_mut(cid);
+                    if c.flags & (CONTACT_ENABLED | CONTACT_TOUCHING) != CONTACT_ENABLED | CONTACT_TOUCHING {
+                        let o = self.body_mut(other);
+                        o.sweep = backup;
+                        o.synchronize_transform();
+                        continue;
+                    }
+                    c.flags |= CONTACT_ISLAND;
+                    island_contacts.push(cid);
+                    let o = self.body_mut(other);
+                    if o.flags & BODY_ISLAND == 0 {
+                        o.flags |= BODY_ISLAND;
+                        if o.kind != BodyType::Static {
+                            o.sleep_time = 0.0;
+                            o.flags |= BODY_AWAKE;
+                        }
+                        o.island_index = island_bodies.len() as i32;
+                        island_bodies.push(other);
+                    }
+                }
+            }
+            let dt = (1.0 - min_alpha) * step.dt;
+            let sub_step = TimeStep { dt, inv_dt: 1.0 / dt, dt_ratio: 1.0, position_iterations: 20, velocity_iterations: step.velocity_iterations, warm_starting: false };
+            for &cid in &island_contacts {
+                let c = self.contact(cid);
+                let a = self.body(self.fixture(c.fixture_a).body).island_index as usize;
+                let b = self.body(self.fixture(c.fixture_b).body).island_index as usize;
+                let c = self.contact_mut(cid);
+                c.island_index_a = a;
+                c.island_index_b = b;
+            }
+            for &b in &island_bodies {
+                self.body_mut(b).island_index = -1;
+            }
+            self.solve_toi_island(&island_bodies, &island_contacts, &sub_step, 0, 1);
+            for &id in &island_bodies {
+                self.body_mut(id).flags &= !BODY_ISLAND;
+                if self.body(id).kind != BodyType::Dynamic {
+                    continue;
+                }
+                self.synchronize_fixtures(id);
+                for (_, cid) in self.body(id).contacts.clone() {
+                    self.contact_mut(cid).flags &= !(CONTACT_ISLAND | CONTACT_TOI);
+                }
+            }
+            self.find_new_contacts();
+            if self.sub_stepping {
+                self.step_complete = false;
+                break;
+            }
+        }
+    }
+
+    /// b2Island::SolveTOI (180bbb360): Unity integrates without the body axis constraints here.
+    pub(crate) fn solve_toi_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], step: &TimeStep, toi_index_a: usize, toi_index_b: usize) {
+        let mut positions: Vec<Position> = island_bodies.iter().map(|&id| Position { c: self.body(id).sweep.c, a: self.body(id).sweep.a }).collect();
+        let mut velocities: Vec<Velocity> = island_bodies.iter().map(|&id| Velocity { v: self.body(id).linear_velocity, w: self.body(id).angular_velocity }).collect();
+        let mut solver = ContactSolver::new(*step, &self.solver_contacts(island_contacts));
+        for _ in 0..step.position_iterations {
+            if solver.solve_toi_position_constraints(&mut positions, toi_index_a, toi_index_b) {
+                break;
+            }
+        }
+        for i in [toi_index_a, toi_index_b] {
+            let b = self.body_mut(island_bodies[i]);
+            b.sweep.c0 = positions[i].c;
+            b.sweep.a0 = positions[i].a;
+        }
+        solver.initialize_velocity_constraints(&positions, &velocities);
+        for _ in 0..step.velocity_iterations {
+            solver.solve_velocity_constraints(&mut velocities);
+        }
+        let h = step.dt;
+        for (i, &id) in island_bodies.iter().enumerate() {
+            let Velocity { mut v, mut w } = velocities[i];
+            let (tx, ty) = (v.x * h, v.y * h);
+            let t2 = ty * ty + tx * tx;
+            if MAX_TRANSLATION_SQUARED < t2 {
+                let length = t2.sqrt();
+                v = Vec2::new(v.x * (MAX_TRANSLATION / length), v.y * (MAX_TRANSLATION / length));
+            }
+            let rotation = w * h;
+            if MAX_ROTATION_SQUARED < rotation * rotation {
+                w = w * (MAX_ROTATION / rotation.abs());
+            }
+            let b = self.body_mut(id);
+            b.sweep.c = Vec2::new(positions[i].c.x + v.x * h, positions[i].c.y + v.y * h);
+            b.sweep.a = positions[i].a + w * h;
+            b.linear_velocity = v;
+            b.angular_velocity = w;
+            b.synchronize_transform();
         }
     }
 
@@ -985,7 +1234,7 @@ fn test_overlap(a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::b2::shape::{box_corners, Polygon};
+    use crate::b2::shape::{box_corners, Circle, Polygon};
 
     fn box_fixture(size: Vec2) -> FixtureDef {
         let shape = Shape::Polygon(Polygon::from_points(&box_corners(Vec2::ZERO, size), POLYGON_RADIUS));
@@ -1007,5 +1256,24 @@ mod tests {
         assert!((b.xf.p.y - 1.0).abs() < 0.05, "rest height {}", b.xf.p.y);
         assert!(b.xf.p.x.abs() < 1e-3 && b.sweep.a.abs() < 1e-3);
         assert_eq!(b.flags & BODY_AWAKE, 0, "should sleep");
+    }
+
+    #[test]
+    fn bullet_stops_at_thin_wall() {
+        let run = |bullet: bool| {
+            let mut world = World::default();
+            let wall = world.create_body(&BodyDef { position: Vec2::new(5.0, 0.0), ..BodyDef::default() });
+            world.create_fixture(wall, &box_fixture(Vec2::new(0.1, 4.0)), true);
+            let def = BodyDef { kind: BodyType::Dynamic, linear_velocity: Vec2::new(400.0, 0.0), gravity_scale: 0.0, bullet, ..BodyDef::default() };
+            let ball = world.create_body(&def);
+            let shape = Shape::Circle(Circle { p: Vec2::ZERO, radius: 0.1 });
+            world.create_fixture(ball, &FixtureDef { shape, ..box_fixture(Vec2::new(1.0, 1.0)) }, true);
+            for _ in 0..10 {
+                world.step(1.0 / 60.0, 16, 16);
+            }
+            world.body(ball).xf.p.x
+        };
+        assert!(run(false) > 5.0, "a discrete body tunnels");
+        assert!(run(true) < 5.0, "a bullet stops at the wall");
     }
 }

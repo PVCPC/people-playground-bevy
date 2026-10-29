@@ -644,7 +644,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_distance(executable)?;
     compare_toi(executable)?;
     compare_broad_phase(executable)?;
-    compare_island_solve(executable)
+    compare_island_solve(executable, false)?;
+    compare_island_solve(executable, true)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {
@@ -844,6 +845,7 @@ fn compare_broad_phase(executable: &std::path::Path) -> Result<(), String> {
 }
 
 const ISLAND_SOLVE: u32 = 0xbba770;
+const ISLAND_SOLVE_TOI: u32 = 0xbbb360;
 const STACK_ALLOCATOR_SIZE: usize = 102_936;
 const DEG: f32 = f32::from_bits(0x3c8e_fa35);
 /// SOLVER_GLOBALS plus the Island::Solve limits and sleep tolerances.
@@ -938,10 +940,11 @@ fn island_call(world: &super::world::World, bodies: &[usize], contacts: &[usize]
 }
 
 /// Random stacks of boxes and discs on a ground box, run for a while in the ported world; each case solves
-/// every touching contact as one island, natively and in Rust, from the same state.
-fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
+/// every touching contact as one island, natively and in Rust, from the same state. With `toi`, the island is
+/// solved as a TOI sub-step about its first contact's bodies (b2Island::SolveTOI).
+fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), String> {
     use super::world::*;
-    let mut random = Random(0x5eed_0007);
+    let mut random = Random(if toi { 0x5eed_0008 } else { 0x5eed_0007 });
     let mut calls = Vec::new();
     let mut expected = Vec::new();
     for case in 0..192 {
@@ -974,7 +977,15 @@ fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
         for _ in 0..random.next() % 120 {
             world.step(1.0 / 60.0, 8, 8);
         }
-        let bodies = world.body_list.clone();
+        let touching = CONTACT_TOUCHING | CONTACT_ENABLED;
+        let contacts: Vec<usize> = world.contact_list.iter().copied().filter(|&c| world.contact(c).flags & touching == touching).collect();
+        let mut bodies = world.body_list.clone();
+        if toi {
+            let Some(&first) = contacts.first() else { continue };
+            let pair = [world.fixture(world.contact(first).fixture_a).body, world.fixture(world.contact(first).fixture_b).body];
+            bodies.retain(|b| !pair.contains(b));
+            bodies.splice(0..0, pair);
+        }
         for &id in &bodies {
             let b = world.body_mut(id);
             if b.kind == BodyType::Dynamic && random.next() % 2 == 0 {
@@ -982,8 +993,6 @@ fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
                 b.torque = random.range(-5.0, 5.0);
             }
         }
-        let touching = CONTACT_TOUCHING | CONTACT_ENABLED;
-        let contacts: Vec<usize> = world.contact_list.iter().copied().filter(|&c| world.contact(c).flags & touching == touching).collect();
         for &c in &contacts {
             let slot = |f| bodies.iter().position(|&x| x == world.fixture(f).body).unwrap();
             let (a, b) = (slot(world.contact(c).fixture_a), slot(world.contact(c).fixture_b));
@@ -991,8 +1000,11 @@ fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
             c.island_index_a = a;
             c.island_index_b = b;
         }
-        let dt = [1.0 / 60.0, 0.02, 1.0 / 30.0][random.next() as usize % 3];
-        let step = TimeStep {
+        let mut dt = [1.0 / 60.0, 0.02, 1.0 / 30.0][random.next() as usize % 3];
+        if toi {
+            dt = (1.0 - random.range(0.0, 1.0)) * dt;
+        }
+        let mut step = TimeStep {
             dt,
             inv_dt: 1.0 / dt,
             dt_ratio: random.range(0.5, 1.5),
@@ -1001,9 +1013,18 @@ fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
             warm_starting: random.next() % 4 != 0,
         };
         world.allow_sleep = random.next() % 4 != 0;
-        let (call, _, skip) = island_call(&world, &bodies, &contacts, &step);
+        if toi {
+            step = TimeStep { dt_ratio: 1.0, position_iterations: 20, warm_starting: false, ..step };
+        }
+        let (mut call, _, skip) = island_call(&world, &bodies, &contacts, &step);
+        if toi {
+            call.rva = ISLAND_SOLVE_TOI;
+            call.args = ["b0", "b3", "i0", "i1"].map(String::from).to_vec();
+            world.solve_toi_island(&bodies, &contacts, &step, 0, 1);
+        } else {
+            world.solve_island(&bodies, &contacts, &step);
+        }
         calls.push(call);
-        world.solve_island(&bodies, &contacts, &step);
         let (_, after, _) = island_call(&world, &bodies, &contacts, &step);
         expected.push((after, skip, contacts.len()));
     }
@@ -1020,7 +1041,7 @@ fn compare_island_solve(executable: &std::path::Path) -> Result<(), String> {
             first.get_or_insert_with(|| format!("case {i}: arena byte {o:#x} native={:#x} rust={:#x}", get(&native, o), get(rust, o)));
         }
     }
-    report("ISLAND SOLVE", bad, replies.len(), first)?;
+    report(if toi { "ISLAND SOLVE TOI" } else { "ISLAND SOLVE" }, bad, replies.len(), first)?;
     println!("  ({touching} touching contacts)");
     Ok(())
 }

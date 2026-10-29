@@ -30,6 +30,14 @@ impl Sweep {
         Transform { p: p - q.apply(self.local_center), q }
     }
 
+    /// b2Sweep::Advance, inlined into b2Body::Advance and b2World::SolveTOI.
+    pub fn advance(&mut self, alpha: f32) {
+        let beta = (alpha - self.alpha0) / (1.0 - self.alpha0);
+        self.c0 = Vec2::new((self.c.x - self.c0.x) * beta + self.c0.x, (self.c.y - self.c0.y) * beta + self.c0.y);
+        self.a0 = (self.a - self.a0) * beta + self.a0;
+        self.alpha0 = alpha;
+    }
+
     /// b2Sweep::Normalize with Unity's reciprocal multiply.
     pub fn normalize(&mut self) {
         let turns = (self.a0 * INV_TWO_PI).floor();
