@@ -4,6 +4,7 @@ mod headless;
 mod living;
 mod motor;
 
+use avian2d::dynamics::{integrator::IntegrationSystems, solver::schedule::SubstepSolverSystems};
 use avian2d::prelude::*;
 use bevy::{
     app::AppExit,
@@ -128,6 +129,12 @@ fn run() -> Result<(), String> {
                 .set(ImagePlugin::default_nearest()),
         )
         .add_plugins(PhysicsPlugins::default())
+        .add_systems(
+            SubstepSchedule,
+            motor::solve_velocity_motors
+                .after(SubstepSolverSystems::SolveConstraints)
+                .before(IntegrationSystems::Position),
+        )
         .insert_resource(rig)
         .insert_resource(Session {
             overlay: false,
@@ -253,7 +260,11 @@ fn spawn_human(
         );
         let entity = commands
             .spawn((
-                (SandboxObject, Name::new(part.name.clone())),
+                (
+                    SandboxObject,
+                    Name::new(part.name.clone()),
+                    SleepingDisabled,
+                ),
                 RigidBody::Dynamic,
                 collider,
                 Mass(part.mass),
@@ -319,10 +330,12 @@ fn spawn_human(
             SandboxObject,
             hinge,
             JointCollisionDisabled,
+            motor::VelocityMotor::default(),
             living::MuscleJoint {
                 owner,
                 definition,
                 reference_angle: parent.angle - rig.parts[definition].angle,
+                previous_speed: 0.0,
             },
         ));
     }

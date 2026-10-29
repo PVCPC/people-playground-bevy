@@ -34,6 +34,12 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
     })
     .init_resource::<Pointer>()
     .init_resource::<Drag>()
+    .add_systems(
+        SubstepSchedule,
+        motor::solve_velocity_motors
+            .after(SubstepSolverSystems::SolveConstraints)
+            .before(IntegrationSystems::Position),
+    )
     .add_systems(Startup, setup)
     .add_systems(
         FixedUpdate,
@@ -140,6 +146,19 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     if height < 1.4 || tilt.abs() > 0.25 {
         return Err("Active human failed to hold an upright rest pose".into());
     }
+    for _ in 0..250 {
+        app.update();
+    }
+    let sustained_height = app.world().get::<Position>(head).unwrap().0.y
+        - app.world().get::<Position>(foot).unwrap().0.y;
+    let sustained_tilt = app.world().get::<Rotation>(torso).unwrap().as_radians();
+    println!(
+        "Standing after 10 seconds: height={sustained_height:.4} m, tilt={:.3} degrees",
+        sustained_tilt.to_degrees()
+    );
+    if sustained_height < 1.4 || sustained_tilt.abs() > 0.25 {
+        return Err("Active human did not sustain the upright pose".into());
+    }
     let owner = app.world().get::<living::Limb>(head).unwrap().owner;
     if !app.world().get::<living::Human>(owner).unwrap().grounded {
         return Err("Standing human did not detect floor contact".into());
@@ -160,9 +179,9 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     }
     if app
         .world_mut()
-        .query::<&RevoluteJoint>()
+        .query::<&motor::VelocityMotor>()
         .iter(app.world())
-        .any(|j| j.motor.enabled)
+        .any(|m| m.enabled)
     {
         return Err("A muscle motor remained enabled on a limp human".into());
     }
@@ -228,7 +247,12 @@ fn active_checks(app: &mut App) -> Result<(), String> {
             .get::<Rotation>(joint.body2)
             .unwrap()
             .as_radians();
-        let pose_error = ((b - a - joint.motor.target_position + std::f32::consts::PI)
+        let target = app.world().resource::<HumanRig>().poses[sitting]
+            .angles
+            .iter()
+            .find(|a| a.part == *name)
+            .map_or(0.0, |a| muscle.reference_angle - a.angle);
+        let pose_error = ((b - a - target + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI)
             .abs();
@@ -279,9 +303,9 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     app.update();
     let arm_enabled = app
         .world_mut()
-        .query::<&RevoluteJoint>()
+        .query::<(&RevoluteJoint, &motor::VelocityMotor)>()
         .iter(app.world())
-        .any(|j| j.body2 == arm && j.motor.enabled);
+        .any(|(j, m)| j.body2 == arm && m.enabled);
     if arm_enabled {
         return Err("Detached arm muscles remained active".into());
     }
@@ -296,16 +320,16 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     app.update();
     let mut motors = app
         .world_mut()
-        .query::<(&RevoluteJoint, &living::MuscleJoint)>();
+        .query::<(&motor::VelocityMotor, &living::MuscleJoint)>();
     if motors
         .iter(app.world())
-        .any(|(j, m)| m.owner == owner && j.motor.enabled)
+        .any(|(j, m)| m.owner == owner && j.enabled)
     {
         return Err("Human muscles remained active after brain disconnection".into());
     }
     let unaffected = motors
         .iter(app.world())
-        .filter(|(j, m)| m.owner != owner && j.motor.enabled)
+        .filter(|(j, m)| m.owner != owner && j.enabled)
         .count();
     if unaffected != 13 {
         return Err("One person's injury affected another person's muscles".into());

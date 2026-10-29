@@ -28,6 +28,7 @@ pub struct MuscleJoint {
     pub owner: Entity,
     pub definition: usize,
     pub reference_angle: f32,
+    pub previous_speed: f32,
 }
 
 pub fn sense_humans(
@@ -67,71 +68,54 @@ fn angle_error(current: f32, target: f32) -> f32 {
         - std::f32::consts::PI
 }
 
-fn muscle_limits(rigidity: f32, modifier: f32, strength: f32, multiplier: f32) -> (f32, f32) {
-    (
-        // shortcut: Avian servo frequency needs runtime-reference calibration for exact motor parity.
-        rigidity * (1.0 + modifier).max(0.0) * 2.0,
-        strength * 0.9 * multiplier * (1.0 + modifier).clamp(0.0, 1.0),
-    )
-}
-
 pub fn drive_muscles(
     rig: Res<HumanRig>,
     session: Res<Session>,
     humans: Query<&Human>,
-    mut joints: Query<(&mut RevoluteJoint, &MuscleJoint)>,
+    mut joints: Query<(&RevoluteJoint, &mut MuscleJoint, &mut motor::VelocityMotor)>,
+    rotations_and_masses: Query<(&Rotation, &Mass)>,
     mut bodies: Query<(Entity, &Limb, &Rotation, Forces)>,
 ) {
     if session.paused {
         return;
     }
-    for (mut joint, muscle) in &mut joints {
+    for (joint, mut muscle, mut motor) in &mut joints {
+        motor.enabled = false;
         let human = humans.get(muscle.owner).unwrap();
         let Some(pose) = rig.poses.get(human.pose) else {
-            joint.motor.enabled = false;
             continue;
         };
         let part = &rig.parts[muscle.definition];
         let Some(spec) = &part.muscle else {
-            joint.motor.enabled = false;
             continue;
         };
         if !human.capable(joint.body1) || !human.capable(joint.body2) {
-            joint.motor.enabled = false;
-            joint.motor.target_velocity = 0.0;
             continue;
         }
         let target = pose.angles.iter().find(|angle| angle.part == part.name);
-        let (frequency, torque) = if let Some(target) = target {
-            muscle_limits(
-                pose.rigidity,
-                target.rigidity_modifier,
-                spec.strength,
-                pose.force_multiplier,
-            )
-        } else {
-            (0.0, spec.strength * 0.9)
-        };
-        let motor_model = if target.is_some() {
-            // Use Avian's implicit servo to avoid injecting energy through linked limbs.
-            MotorModel::SpringDamper {
-                frequency,
-                damping_ratio: 1.0,
-            }
-        } else {
-            MotorModel::AccelerationBased {
-                stiffness: 0.0,
-                damping: 1.0,
-            }
-        };
-        joint.motor = AngularMotor {
-            enabled: torque > 0.0,
-            target_position: target.map_or(0.0, |target| muscle.reference_angle - target.angle),
-            target_velocity: 0.0,
-            max_torque: torque,
-            motor_model,
-            ..default()
-        };
+        let (child, mass) = rotations_and_masses.get(joint.body1).unwrap();
+        let (parent, _) = rotations_and_masses.get(joint.body2).unwrap();
+        let output = motor::command(&motor::MotorInput {
+            current_angle: (child.as_radians() - parent.as_radians() + muscle.reference_angle)
+                .to_degrees(),
+            reference_angle: -muscle.reference_angle.to_degrees(),
+            target_angle: target.map_or(0.0, |t| t.angle.to_degrees()),
+            previous_speed: muscle.previous_speed,
+            rigidity: pose.rigidity,
+            rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),
+            global_rigidity: 1.0,
+            angle_offset: 1.0,
+            mass: mass.0,
+            initial_mass: part.mass,
+            base_strength: spec.strength,
+            force_multiplier: pose.force_multiplier,
+            active: target.is_some(),
+            strength_multipliers: vec![],
+        });
+        muscle.previous_speed = output.speed;
+        motor.enabled = output.torque > 0.0;
+        motor.target_velocity = -output.speed.to_radians();
+        motor.max_torque = output.torque;
     }
     for (entity, limb, rotation, mut forces) in &mut bodies {
         let human = humans.get(limb.owner).unwrap();
@@ -164,15 +148,10 @@ pub fn drive_muscles(
 mod tests {
     use super::*;
     #[test]
-    fn muscle_limits_reduce_torque_and_response_for_soft_limbs() {
+    fn upright_error_wraps_across_the_half_turn() {
         assert!(
             (angle_error(179f32.to_radians(), -179f32.to_radians()).to_degrees() - 2.0).abs()
                 < 0.001
         );
-        let (frequency, torque) = muscle_limits(4.0, 0.0, 10.0, 1.0);
-        assert!((torque - 9.0).abs() < 0.001);
-        let (soft_frequency, soft) = muscle_limits(4.0, -0.9, 10.0, 1.0);
-        assert!((soft - 0.9).abs() < 0.001);
-        assert!((soft_frequency - frequency * 0.1).abs() < 0.001);
     }
 }
