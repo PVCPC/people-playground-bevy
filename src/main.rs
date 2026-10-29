@@ -1,5 +1,6 @@
 mod b2;
 mod desktop;
+mod game;
 mod game_assets;
 mod headless;
 mod hinge;
@@ -85,6 +86,7 @@ fn run() -> Result<(), String> {
     let mut native_probe = None;
     let mut b2_probe = None;
     let mut replay = None;
+    let mut script = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -121,6 +123,9 @@ fn run() -> Result<(), String> {
             "--replay-test" => {
                 replay = Some(PathBuf::from(arguments.next().ok_or("--replay-test needs a recording")?));
             }
+            "--script-test" => {
+                script = Some(PathBuf::from(arguments.next().ok_or("--script-test needs a PPG_DUMP recording")?));
+            }
             _ => return Err(format!("Unknown argument: {argument}")),
         }
     }
@@ -132,6 +137,9 @@ fn run() -> Result<(), String> {
     let cache = cache.canonicalize().map_err(|e| e.to_string())?;
     if let Some(recording) = replay {
         return replay::compare_motors(&rig, &recording);
+    }
+    if let Some(dump) = script {
+        return game::dump::script_test(&dump, &rig);
     }
     if let Some(probe) = reference_probe {
         return motor::compare_reference(&probe);

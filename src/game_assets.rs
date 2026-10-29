@@ -100,7 +100,7 @@ pub struct PoseAnimation {
 }
 
 /// A Unity AnimationCurve with unweighted keys [time, value, inSlope, outSlope].
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Curve {
     pub keys: Vec<[f32; 4]>,
     /// Unity's internal wrap modes: 0 ping-pong, 1 repeat, 2 clamp.
