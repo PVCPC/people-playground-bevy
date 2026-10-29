@@ -645,7 +645,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_toi(executable)?;
     compare_broad_phase(executable)?;
     compare_island_solve(executable, false)?;
-    compare_island_solve(executable, true)
+    compare_island_solve(executable, true)?;
+    compare_revolute(executable)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {
@@ -858,6 +859,7 @@ fn island_globals() -> Vec<[u32; 2]> {
         [0x1999c3c, max_rotation.to_bits()],
         [0x1a43878, (max_rotation * max_rotation).to_bits()],
         [0x1999c48, 0.5f32.to_bits()],
+        [0x1999c34, (8.0 * DEG).to_bits()],
         [0x1999c4c, 0.01f32.to_bits()],
         [0x1999c50, (2.0 * DEG).to_bits()],
     ]);
@@ -1044,4 +1046,152 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
     report(if toi { "ISLAND SOLVE TOI" } else { "ISLAND SOLVE" }, bad, replies.len(), first)?;
     println!("  ({touching} touching contacts)");
     Ok(())
+}
+
+const REVOLUTE_INIT: u32 = 0xbc29c0;
+const REVOLUTE_SOLVE_VELOCITY: u32 = 0xbc5d10;
+const REVOLUTE_SOLVE_POSITION: u32 = 0xbc4560;
+
+/// b2RevoluteJoint (304 bytes) with the solver temporaries the port keeps in its hinge constraint.
+fn revolute_bytes(j: &super::revolute::RevoluteJoint) -> Vec<u8> {
+    let mut b = vec![0; 304];
+    let v = &j.velocity;
+    put(&mut b, 0x70, j.a.index as u32);
+    put(&mut b, 0x74, j.b.index as u32);
+    put_vec(&mut b, 0x78, j.a.axis);
+    put_vec(&mut b, 0x80, j.b.axis);
+    put_vec(&mut b, 0x98, j.def.local_anchor_a);
+    put_vec(&mut b, 0xa0, j.def.local_anchor_b);
+    for (k, x) in j.impulse.iter().enumerate() {
+        put(&mut b, 0xa8 + 4 * k, x.to_bits());
+    }
+    put(&mut b, 0xb4, j.motor_impulse.to_bits());
+    b[0xb8] = j.def.enable_motor as u8;
+    put(&mut b, 0xbc, j.def.max_motor_torque.to_bits());
+    put(&mut b, 0xc0, j.def.motor_speed.to_bits());
+    b[0xc4] = j.def.enable_limit as u8;
+    put(&mut b, 0xc8, j.def.reference_angle.to_bits());
+    put(&mut b, 0xcc, j.def.lower_angle.to_bits());
+    put(&mut b, 0xd0, j.def.upper_angle.to_bits());
+    put_vec(&mut b, 0xd4, Vec2::new(v.anchor_a[0], v.anchor_a[1]));
+    put_vec(&mut b, 0xdc, Vec2::new(v.anchor_b[0], v.anchor_b[1]));
+    put_vec(&mut b, 0xe4, j.a.local_center);
+    put_vec(&mut b, 0xec, j.b.local_center);
+    for (k, x) in [j.a.inv_mass, j.b.inv_mass, j.a.inv_i, j.b.inv_i].iter().enumerate() {
+        put(&mut b, 0xf4 + 4 * k, x.to_bits());
+    }
+    for (k, x) in v.matrix.iter().enumerate() {
+        put(&mut b, 0x104 + 4 * k, x.to_bits());
+    }
+    put(&mut b, 0x128, v.motor_mass.to_bits());
+    put(&mut b, 0x12c, j.limit_state);
+    b
+}
+
+/// Buffers: 0 joint, 1 solver data, 2 positions, 3 velocities, 4 body A, 5 body B.
+fn revolute_call(rva: u32, j: &super::revolute::RevoluteJoint, bodies: [&super::revolute::JointBody; 2], step: &TimeStep, positions: &[Position], velocities: &[Velocity]) -> Call {
+    let mut data = vec![0; 40];
+    let fields = [step.dt.to_bits(), step.inv_dt.to_bits(), step.dt_ratio.to_bits(), step.velocity_iterations as u32, step.position_iterations as u32, step.warm_starting as u32];
+    for (k, v) in fields.iter().enumerate() {
+        put(&mut data, 4 * k, *v);
+    }
+    let (p, v) = island_bytes(positions, velocities);
+    let body = |jb: &super::revolute::JointBody| {
+        let mut b = vec![0; 200];
+        put_vec(&mut b, 0x1c, jb.local_center);
+        put(&mut b, 0x94, jb.inv_mass.to_bits());
+        put(&mut b, 0xa4, jb.inv_i.to_bits());
+        b
+    };
+    let mut c = call(rva, vec![revolute_bytes(j), data, p, v, body(bodies[0]), body(bodies[1])], &["b0", "b1"]);
+    c.links = vec![[0, 0x60, 4, 0], [0, 0x68, 5, 0], [1, 0x18, 2, 0], [1, 0x20, 3, 0]];
+    c
+}
+
+/// Random hinges (limits at, inside, past and equal; motors; static and fixed-rotation sides; axis locks)
+/// stepped through init, velocity and position solves; each native call starts from the port's state.
+fn compare_revolute(executable: &std::path::Path) -> Result<(), String> {
+    use super::revolute::*;
+    let mut random = Random(0x5eed_0009);
+    let mut calls = Vec::new();
+    let mut expected: Vec<(&str, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    let axes = [Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)];
+    for case in 0..1024 {
+        let body = |random: &mut Random, index: usize, side: usize| {
+            let fixed = (case + side) % 11 == 0;
+            JointBody {
+                index,
+                local_center: random.vec(0.3),
+                inv_mass: if fixed { 0.0 } else { random.range(0.2, 4.0) },
+                inv_i: if fixed || random.next() % 9 == 0 { 0.0 } else { random.range(0.5, 40.0) },
+                axis: axes[random.next() as usize % axes.len()],
+            }
+        };
+        let (ia, ib) = if random.next() % 2 == 0 { (0, 1) } else { (2, 0) };
+        let (a, b) = (body(&mut random, ia, 0), body(&mut random, ib, 1));
+        let lower = random.range(-2.0, 0.5);
+        let def = RevoluteDef {
+            local_anchor_a: random.vec(0.5),
+            local_anchor_b: random.vec(0.5),
+            reference_angle: random.range(-1.0, 1.0),
+            enable_limit: random.next() % 3 != 0,
+            lower_angle: lower,
+            upper_angle: if random.next() % 8 == 0 { lower + random.range(0.0, 0.1) } else { lower + random.range(0.0, 2.5) },
+            enable_motor: random.next() % 2 == 0,
+            motor_speed: random.range(-10.0, 10.0),
+            max_motor_torque: random.range(0.0, 50.0),
+        };
+        let mut joint = RevoluteJoint::new(def);
+        joint.impulse = [random.range(-1.0, 1.0), random.range(-1.0, 1.0), random.range(-0.5, 0.5)];
+        joint.motor_impulse = random.range(-0.5, 0.5);
+        joint.limit_state = random.next() % 4;
+        let mut positions: Vec<Position> = (0..3).map(|_| Position { c: random.vec(1.0), a: random.range(-3.0, 3.0) }).collect();
+        let mut velocities: Vec<Velocity> = (0..3).map(|_| Velocity { v: random.vec(5.0), w: random.range(-8.0, 8.0) }).collect();
+        let dt = [1.0 / 60.0, 0.02][random.next() as usize % 2];
+        let step = TimeStep { dt, inv_dt: 1.0 / dt, dt_ratio: random.range(0.5, 1.5), velocity_iterations: 8, position_iterations: 8, warm_starting: random.next() % 4 != 0 };
+        let record = |op, joint: &RevoluteJoint, positions: &[Position], velocities: &[Velocity]| {
+            let (p, v) = island_bytes(positions, velocities);
+            (op, revolute_bytes(joint), p, v)
+        };
+        // Init reads the bodies, so its starting joint carries their data too.
+        joint.a = a;
+        joint.b = b;
+        calls.push(revolute_call(REVOLUTE_INIT, &joint, [&a, &b], &step, &positions, &velocities));
+        joint.init_velocity_constraints(a, b, &step, &positions, &mut velocities);
+        expected.push(record("init", &joint, &positions, &velocities));
+        for _ in 0..3 {
+            calls.push(revolute_call(REVOLUTE_SOLVE_VELOCITY, &joint, [&a, &b], &step, &positions, &velocities));
+            joint.solve_velocity_constraints(&mut velocities);
+            expected.push(record("velocity", &joint, &positions, &velocities));
+        }
+        for _ in 0..3 {
+            calls.push(revolute_call(REVOLUTE_SOLVE_POSITION, &joint, [&a, &b], &step, &positions, &velocities));
+            let solved = joint.solve_position_constraints(&mut positions);
+            let mut r = record("position", &joint, &positions, &velocities);
+            r.1.push(solved as u8);
+            expected.push(r);
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let (op, joint, p, v) = &expected[i];
+        let mut native_joint = unhex(&reply.buffers[0]);
+        native_joint[0x60..0x70].fill(0);
+        if *op == "position" {
+            native_joint.push((reply.ret & 0xff != 0) as u8);
+        }
+        let native = [native_joint, unhex(&reply.buffers[2]), unhex(&reply.buffers[3])];
+        for (k, (n, r)) in native.iter().zip([joint, p, v]).enumerate() {
+            if n != r {
+                bad += 1;
+                let at = n.iter().zip(r).position(|(x, y)| x != y).unwrap_or(n.len().min(r.len()));
+                let o = at & !3;
+                first.get_or_insert_with(|| format!("call {i} {op}: buffer {k} byte {at:#x} native={:#x} rust={:#x}", get(n, o.min(n.len() - 4)), get(r, o.min(r.len() - 4))));
+                break;
+            }
+        }
+    }
+    report("REVOLUTE JOINT", bad, replies.len(), first)
 }
