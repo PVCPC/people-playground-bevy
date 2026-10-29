@@ -67,11 +67,14 @@ def muscle_settings(components):
                  if kind == "MonoBehaviour" and "BaseStrength" in data), None)
     if limb is None:
         raise ValueError("Human body has no limb strength settings")
-    strength = float(limb["BaseStrength"])
-    for multiplier in limb.get("StrengthMultipliers", []):
-        strength *= float(multiplier)
-    return {"strength": strength, "upright_force": float(limb["FakeUprightForce"]),
-            "has_brain": bool(limb["HasBrain"])}
+    return {"strength": float(limb["BaseStrength"]),
+            "multipliers": [float(m) for m in limb.get("StrengthMultipliers", [])],
+            "upright_force": float(limb["FakeUprightForce"]),
+            "has_brain": bool(limb["HasBrain"]),
+            "do_balance_jerk": bool(limb["DoBalanceJerk"]),
+            "balance_muscle_movement": float(limb["BalanceMuscleMovement"]),
+            "do_stumble": bool(limb["DoStumble"]),
+            "blood_strength_ratio": float(limb["BloodMuscleStrengthRatio"])}
 
 
 def material_settings(body, components, guids):
@@ -102,23 +105,38 @@ def material_settings(body, components, guids):
     return {"friction": friction, "restitution": restitution}
 
 
-def static_poses(objects):
+def curve(data):
+    keys = data["m_Curve"]
+    if any(int(k.get("weightedMode", 0)) for k in keys):
+        raise ValueError("Weighted animation curve keys are unsupported")
+    return {"keys": [[float(k[f]) for f in ("time", "value", "inSlope", "outSlope")] for k in keys],
+            "pre": int(data["m_PreInfinity"]), "post": int(data["m_PostInfinity"])}
+
+
+def poses(objects):
     person = next(data for kind, data in objects.values()
                   if kind == "MonoBehaviour" and "Poses" in data)
     result = []
     for pose in person["Poses"]:
-        if pose["Name"] not in ("Rest", "Sitting", "Flat"):
-            continue
-        if any(angle["Animated"] for angle in pose["Angles"]):
-            raise ValueError("Selected static pose contains animation")
-        result.append({"name": pose["Name"], "rigidity": float(pose["Rigidity"]),
+        result.append({"name": pose["Name"], "state": int(pose["State"]),
+                       "rigidity": float(pose["Rigidity"]),
                        "force_multiplier": float(pose["ForceMultiplier"]),
                        "stand_upright": bool(pose["ShouldStandUpright"]),
                        "upright_multiplier": float(pose["UprightForceMultiplier"]),
                        "drag_influence": float(pose["DragInfluence"]),
+                       "should_stumble": bool(pose["ShouldStumble"]),
+                       "animation_speed": float(pose["AnimationSpeedMultiplier"]),
                        "angles": [{"part": angle["Name"], "angle": radians_f32(angle["Angle"]),
                                    "angle_degrees": float(angle["Angle"]),
-                                   "rigidity_modifier": float(angle["PoseRigidityModifier"])}
+                                   "rigidity_modifier": float(angle["PoseRigidityModifier"]),
+                                   **({"animation": {"start": float(angle["StartAngle"]),
+                                                     "end": float(angle["EndAngle"]),
+                                                     "duration": float(angle["AnimationDuration"]),
+                                                     "random_influence": float(angle["RandomInfluence"]),
+                                                     "random_speed": float(angle["RandomSpeed"]),
+                                                     "time_offset": float(angle["TimeOffset"]),
+                                                     "curve": curve(angle["AnimationCurve"])}}
+                                      if angle["Animated"] else {})}
                                   for angle in pose["Angles"]]})
     if not result or result[0]["name"] != "Rest":
         raise ValueError("Human prefab has no default rest pose")
@@ -213,7 +231,7 @@ def prepare(game, exported, output, write):
     if len({p["name"] for p in parts}) != len(parts) or len(joints) != len(parts) - 1:
         raise ValueError("Human rig is not a single named body tree")
     stamps = [source_stamp(game, p) for p in required]
-    rig = {"source_files": stamps, "parts": parts, "joints": joints, "poses": static_poses(objects),
+    rig = {"source_files": stamps, "parts": parts, "joints": joints, "poses": poses(objects),
            "simulation": simulation_settings(exported)}
     print(json.dumps({"preview": not write, "bodies": len(parts), "joints": len(joints),
                       "textures": list(textures), "destination": str(output)}))

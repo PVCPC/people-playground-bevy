@@ -29,10 +29,11 @@ class UnityDocumentTests(unittest.TestCase):
     def test_static_pose_preserves_original_degree_value_and_single_precision_radians(self):
         person = {"Poses": [{"Name": "Rest", "Rigidity": 1, "ForceMultiplier": 1,
                              "ShouldStandUpright": 0, "UprightForceMultiplier": 1,
-                             "DragInfluence": 0,
+                             "DragInfluence": 0, "State": 0, "ShouldStumble": 1,
+                             "AnimationSpeedMultiplier": 1,
                              "Angles": [{"Name": "Leg", "Animated": 0, "Angle": 0.1,
                                          "PoseRigidityModifier": 0}]}]}
-        angle = module.static_poses({1: ("MonoBehaviour", person)})[0]["angles"][0]
+        angle = module.poses({1: ("MonoBehaviour", person)})[0]["angles"][0]
         self.assertEqual(angle["angle_degrees"], 0.1)
         self.assertEqual(angle["angle"], 0.001745329238474369)
 
@@ -69,16 +70,16 @@ class UnityDocumentTests(unittest.TestCase):
 
     def test_muscle_settings_include_strength_modifiers(self):
         components = [("MonoBehaviour", {"BaseStrength": 10, "StrengthMultipliers": [0.5],
-                                         "FakeUprightForce": 0.02, "HasBrain": 1})]
+                                         "FakeUprightForce": 0.02, "HasBrain": 1, "DoBalanceJerk": 1,
+                                         "BalanceMuscleMovement": 3, "DoStumble": 0,
+                                         "BloodMuscleStrengthRatio": 4})]
         settings = module.muscle_settings(components)
-        self.assertEqual(settings["strength"], 5)
+        self.assertEqual((settings["strength"], settings["multipliers"]), (10, [0.5]))
         self.assertTrue(settings["has_brain"])
 
-    def test_animated_pose_is_not_silently_imported_as_static(self):
-        person = {"Poses": [{"Name": "Rest", "Angles": [{"Animated": 1}]}]}
+    def test_weighted_curve_is_rejected(self):
         with self.assertRaises(ValueError):
-            module.static_poses({1: ("MonoBehaviour", person)})
-
+            module.curve({"m_Curve": [{"weightedMode": 1}], "m_PreInfinity": 0, "m_PostInfinity": 0})
 
 if __name__ == "__main__":
     unittest.main()

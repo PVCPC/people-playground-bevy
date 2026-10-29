@@ -343,7 +343,11 @@ fn spawn_human(
             .id();
         commands
             .entity(entity)
-            .insert(living::Limb { owner, definition });
+            .insert(living::Limb {
+                owner,
+                definition,
+                state: Default::default(),
+            });
         entities.insert(part.name.as_str(), (entity, id));
     }
     let root = rig
@@ -361,7 +365,7 @@ fn spawn_human(
         pose: 0,
         root: entities[root.name.as_str()].0,
         brain: entities[brain.name.as_str()].0,
-        grounded: false,
+        state: Default::default(),
         connected: Default::default(),
     });
     for joint in &rig.joints {
@@ -395,6 +399,7 @@ fn spawn_human(
                 owner,
                 definition,
                 previous_speed: 0.0,
+                stumble_time: 0.0,
             },
         ));
     }

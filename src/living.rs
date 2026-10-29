@@ -1,35 +1,218 @@
+//! PersonBehaviour / LimbBehaviour muscle logic (decompiled Assembly-CSharp), healthy subset.
 use super::*;
 use b2::world::CONTACT_TOUCHING;
-use game_assets::{HumanPose, MuscleSpec, Part};
+use game_assets::{HumanPose, MuscleSpec, STUMBLING};
+use motor::delta_angle;
 use std::collections::HashSet;
+
+/// PersonBehaviour values the limbs read.
+#[derive(Clone, Copy)]
+pub struct PersonState {
+    pub consciousness: f32,
+    pub adrenaline: f32,
+    pub shock: f32,
+    pub pain: f32,
+    /// BalanceOffset: the head's up vector dotted with world right, times the person's x scale.
+    pub balance: f32,
+    pub touching_floor: bool,
+}
+
+impl Default for PersonState {
+    fn default() -> Self {
+        Self { consciousness: 1.0, adrenaline: 0.0, shock: 0.0, pain: 0.0, balance: 0.0, touching_floor: false }
+    }
+}
+
+/// LimbBehaviour / CirculationBehaviour values for one limb.
+#[derive(Clone, Copy)]
+pub struct LimbState {
+    pub health: f32,
+    pub initial_health: f32,
+    pub numbness: f32,
+    pub blood_flow: f32,
+    pub blood_amount: f32,
+}
+
+impl Default for LimbState {
+    // ponytail: constant healthy physiology until CirculationBehaviour and limb health are rewritten.
+    fn default() -> Self {
+        Self { health: 100.0, initial_health: 100.0, numbness: 0.0, blood_flow: 1.0, blood_amount: 1.0 }
+    }
+}
 
 #[derive(Component)]
 pub struct Human {
+    /// Rewrite-only limp toggle: a limp human's limbs count as not alive.
     pub awake: bool,
     pub pose: usize,
     pub root: Entity,
     pub brain: Entity,
-    pub grounded: bool,
+    pub state: PersonState,
     pub connected: HashSet<Entity>,
-}
-
-impl Human {
-    fn capable(&self, entity: Entity) -> bool {
-        self.awake && self.connected.contains(&self.brain) && self.connected.contains(&entity)
-    }
 }
 
 #[derive(Component)]
 pub struct Limb {
     pub owner: Entity,
     pub definition: usize,
+    pub state: LimbState,
 }
 
+/// The muscle on a limb's HingeJoint2D: its current JointMotor2D speed (degrees/s) and stumble clock.
 #[derive(Component)]
 pub struct MuscleJoint {
     pub owner: Entity,
     pub definition: usize,
     pub previous_speed: f32,
+    pub stumble_time: f32,
+}
+
+/// Everything one LimbBehaviour.ManagedFixedUpdate reads for its muscle.
+pub struct LimbInput<'a> {
+    pub spec: &'a MuscleSpec,
+    pub part: &'a str,
+    pub pose: &'a HumanPose,
+    pub stumbling: Option<&'a HumanPose>,
+    pub person: PersonState,
+    pub limb: LimbState,
+    /// NodeBehaviour.IsConnectedToRoot (and the rewrite's limp toggle).
+    pub connected: bool,
+    /// IsAnyHeadAlive
+    pub head_alive: bool,
+    /// rigidbody.mass / TrueInitialMass
+    pub mass_ratio: f32,
+    /// transform.eulerAngles.z in [0, 360) and transform.up.y
+    pub euler: f32,
+    pub up_y: f32,
+    /// HingeJoint2D.jointAngle and referenceAngle, degrees
+    pub joint_angle: f32,
+    pub reference: f32,
+    /// Person.AngleOffset (-1 when flipped)
+    pub angle_offset: f32,
+}
+
+impl LimbInput<'_> {
+    fn active(&self) -> bool {
+        self.pose.angles.iter().any(|a| a.part == self.part)
+    }
+
+    fn alive(&self) -> bool {
+        self.connected && self.limb.blood_flow > 0.25 && self.limb.health > 0.01
+    }
+
+    fn capable(&self) -> bool {
+        let (p, l) = (&self.person, &self.limb);
+        self.connected
+            && l.health > 1.0
+            && p.consciousness > 0.8
+            && p.shock < 0.5
+            && p.pain < 0.5
+            && l.numbness < 0.9
+            && l.blood_flow > 0.25
+            && self.head_alive
+    }
+
+    /// LimbBehaviour.MotorStrength
+    pub fn motor_strength(&self) -> f32 {
+        let (p, l) = (&self.person, &self.limb);
+        let adrenaline = p.adrenaline.clamp(0.0, 1.0);
+        if p.consciousness < 0.3f32.max(0.8 - adrenaline) || !self.alive() || !self.head_alive {
+            return 0.0;
+        }
+        let ratio = 3.0 * self.spec.blood_strength_ratio;
+        let numbness = l.numbness.clamp(0.0, 1.0);
+        let a = (l.health / l.initial_health + adrenaline)
+            * (l.blood_amount as f64).powf(ratio as f64) as f32
+            * (l.blood_flow as f64).powf(ratio as f64) as f32
+            * (p.consciousness + adrenaline).clamp(0.0, 1.0)
+            * (1.0 - (numbness - adrenaline)).clamp(0.0, 1.0);
+        let force = if self.active() { self.pose.force_multiplier } else { 1.0 };
+        self.spec.strength * force * 0.9 * a.max(0.0).clamp(0.0, 1.0) * self.mass_ratio
+    }
+}
+
+/// Mathf.Lerp toward `value`, as LimbBehaviour.InfluenceMotorSpeed.
+fn influence(speed: &mut f32, value: f32, t: f32) {
+    *speed += (value - *speed) * t.clamp(0.0, 1.0);
+}
+
+/// A muscle's motor for one fixed step: returns the max motor torque; updates speed and stumble clock.
+pub fn limb_motor<'a>(input: &LimbInput<'a>, muscle: &mut MuscleJoint) -> f32 {
+    let speed = &mut muscle.previous_speed;
+    let active = input.active();
+    let part = input.part;
+    let target = |pose: &'a HumanPose| pose.angles.iter().find(move |a| a.part == part);
+    // SetMotorStrengthToMuscleStrength
+    let mut strength = input.motor_strength().max(0.0);
+    for m in &input.spec.multipliers {
+        strength *= m;
+        if strength.abs() <= f32::from_bits(1) {
+            break;
+        }
+    }
+    let modifier = target(input.pose).map_or(0.0, |a| a.rigidity_modifier);
+    let torque = strength * if active { (1.0 + modifier).clamp(0.0, 1.0) } else { 1.0 };
+    // ApplyPoseOverrides
+    let pose = input.pose;
+    if input.capable() && input.person.touching_floor && pose.should_stumble {
+        let num = (input.person.balance * 1.5).abs();
+        let num2 = input.motor_strength().clamp(0.0, num * 2.0);
+        if input.spec.do_balance_jerk {
+            let value = delta_angle(input.joint_angle, 0.0 - delta_angle(input.euler, 0.0)) * 1.0 * input.spec.balance_muscle_movement;
+            influence(speed, value, 0.5 * num2);
+        }
+        if active && input.person.shock < 0.5 && input.spec.do_stumble && num > 0.3 && num < 1.0 {
+            muscle.stumble_time += (input.person.balance * -0.1).clamp(-1.7, 1.7);
+            // MoveIntoPoseAt(Stumbling); a limb missing from that pose throws in the original and stops here.
+            if let Some(stumbling) = input.stumbling
+                && let Some(angle) = target(stumbling)
+            {
+                let rigidity = ((num as f64).powf(1.5) as f32) * 1.3 * num2;
+                let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(muscle.stumble_time) * input.angle_offset)
+                    * rigidity
+                    * 1.0
+                    * stumbling.rigidity
+                    * (1.0 + angle.rigidity_modifier);
+                influence(&mut muscle.previous_speed, value, 0.5);
+            }
+            return torque;
+        }
+    }
+    // MoveIntoPose
+    if active && input.alive() {
+        let angle = target(pose).unwrap();
+        // ponytail: animated poses evaluated at time 0; EvaluateAngle's Time.time and Perlin noise are not rewritten yet.
+        let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(0.0) * input.angle_offset)
+            * 1.0
+            * 1.0
+            * pose.rigidity
+            * (1.0 + angle.rigidity_modifier);
+        influence(&mut muscle.previous_speed, value, 0.5);
+    }
+    torque
+}
+
+/// FakeStandUpright torque and the drag factors (angular, linear) the upright block applies, if it runs.
+pub fn upright(input: &LimbInput) -> Option<(f32, f32, f32)> {
+    let adrenaline = input.person.adrenaline.clamp(0.0, 1.0);
+    let pose = input.pose;
+    if !(input.limb.blood_flow > 0.25f32.max(0.9 - adrenaline)
+        && input.person.touching_floor
+        && pose.stand_upright
+        && input.capable())
+    {
+        return None;
+    }
+    let mut torque = 0.0;
+    if input.spec.upright_force > 0.001 && input.connected && input.up_y >= 0.0 {
+        let lerp = input.mass_ratio + (1.0 - input.mass_ratio) * 0.6;
+        let num = delta_angle(input.euler, 0.0) * input.spec.upright_force * input.motor_strength() * lerp;
+        if !num.is_nan() {
+            torque = num * 1.8 * pose.upright_multiplier;
+        }
+    }
+    let drag = pose.drag_influence;
+    Some((torque, 1.0 + (0.92 - 1.0) * drag.clamp(0.0, 1.0), 1.0 + (0.94 - 1.0) * drag.clamp(0.0, 1.0)))
 }
 
 pub fn sense_humans(
@@ -39,7 +222,6 @@ pub fn sense_humans(
     physics: Res<Physics>,
 ) {
     let world = &physics.world;
-    let limb_bodies: HashSet<_> = limbs.iter().map(|(_, body)| body.0).collect();
     for mut human in &mut humans {
         human.connected.clear();
         let root = human.root;
@@ -58,48 +240,15 @@ pub fn sense_humans(
                 break;
             }
         }
-        // shortcut: contact membership approximates support; use upward normals as obstacle geometry expands.
-        human.grounded = limbs.iter().any(|(entity, body)| {
+        // AttachedLimbLoopChecks: IsOnFloor is PhysicalBehaviour.IsTouchingSomething (any current contact).
+        // ponytail: PersonBehaviour.Update runs per rendered frame; here once per fixed step.
+        human.state.touching_floor = limbs.iter().any(|(entity, body)| {
             human.connected.contains(&entity)
-                && world.body(body.0).contacts.iter().any(|&(other, contact)| {
-                    !limb_bodies.contains(&other)
-                        && world.contact(contact).flags & CONTACT_TOUCHING != 0
-                })
+                && world.body(body.0).contacts.iter().any(|&(_, c)| world.contact(c).flags & CONTACT_TOUCHING != 0)
         });
-    }
-}
-
-fn angle_error(current: f32, target: f32) -> f32 {
-    (target - current + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
-        - std::f32::consts::PI
-}
-
-/// A healthy muscle's motor inputs; `current` is the joint angle in degrees, `reference` in radians.
-pub fn muscle_input(
-    pose: &HumanPose,
-    part: &Part,
-    spec: &MuscleSpec,
-    current: f32,
-    reference: f32,
-    previous_speed: f32,
-    mass: f32,
-) -> motor::MotorInput {
-    let target = pose.angles.iter().find(|angle| angle.part == part.name);
-    motor::MotorInput {
-        current_angle: current,
-        reference_angle: reference.to_degrees(),
-        target_angle: target.map_or(0.0, |t| t.degrees()),
-        previous_speed,
-        rigidity: pose.rigidity,
-        rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),
-        global_rigidity: 1.0,
-        angle_offset: 1.0,
-        mass,
-        initial_mass: part.mass,
-        base_strength: spec.strength,
-        force_multiplier: pose.force_multiplier,
-        active: target.is_some(),
-        strength_multipliers: vec![],
+        if let Ok((_, head)) = limbs.get(human.brain) {
+            human.state.balance = -world.body(head.0).sweep.a.sin();
+        }
     }
 }
 
@@ -108,78 +257,60 @@ pub fn drive_muscles(
     session: Res<Session>,
     humans: Query<&Human>,
     mut joints: Query<(&Hinge, &mut MuscleJoint)>,
-    bodies: Query<(Entity, &Limb, &Body)>,
+    limbs: Query<(Entity, &Limb, &Body)>,
     mut physics: ResMut<Physics>,
 ) {
     if session.paused {
         return;
     }
+    let stumbling = rig.poses.iter().find(|p| p.state == STUMBLING);
     let world = &mut physics.world;
-    for (hinge, mut muscle) in &mut joints {
-        let Some(joint) = world.joints[hinge.joint].as_mut() else {
-            continue;
-        };
-        joint.revolute.def.enable_motor = false;
-        let (body_a, body_b) = (joint.body_a, joint.body_b);
-        let reference_angle = joint.revolute.def.reference_angle;
-        let human = humans.get(muscle.owner).unwrap();
-        let Some(pose) = rig.poses.get(human.pose) else {
-            continue;
-        };
-        let part = &rig.parts[muscle.definition];
-        let Some(spec) = &part.muscle else {
-            continue;
-        };
-        if !human.capable(hinge.body_a) || !human.capable(hinge.body_b) {
-            continue;
-        }
-        let (child, mass) = (world.body(body_a).sweep.a, world.body(body_a).mass);
-        let parent = world.body(body_b).sweep.a;
-        let current = hinge::joint_angle(child, parent, reference_angle).to_degrees();
-        let output = motor::command(&muscle_input(pose, part, spec, current, reference_angle, muscle.previous_speed, mass))
-            .clamp_native_properties();
-        muscle.previous_speed = output.speed;
-        let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute.def;
-        def.enable_motor = output.torque > 0.0;
-        def.motor_speed = output.speed.to_radians();
-        def.max_motor_torque = output.torque;
-    }
-    for (entity, limb, body) in &bodies {
+    let mut hinges: Vec<_> = joints.iter_mut().collect();
+    for (entity, limb, body) in &limbs {
         let human = humans.get(limb.owner).unwrap();
-        let Some(pose) = rig.poses.get(human.pose) else {
+        let (Some(pose), Some(spec)) = (rig.poses.get(human.pose), &rig.parts[limb.definition].muscle) else {
             continue;
         };
-        let Some(spec) = &rig.parts[limb.definition].muscle else {
+        let part = &rig.parts[limb.definition];
+        let b = world.body(body.0);
+        let angle = b.sweep.a;
+        let mut input = LimbInput {
+            spec,
+            part: &part.name,
+            pose,
+            stumbling,
+            person: human.state,
+            limb: limb.state,
+            connected: human.awake && human.connected.contains(&entity),
+            head_alive: human.connected.contains(&human.brain),
+            mass_ratio: b.mass / part.mass,
+            euler: angle.to_degrees().rem_euclid(360.0),
+            up_y: angle.cos(),
+            joint_angle: 0.0,
+            reference: 0.0,
+            angle_offset: 1.0,
+        };
+        if let Some((torque, angular, linear)) = upright(&input) {
+            let b = world.body_mut(body.0);
+            b.apply_torque(torque);
+            b.angular_velocity *= angular;
+            b.linear_velocity = b.linear_velocity * linear;
+        }
+        let Some((hinge, muscle)) = hinges.iter_mut().find(|(h, _)| h.body_a == entity) else {
             continue;
         };
-        if !human.capable(entity) || !human.grounded || !pose.stand_upright {
+        let Some(joint) = world.joints[hinge.joint].as_ref() else {
             continue;
-        }
-        let body = world.body_mut(body.0);
-        let angle = angle_error(body.sweep.a, 0.0);
-        if spec.upright_force > 0.001 && angle.cos() >= 0.0 {
-            let torque = angle.to_degrees()
-                * spec.upright_force
-                * spec.strength
-                * 0.9
-                * pose.force_multiplier
-                * 1.8
-                * pose.upright_multiplier;
-            body.apply_torque(torque);
-        }
-        body.angular_velocity *= 1.0 - 0.08 * pose.drag_influence;
-        body.linear_velocity = body.linear_velocity * (1.0 - 0.06 * pose.drag_influence);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn upright_error_wraps_across_the_half_turn() {
-        assert!(
-            (angle_error(179f32.to_radians(), -179f32.to_radians()).to_degrees() - 2.0).abs()
-                < 0.001
-        );
+        };
+        let reference = joint.revolute.def.reference_angle;
+        input.joint_angle = hinge::joint_angle(angle, world.body(joint.body_b).sweep.a, reference).to_degrees();
+        input.reference = reference.to_degrees();
+        let torque = limb_motor(&input, muscle);
+        let out = motor::MotorOutput { speed: muscle.previous_speed, torque }.clamp_native_properties();
+        muscle.previous_speed = out.speed;
+        let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute.def;
+        def.enable_motor = out.torque > 0.0;
+        def.motor_speed = out.speed * 0.017453292;
+        def.max_motor_torque = out.torque;
     }
 }

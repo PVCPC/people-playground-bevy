@@ -172,7 +172,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         return Err("Active human did not sustain the upright pose".into());
     }
     let owner = app.world().get::<living::Limb>(head).unwrap().owner;
-    if !app.world().get::<living::Human>(owner).unwrap().grounded {
+    if !app.world().get::<living::Human>(owner).unwrap().state.touching_floor {
         return Err("Standing human did not detect floor contact".into());
     }
     app.world_mut()

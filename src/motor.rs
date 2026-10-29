@@ -42,6 +42,13 @@ impl MotorOutput {
     }
 }
 
+/// Mathf.DeltaAngle; the original chooses positive 180 degrees at the exact half-turn boundary.
+pub fn delta_angle(current: f32, target: f32) -> f32 {
+    let delta = target - current;
+    let repeated = (delta - (delta / 360.0).floor() * 360.0).clamp(0.0, 360.0);
+    if repeated > 180.0 { repeated - 360.0 } else { repeated }
+}
+
 pub fn command(input: &MotorInput) -> MotorOutput {
     let mass_ratio = input.mass / input.initial_mass;
     let force = if input.active {
@@ -63,14 +70,7 @@ pub fn command(input: &MotorInput) -> MotorOutput {
     };
     let speed = if input.active {
         let target = input.reference_angle + input.target_angle * input.angle_offset;
-        let delta = target - input.current_angle;
-        let repeated = (delta - (delta / 360.0).floor() * 360.0).clamp(0.0, 360.0);
-        // The original chooses positive 180 degrees at the exact half-turn boundary.
-        let angle = if repeated > 180.0 {
-            repeated - 360.0
-        } else {
-            repeated
-        };
+        let angle = delta_angle(input.current_angle, target);
         let desired =
             angle * input.global_rigidity * input.rigidity * (1.0 + input.rigidity_modifier);
         input.previous_speed + (desired - input.previous_speed) * 0.5

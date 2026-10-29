@@ -54,9 +54,24 @@ pub struct PhysicsMaterial {
 
 #[derive(Deserialize)]
 pub struct MuscleSpec {
+    /// LimbBehaviour.BaseStrength; StrengthMultipliers apply after MotorStrength.
     pub strength: f32,
+    #[serde(default)]
+    pub multipliers: Vec<f32>,
     pub upright_force: f32,
     pub has_brain: bool,
+    #[serde(default)]
+    pub do_balance_jerk: bool,
+    #[serde(default)]
+    pub balance_muscle_movement: f32,
+    #[serde(default)]
+    pub do_stumble: bool,
+    #[serde(default = "one")]
+    pub blood_strength_ratio: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[derive(Deserialize)]
@@ -66,9 +81,83 @@ pub struct PoseAngle {
     #[serde(default)]
     pub angle_degrees: Option<f32>,
     pub rigidity_modifier: f32,
+    #[serde(default)]
+    pub animation: Option<PoseAnimation>,
+}
+
+/// RagdollPose.LimbPose animation fields (Animated limbs only).
+// ponytail: random_* are read once EvaluateAngle's Time.time + Perlin path is rewritten.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+pub struct PoseAnimation {
+    pub start: f32,
+    pub end: f32,
+    pub duration: f32,
+    pub random_influence: f32,
+    pub random_speed: f32,
+    pub time_offset: f32,
+    pub curve: Curve,
+}
+
+/// A Unity AnimationCurve with unweighted keys [time, value, inSlope, outSlope].
+#[derive(Deserialize)]
+pub struct Curve {
+    pub keys: Vec<[f32; 4]>,
+    /// Unity's internal wrap modes: 0 ping-pong, 1 repeat, 2 clamp.
+    pub pre: i32,
+    pub post: i32,
+}
+
+fn repeat(t: f32, length: f32) -> f32 {
+    (t - (t / length).floor() * length).clamp(0.0, length)
+}
+
+impl Curve {
+    // ponytail: Unity's Hermite form in f32; the native arithmetic order is not compared yet.
+    pub fn evaluate(&self, mut t: f32) -> f32 {
+        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
+            return 0.0;
+        };
+        let (begin, end) = (first[0], last[0]);
+        if (t < begin || t > end) && end > begin {
+            let length = end - begin;
+            let mode = if t < begin { self.pre } else { self.post };
+            t = match mode {
+                0 => begin + length - (repeat(t - begin, 2.0 * length) - length).abs(),
+                1 => begin + repeat(t - begin, length),
+                _ => t.clamp(begin, end),
+            };
+        }
+        if t <= begin {
+            return first[1];
+        }
+        if t >= end {
+            return last[1];
+        }
+        let i = self.keys.iter().rposition(|k| k[0] <= t).unwrap();
+        let (l, r) = (self.keys[i], self.keys[i + 1]);
+        let dx = r[0] - l[0];
+        let (u, m0, m1) = if dx != 0.0 { ((t - l[0]) / dx, l[3] * dx, r[2] * dx) } else { (0.0, 0.0, 0.0) };
+        if !m0.is_finite() || !m1.is_finite() {
+            return l[1];
+        }
+        let (u2, u3) = (u * u, u * u * u);
+        (2.0 * u3 - 3.0 * u2 + 1.0) * l[1] + (u3 - 2.0 * u2 + u) * m0 + (u3 - u2) * m1 + (-2.0 * u3 + 3.0 * u2) * r[1]
+    }
 }
 
 impl PoseAngle {
+    /// LimbPose.EvaluateAngleAt: the pose angle in degrees at an explicit animation time.
+    pub fn degrees_at(&self, time: f32) -> f32 {
+        match &self.animation {
+            None => self.degrees(),
+            Some(a) => {
+                let t = a.time_offset + time / a.duration;
+                a.start + (a.end - a.start) * a.curve.evaluate(t).clamp(0.0, 1.0)
+            }
+        }
+    }
+
     pub fn degrees(&self) -> f32 {
         self.angle_degrees
             .unwrap_or_else(|| self.angle.to_degrees())
@@ -87,8 +176,18 @@ pub struct HumanPose {
     pub stand_upright: bool,
     pub upright_multiplier: f32,
     pub drag_influence: f32,
+    #[serde(default)]
+    pub state: i32,
+    #[serde(default)]
+    pub should_stumble: bool,
+    #[serde(default = "one")]
+    #[allow(dead_code)]
+    pub animation_speed: f32,
     pub angles: Vec<PoseAngle>,
 }
+
+/// PoseState.Stumbling
+pub const STUMBLING: i32 = 3;
 
 #[derive(Deserialize)]
 pub struct Joint {
@@ -277,7 +376,10 @@ impl HumanRig {
                 && (!muscle.strength.is_finite()
                     || muscle.strength < 0.0
                     || !muscle.upright_force.is_finite()
-                    || muscle.upright_force < 0.0)
+                    || muscle.upright_force < 0.0
+                    || !muscle.balance_muscle_movement.is_finite()
+                    || !muscle.blood_strength_ratio.is_finite()
+                    || !muscle.multipliers.iter().all(|m| m.is_finite()))
             {
                 return Err(format!("Invalid muscle settings: {}", p.name));
             }
@@ -519,12 +621,31 @@ mod tests {
     }
 
     #[test]
+    fn pose_curve_ping_pongs_outside_its_keys() {
+        // Person.prefab Stumbling UpperLegFront.
+        let curve = Curve {
+            keys: vec![[0.0, 0.0, 2.0, 2.0], [0.5, 1.0, 2.0, -2.0], [1.0, 0.0, -2.0, -2.0]],
+            pre: 0,
+            post: 0,
+        };
+        assert_eq!(curve.evaluate(0.25), 0.5);
+        assert_eq!(curve.evaluate(0.5), 1.0);
+        assert_eq!(curve.evaluate(1.25), curve.evaluate(0.75));
+        assert_eq!(curve.evaluate(-0.25), curve.evaluate(0.25));
+    }
+
+    #[test]
     fn invalid_muscle_values_do_not_reach_the_physics_engine() {
         let mut rig = test_rig();
         rig.parts[0].muscle = Some(MuscleSpec {
             strength: f32::INFINITY,
+            multipliers: vec![],
             upright_force: 0.0,
             has_brain: true,
+            do_balance_jerk: false,
+            balance_muscle_movement: 0.0,
+            do_stumble: false,
+            blood_strength_ratio: 1.0,
         });
         assert!(rig.validate().is_err());
     }
