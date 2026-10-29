@@ -14,11 +14,11 @@ Requires your own installed copy of People Playground. Original assets, extracte
 - Installation and cache-fingerprint checks at startup.
 - Headless engine tests with no window or desktop control.
 
-Bevy 0.20 handles rendering and Avian 0.8 handles collision and position constraints. Healthy static muscles use the recovered velocity-command calculations, applied by a sequential hinge velocity pass that co-solves anchor velocities and caps accumulated motor impulse by torque times the substep duration. The simulation uses a 50 Hz fixed update with 10 physics substeps and 16 hinge velocity iterations per substep. This replaces the experimental spring servo.
+Bevy 0.20 handles rendering and Avian 0.8 handles collision and position constraints. Healthy static muscles use the recovered velocity-command calculations. The live hinge velocity pass uses the native engine's coupled 3×3 limit equations, reduced 2×2 solve when a unilateral limit releases, accumulated torque caps, and the native rule that equal limits disable the motor. It also solves anchor velocities for limp bodies. The simulation uses a 50 Hz fixed update with 10 physics substeps and 16 hinge velocity iterations per substep.
 
 Fresh caches resolve each human body's runtime physics material through its physical-properties asset, replacing the prototype coefficients. Imported contacts use geometric-mean friction and maximum restitution mixing. Different materials on colliders within one compound body are rejected rather than silently merged. Native Unity motor-property limits are also applied before storing the speed for the next command: speed is bounded to ±1,000,000 degrees/second and torque to 0–1,000,000.
 
-Living physiology, injury-dependent strength, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The velocity pass uses standard [Box2D hinge constraint equations](https://github.com/erincatto/box2d/blob/v2.4.1/src/dynamics/b2_revolute_joint.cpp); this does not identify Unity's native Box2D fork or establish equivalent trajectories. Avian contact/position solving, solver ordering, and warm starting remain differences to investigate. The imported human starts with zero joint reference angles; nonzero-reference rigs have not been validated. Human bodies currently stay awake so small muscle commands continue to run. Pose tracking can be obstructed by floor contact. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
+Living physiology, injury-dependent strength, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The hinge uses the older coupled-limit layout also found in [Box2D 2.3.1](https://github.com/erincatto/box2d/blob/v2.3.1/Box2D/Box2D/Dynamics/Joints/b2RevoluteJoint.h), recovered with symbols matching the installed Unity DLL; that does not establish the exact Unity fork version or equivalent full-frame trajectories. Avian contact/position solving, solver ordering, substeps, matrix preparation, and warm starting remain differences to investigate. Impulses currently reset each substep. The imported human starts with zero joint reference angles; nonzero-reference rigs have not been validated. Human bodies currently stay awake so small muscle commands continue to run. Pose tracking can be obstructed by floor contact. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
 
 ## Requirements
 
@@ -101,6 +101,12 @@ Development uses a private C# reference executable built from the locally recove
 
 ```powershell
 cargo run -- --reference-test ".\reference-probe\bin\Debug\net9.0\ReferenceProbe.exe"
+```
+
+`src/hinge.rs` has a separate comparison against the installed DLL's actual native `b2RevoluteJoint::SolveVelocityConstraints` machine code. All 4,096 prepared one-iteration cases match every float bit in both body velocities, the point/limit impulse, and the motor impulse, including active/equal/released limits, fixed rotation, motor disabling, and axis masks. The private probe verifies the DLL's SHA-256 before mapping it, does not run Unity initialization, and calls only the verified allocation-free arithmetic in its own process. It exits after returning results; no Ghidra server or game window is needed. The comparison does not cover native preparation, warm starting, position solving, integration, or contacts.
+
+```powershell
+cargo run -- --native-reference-test ".\reference-probe\native\bin\Debug\net9.0\NativeProbe.exe"
 ```
 
 An optional `--smoke-test` opens a rendered window and checks the original texture, floor collisions, and joints over at least four seconds of simulation. Run that only when explicitly desired.

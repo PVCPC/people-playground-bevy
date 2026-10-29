@@ -1,6 +1,6 @@
 # Box2D hinge velocity constraints
 
-The hinge velocity equations in `src/motor.rs` are adapted from Box2D 2.4.1's `src/dynamics/b2_revolute_joint.cpp`:
+Earlier motor code retained in repository history adapted Box2D 2.4.1's `src/dynamics/b2_revolute_joint.cpp`:
 https://github.com/erincatto/box2d/blob/v2.4.1/src/dynamics/b2_revolute_joint.cpp
 
 MIT License
@@ -24,3 +24,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+# Legacy Box2D coupled hinge constraints
+
+The altered Rust reimplementation in `src/hinge.rs` follows the older coupled hinge equations represented by Box2D 2.3.1, with operation ordering checked against the locally installed engine. It is not the original Box2D source.
+https://github.com/erincatto/box2d/blob/v2.3.1/Box2D/Box2D/Dynamics/Joints/b2RevoluteJoint.h
+
+Copyright (c) 2006-2011 Erin Catto http://www.box2d.org
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.

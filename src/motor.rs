@@ -11,117 +11,160 @@ pub struct VelocityMotor {
     pub enabled: bool,
     pub target_velocity: f32,
     pub max_torque: f32,
-    impulse: f32,
+    constraint: crate::hinge::VelocityConstraint,
+    prepared: Option<(SolverBodyIndex, SolverBodyIndex)>,
+    previous_angle: Option<f32>,
+    angle: f32,
 }
 
 pub fn solve_velocity_motors(
     mut bodies: ResMut<SolverBodies>,
     frames: Query<
-        (&Rotation, &ComputedCenterOfMass, Option<&SolverBodyIndex>),
+        (
+            &Rotation,
+            &ComputedCenterOfMass,
+            &ComputedMass,
+            Option<&SolverBodyIndex>,
+        ),
         Without<RigidBodyDisabled>,
     >,
     mut joints: Query<(&RevoluteJoint, &mut VelocityMotor), Without<JointDisabled>>,
     time: Res<Time>,
 ) {
-    for (_, mut motor) in &mut joints {
-        motor.impulse = 0.0;
+    for (joint, mut motor) in &mut joints {
+        motor.prepared = None;
+        let Ok((rotation_a, center_a, mass_a, index_a)) = frames.get(joint.body1) else {
+            continue;
+        };
+        let Ok((rotation_b, center_b, mass_b, index_b)) = frames.get(joint.body2) else {
+            continue;
+        };
+        let index = |entity, candidate: Option<&SolverBodyIndex>| {
+            candidate
+                .copied()
+                .filter(|&i| bodies.get_entity(i) == Some(entity))
+                .unwrap_or(SolverBodyIndex::INVALID)
+        };
+        let a = index(joint.body1, index_a);
+        let b = index(joint.body2, index_b);
+        if a == b {
+            continue;
+        }
+        let inv_a = bodies
+            .get_inertia(a)
+            .map_or(0.0, |i| i.effective_inv_angular_inertia());
+        let inv_b = bodies
+            .get_inertia(b)
+            .map_or(0.0, |i| i.effective_inv_angular_inertia());
+        let offset = |index, rotation: &Rotation, center: Vec2, anchor: Vec2| {
+            let base = Vec2::from_angle(rotation.as_radians()).rotate(anchor - center);
+            bodies
+                .get(index)
+                .map_or(base, |body| body.delta_rotation * base)
+        };
+        let r_a = offset(
+            a,
+            rotation_a,
+            center_a.0,
+            joint.local_anchor1().unwrap_or(Vec2::ZERO),
+        );
+        let r_b = offset(
+            b,
+            rotation_b,
+            center_b.0,
+            joint.local_anchor2().unwrap_or(Vec2::ZERO),
+        );
+        let axis = |index| {
+            let locks = bodies
+                .get_inertia(index)
+                .map_or(LockedAxes::new(), |i| i.flags().locked_axes());
+            [
+                if locks.is_translation_x_locked() {
+                    0.0
+                } else {
+                    1.0
+                },
+                if locks.is_translation_y_locked() {
+                    0.0
+                } else {
+                    1.0
+                },
+            ]
+        };
+        let wrap = |angle: f32| {
+            (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+        };
+        let delta_a = bodies.get(a).map_or(0.0, |b| b.delta_rotation.as_radians());
+        let delta_b = bodies.get(b).map_or(0.0, |b| b.delta_rotation.as_radians());
+        let wrapped = wrap(rotation_b.as_radians() - rotation_a.as_radians() + delta_b - delta_a);
+        motor.angle = if let Some(previous) = motor.previous_angle {
+            motor.angle + wrap(wrapped - previous)
+        } else {
+            wrapped
+        };
+        motor.previous_angle = Some(wrapped);
+        let state = joint.angle_limit.map_or(0, |limit| {
+            if inv_a + inv_b == 0.0 {
+                0
+            } else {
+                crate::hinge::limit_state(motor.angle, limit.min, limit.max)
+            }
+        });
+        motor.constraint = crate::hinge::VelocityConstraint {
+            inverse_mass_a: if bodies.get(a).is_some_and(|b| b.flags.is_dynamic()) {
+                mass_a.inverse()
+            } else {
+                0.0
+            },
+            inverse_mass_b: if bodies.get(b).is_some_and(|b| b.flags.is_dynamic()) {
+                mass_b.inverse()
+            } else {
+                0.0
+            },
+            inverse_inertia_a: inv_a,
+            inverse_inertia_b: inv_b,
+            anchor_a: r_a.to_array(),
+            anchor_b: r_b.to_array(),
+            axis_a: axis(a),
+            axis_b: axis(b),
+            motor_enabled: motor.enabled,
+            limit_enabled: joint.angle_limit.is_some(),
+            limit_state: state,
+            target_velocity: motor.target_velocity,
+            max_torque: motor.max_torque,
+            dt: time.delta_secs(),
+            ..default()
+        };
+        motor.constraint.prepare_matrix();
+        motor.prepared = Some((a, b));
     }
-    // Hinge velocity equations: Box2D 2.4.1 b2_revolute_joint.cpp (see THIRD_PARTY_NOTICES.md).
-    // shortcut: separate velocity and Avian position/contact passes; Unity solver parity needs trajectories.
+    // shortcut: Avian contacts/positions and substeps remain; native full-frame trajectories are unverified.
     for _ in 0..16 {
-        for (joint, mut motor) in &mut joints {
-            if !motor.enabled {
-                continue;
-            }
-            let Ok((rotation_a, center_a, index_a)) = frames.get(joint.body1) else {
+        for (_, mut motor) in &mut joints {
+            let Some((a, b)) = motor.prepared else {
                 continue;
             };
-            let Ok((rotation_b, center_b, index_b)) = frames.get(joint.body2) else {
-                continue;
+            let velocity = |index| {
+                bodies.get(index).map_or([0.0; 3], |body| {
+                    [
+                        body.linear_velocity.x,
+                        body.linear_velocity.y,
+                        body.angular_velocity,
+                    ]
+                })
             };
-            let index = |entity, candidate: Option<&SolverBodyIndex>| {
-                candidate
-                    .copied()
-                    .filter(|&i| bodies.get_entity(i) == Some(entity))
-                    .unwrap_or(SolverBodyIndex::INVALID)
-            };
-            let a = index(joint.body1, index_a);
-            let b = index(joint.body2, index_b);
-            if a == b {
-                continue;
-            }
-            let inv_a = bodies
-                .get_inertia(a)
-                .map_or(0.0, |i| i.effective_inv_angular_inertia());
-            let inv_b = bodies
-                .get_inertia(b)
-                .map_or(0.0, |i| i.effective_inv_angular_inertia());
-            let inverse_inertia = inv_a + inv_b;
-            if inverse_inertia <= 0.0 {
-                continue;
-            }
-            let relative_speed = bodies.get(b).map_or(0.0, |b| b.angular_velocity)
-                - bodies.get(a).map_or(0.0, |a| a.angular_velocity);
-            let limit = motor.max_torque * time.delta_secs();
-            let previous = motor.impulse;
-            motor.impulse = (previous + (motor.target_velocity - relative_speed) / inverse_inertia)
-                .clamp(-limit, limit);
-            let impulse = motor.impulse - previous;
+            motor.constraint.velocity_a = velocity(a);
+            motor.constraint.velocity_b = velocity(b);
+            motor.constraint.solve();
             if let Some(body) = bodies.get_mut(a) {
-                body.angular_velocity -= inv_a * impulse;
+                let [x, y, w] = motor.constraint.velocity_a;
+                body.linear_velocity = Vec2::new(x, y);
+                body.angular_velocity = w;
             }
             if let Some(body) = bodies.get_mut(b) {
-                body.angular_velocity += inv_b * impulse;
-            }
-            // Co-solve anchor velocities so a neighboring motor sees the transmitted motion.
-            let offset = |index, rotation: &Rotation, center: Vec2, anchor: Vec2| {
-                let base = Vec2::from_angle(rotation.as_radians()).rotate(anchor - center);
-                bodies
-                    .get(index)
-                    .map_or(base, |body| body.delta_rotation * base)
-            };
-            let r_a = offset(
-                a,
-                rotation_a,
-                center_a.0,
-                joint.local_anchor1().unwrap_or(Vec2::ZERO),
-            );
-            let r_b = offset(
-                b,
-                rotation_b,
-                center_b.0,
-                joint.local_anchor2().unwrap_or(Vec2::ZERO),
-            );
-            let mass_a = bodies
-                .get_inertia(a)
-                .map_or(Vec2::ZERO, |i| i.effective_inv_mass());
-            let mass_b = bodies
-                .get_inertia(b)
-                .map_or(Vec2::ZERO, |i| i.effective_inv_mass());
-            let velocity_error = bodies
-                .get(b)
-                .map_or(Vec2::ZERO, |body| body.velocity_at_point(r_b))
-                - bodies
-                    .get(a)
-                    .map_or(Vec2::ZERO, |body| body.velocity_at_point(r_a));
-            let k_x = mass_a.x + mass_b.x + inv_a * r_a.y * r_a.y + inv_b * r_b.y * r_b.y;
-            let k_y = mass_a.y + mass_b.y + inv_a * r_a.x * r_a.x + inv_b * r_b.x * r_b.x;
-            let cross = -inv_a * r_a.x * r_a.y - inv_b * r_b.x * r_b.y;
-            let determinant = k_x * k_y - cross * cross;
-            if determinant <= 0.0 {
-                continue;
-            }
-            let point_impulse = Vec2::new(
-                cross * velocity_error.y - k_y * velocity_error.x,
-                cross * velocity_error.x - k_x * velocity_error.y,
-            ) / determinant;
-            if let Some(body) = bodies.get_mut(a) {
-                body.linear_velocity -= mass_a * point_impulse;
-                body.angular_velocity -= inv_a * r_a.perp_dot(point_impulse);
-            }
-            if let Some(body) = bodies.get_mut(b) {
-                body.linear_velocity += mass_b * point_impulse;
-                body.angular_velocity += inv_b * r_b.perp_dot(point_impulse);
+                let [x, y, w] = motor.constraint.velocity_b;
+                body.linear_velocity = Vec2::new(x, y);
+                body.angular_velocity = w;
             }
         }
     }
@@ -210,7 +253,6 @@ pub fn command(input: &MotorInput) -> MotorOutput {
 }
 
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
-    use std::process::{Command, Stdio};
     let mut cases = Vec::new();
     let mut state = 0x1234_5678u32;
     let mut random = || {
@@ -249,32 +291,7 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
         case.active = true;
         cases.push(case);
     }
-    let mut process = Command::new(executable);
-    process
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        process.creation_flags(0x08000000);
-    }
-    let mut child = process
-        .spawn()
-        .map_err(|e| format!("Cannot start private reference probe: {e}"))?;
-    serde_json::to_writer(child.stdin.take().unwrap(), &cases).map_err(|e| e.to_string())?;
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(format!(
-            "Reference probe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let expected: Vec<MotorOutput> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("Invalid reference output: {e}"))?;
-    if expected.len() != cases.len() {
-        return Err("Reference probe returned an incomplete case set".into());
-    }
+    let expected: Vec<MotorOutput> = run_reference(executable, &cases)?;
     let mut mismatches = 0;
     for (index, (input, reference)) in cases.iter().zip(&expected).enumerate() {
         let actual = command(input);
@@ -300,6 +317,40 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
         cases.len()
     );
     Ok(())
+}
+
+pub fn run_reference<I: Serialize, O: serde::de::DeserializeOwned>(
+    executable: &std::path::Path,
+    cases: &[I],
+) -> Result<Vec<O>, String> {
+    use std::process::{Command, Stdio};
+    let mut process = Command::new(executable);
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x08000000);
+    }
+    let mut child = process
+        .spawn()
+        .map_err(|e| format!("Cannot start private reference probe: {e}"))?;
+    serde_json::to_writer(child.stdin.take().unwrap(), cases).map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "Reference probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let expected: Vec<O> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Invalid reference output: {e}"))?;
+    if expected.len() != cases.len() {
+        return Err("Reference probe returned an incomplete case set".into());
+    }
+    Ok(expected)
 }
 
 #[cfg(test)]
