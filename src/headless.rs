@@ -16,15 +16,14 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         ImagePlugin::default_nearest(),
         MeshPlugin,
         TransformPlugin,
-        motor::PortPhysicsPlugin,
+        physics::PhysicsPlugin,
     ))
+    .insert_resource(Physics::new(simulation.gravity))
     .insert_resource(simulation)
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
         simulation.fixed_delta,
     )))
     .insert_resource(Time::<Fixed>::from_seconds(simulation.fixed_delta))
-    .insert_resource(SubstepCount(10))
-    .insert_resource(Gravity(Vec2::from_array(simulation.gravity)))
     .insert_resource(rig)
     .insert_resource(Session {
         overlay: false,
@@ -57,20 +56,14 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
     }
     check(&mut app, expected_bodies, expected_joints)?;
 
-    let head = app
-        .world_mut()
-        .query::<(Entity, &Name)>()
-        .iter(app.world())
-        .find(|(_, name)| name.as_str() == "Head")
-        .map(|(entity, _)| entity)
-        .ok_or("Imported human has no head")?;
-    let initial_y = app.world().get::<Position>(head).unwrap().0.y;
+    let head = named(&mut app, "Head");
+    let initial_y = pose(&app, head).0.y;
     app.world_mut().resource_mut::<Pointer>().world = Some(Vec2::new(-1.0, 1.0));
     app.world_mut().resource_mut::<Drag>().body = Some(head);
     for _ in 0..100 {
         app.update();
     }
-    let lifted_y = app.world().get::<Position>(head).unwrap().0.y;
+    let lifted_y = pose(&app, head).0.y;
     if lifted_y < initial_y + 0.4 {
         return Err("Headless drag test failed to lift the human".into());
     }
@@ -78,7 +71,7 @@ pub fn test(rig: HumanRig, cache: PathBuf) -> Result<(), String> {
     for _ in 0..150 {
         app.update();
     }
-    let released_y = app.world().get::<Position>(head).unwrap().0.y;
+    let released_y = pose(&app, head).0.y;
     if released_y > lifted_y - 0.2 {
         return Err("Released human did not fall under gravity".into());
     }
@@ -102,6 +95,29 @@ fn named(app: &mut App, name: &str) -> Entity {
         .0
 }
 
+fn body(app: &App, entity: Entity) -> b2::world::BodyId {
+    app.world().get::<Body>(entity).unwrap().0
+}
+
+fn pose(app: &App, entity: Entity) -> (Vec2, f32) {
+    app.world()
+        .resource::<Physics>()
+        .pose(app.world().get::<Body>(entity).unwrap())
+}
+
+fn spin(app: &App, entity: Entity) -> f32 {
+    app.world().resource::<Physics>().world.body(body(app, entity)).angular_velocity
+}
+
+/// Hinges as (entity, attached body, connected body, joint id), skipping ones whose bodies were destroyed.
+fn hinges(app: &mut App) -> Vec<(Entity, Hinge)> {
+    app.world_mut()
+        .query::<(Entity, &Hinge)>()
+        .iter(app.world())
+        .map(|(e, h)| (e, *h))
+        .collect()
+}
+
 fn active_checks(app: &mut App) -> Result<(), String> {
     app.world_mut()
         .run_system_once(
@@ -109,6 +125,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
              assets: Res<AssetServer>,
              rig: Res<HumanRig>,
              mut session: ResMut<Session>,
+             mut physics: ResMut<Physics>,
              objects: Query<Entity, With<SandboxObject>>| {
                 for entity in &objects {
                     commands.entity(entity).despawn();
@@ -119,9 +136,10 @@ fn active_checks(app: &mut App) -> Result<(), String> {
                     &assets,
                     &rig,
                     &mut session,
+                    &mut physics,
                     Vec2::new(0.0, 0.6),
                 );
-                spawn_box(&mut commands, Vec2::new(1.3, -1.7));
+                spawn_box(&mut commands, &mut physics, Vec2::new(1.3, -1.7));
             },
         )
         .map_err(|e| e.to_string())?;
@@ -132,9 +150,8 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     let head = named(app, "Head");
     let torso = named(app, "UpperBody");
     let foot = named(app, "Foot");
-    let height = app.world().get::<Position>(head).unwrap().0.y
-        - app.world().get::<Position>(foot).unwrap().0.y;
-    let tilt = app.world().get::<Rotation>(torso).unwrap().as_radians();
+    let height = pose(app, head).0.y - pose(app, foot).0.y;
+    let tilt = pose(app, torso).1;
     println!(
         "Active human: head-to-foot height={height:.4} m, torso tilt={:.3} degrees",
         tilt.to_degrees()
@@ -145,9 +162,8 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     for _ in 0..250 {
         app.update();
     }
-    let sustained_height = app.world().get::<Position>(head).unwrap().0.y
-        - app.world().get::<Position>(foot).unwrap().0.y;
-    let sustained_tilt = app.world().get::<Rotation>(torso).unwrap().as_radians();
+    let sustained_height = pose(app, head).0.y - pose(app, foot).0.y;
+    let sustained_tilt = pose(app, torso).1;
     println!(
         "Standing after 10 seconds: height={sustained_height:.4} m, tilt={:.3} degrees",
         sustained_tilt.to_degrees()
@@ -163,22 +179,27 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         .get_mut::<living::Human>(owner)
         .unwrap()
         .awake = false;
-    app.world_mut().get_mut::<LinearVelocity>(head).unwrap().0.x = 1.0;
+    let head_body = body(app, head);
+    app.world_mut()
+        .resource_mut::<Physics>()
+        .world
+        .body_mut(head_body)
+        .linear_velocity
+        .x = 1.0;
     for _ in 0..200 {
         app.update();
     }
-    let limp_height = app.world().get::<Position>(head).unwrap().0.y
-        - app.world().get::<Position>(foot).unwrap().0.y;
+    let limp_height = pose(app, head).0.y - pose(app, foot).0.y;
     println!("Limp human: head-to-foot height={limp_height:.4} m");
     if limp_height > height - 0.5 {
         return Err("Disabled muscles did not release the pose".into());
     }
-    if app
-        .world_mut()
-        .query::<&motor::VelocityMotor>()
-        .iter(app.world())
-        .any(|m| m.enabled)
-    {
+    let motor_enabled = |app: &App, joint: b2::world::JointId| {
+        app.world().resource::<Physics>().world.joints[joint]
+            .as_ref()
+            .is_some_and(|j| j.revolute.def.enable_motor)
+    };
+    if hinges(app).iter().any(|(_, h)| motor_enabled(app, h.joint)) {
         return Err("A muscle motor remained enabled on a limp human".into());
     }
     app.world_mut()
@@ -197,13 +218,21 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         .unwrap()
         .pose = sitting;
     // Isolate pose tracking from floor obstruction after the preceding collapse test.
-    app.world_mut().resource_mut::<Gravity>().0 = Vec2::ZERO;
-    for (mut position, mut velocity, mut spin) in app.world_mut()
-        .query_filtered::<(&mut Position, &mut LinearVelocity, &mut AngularVelocity), With<Grabbable>>()
-        .iter_mut(app.world_mut()) {
-        position.0.y += 3.0;
-        velocity.0 = Vec2::ZERO;
-        spin.0 = 0.0;
+    let ids: Vec<_> = app
+        .world_mut()
+        .query_filtered::<&Body, With<Grabbable>>()
+        .iter(app.world())
+        .map(|b| b.0)
+        .collect();
+    let mut physics = app.world_mut().resource_mut::<Physics>();
+    physics.world.gravity = b2::math::Vec2::ZERO;
+    for id in ids {
+        let b = physics.world.body(id);
+        let (p, a) = (b.xf.p, b.sweep.a);
+        physics.world.set_transform(id, p + b2::math::Vec2::new(0.0, 3.0), a);
+        let b = physics.world.body_mut(id);
+        b.linear_velocity = b2::math::Vec2::ZERO;
+        b.angular_velocity = 0.0;
     }
     for _ in 0..250 {
         app.update();
@@ -211,8 +240,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     check(app, 15, 13)?;
     let thigh = named(app, "UpperLeg");
     let hip = named(app, "LowerBody");
-    let relative = app.world().get::<Rotation>(hip).unwrap().as_radians()
-        - app.world().get::<Rotation>(thigh).unwrap().as_radians();
+    let relative = pose(app, hip).1 - pose(app, thigh).1;
     let target = app.world().resource::<HumanRig>().poses[sitting]
         .angles
         .iter()
@@ -227,34 +255,31 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     );
     let mut max_pose_error = 0.0f32;
     let mut max_relative_speed = 0.0f32;
-    for (joint, muscle, motor) in app
+    let muscles: Vec<(Hinge, usize)> = app
         .world_mut()
-        .query::<(&RevoluteJoint, &living::MuscleJoint, &motor::VelocityMotor)>()
+        .query::<(&Hinge, &living::MuscleJoint)>()
         .iter(app.world())
-    {
-        let name = &app.world().resource::<HumanRig>().parts[muscle.definition].name;
-        let a = app
-            .world()
-            .get::<Rotation>(joint.body1)
+        .map(|(h, m)| (*h, m.definition))
+        .collect();
+    for (hinge, definition) in muscles {
+        let name = &app.world().resource::<HumanRig>().parts[definition].name;
+        let reference = app.world().resource::<Physics>().world.joints[hinge.joint]
+            .as_ref()
             .unwrap()
-            .as_radians();
-        let b = app
-            .world()
-            .get::<Rotation>(joint.body2)
-            .unwrap()
-            .as_radians();
+            .revolute
+            .def
+            .reference_angle;
+        let (a, b) = (pose(app, hinge.body_a).1, pose(app, hinge.body_b).1);
         let target = app.world().resource::<HumanRig>().poses[sitting]
             .angles
             .iter()
             .find(|a| a.part == *name)
-            .map_or(0.0, |a| 2.0 * motor.reference_angle + a.radians());
+            .map_or(0.0, |a| 2.0 * reference + a.radians());
         let pose_error = ((b - a - target + std::f32::consts::PI)
             .rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI)
             .abs();
-        let speed = (app.world().get::<AngularVelocity>(joint.body2).unwrap().0
-            - app.world().get::<AngularVelocity>(joint.body1).unwrap().0)
-            .abs();
+        let speed = (spin(app, hinge.body_b) - spin(app, hinge.body_a)).abs();
         max_pose_error = max_pose_error.max(pose_error);
         max_relative_speed = max_relative_speed.max(speed);
         if pose_error > 0.1 || speed > 1.0 {
@@ -275,12 +300,14 @@ fn active_checks(app: &mut App) -> Result<(), String> {
             |mut commands: Commands,
              assets: Res<AssetServer>,
              rig: Res<HumanRig>,
-             mut session: ResMut<Session>| {
+             mut session: ResMut<Session>,
+             mut physics: ResMut<Physics>| {
                 spawn_human(
                     &mut commands,
                     &assets,
                     &rig,
                     &mut session,
+                    &mut physics,
                     Vec2::new(-3.0, 0.6),
                 );
             },
@@ -288,45 +315,31 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     app.update();
     let arm = named(app, "UpperArm");
-    let arm_joint = app
-        .world_mut()
-        .query::<(Entity, &RevoluteJoint)>()
-        .iter(app.world())
-        .find(|(_, j)| j.body1 == arm)
-        .unwrap()
-        .0;
+    let arm_joint = hinges(app).into_iter().find(|(_, h)| h.body_a == arm).unwrap().0;
     app.world_mut().despawn(arm_joint);
     app.update();
-    let arm_enabled = app
-        .world_mut()
-        .query::<(&RevoluteJoint, &motor::VelocityMotor)>()
-        .iter(app.world())
-        .any(|(j, m)| j.body2 == arm && m.enabled);
-    if arm_enabled {
+    if hinges(app)
+        .iter()
+        .any(|(_, h)| h.body_b == arm && motor_enabled(app, h.joint))
+    {
         return Err("Detached arm muscles remained active".into());
     }
-    let head_joint = app
-        .world_mut()
-        .query::<(Entity, &RevoluteJoint)>()
-        .iter(app.world())
-        .find(|(_, j)| j.body1 == head)
-        .unwrap()
-        .0;
+    let head_joint = hinges(app).into_iter().find(|(_, h)| h.body_a == head).unwrap().0;
     app.world_mut().despawn(head_joint);
     app.update();
-    let mut motors = app
+    let motors: Vec<(bool, Entity)> = app
         .world_mut()
-        .query::<(&motor::VelocityMotor, &living::MuscleJoint)>();
-    if motors
+        .query::<(&Hinge, &living::MuscleJoint)>()
         .iter(app.world())
-        .any(|(j, m)| m.owner == owner && j.enabled)
-    {
+        .map(|(h, m)| (h.joint, m.owner))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|(j, owner)| (motor_enabled(app, j), owner))
+        .collect();
+    if motors.iter().any(|&(on, o)| o == owner && on) {
         return Err("Human muscles remained active after brain disconnection".into());
     }
-    let unaffected = motors
-        .iter(app.world())
-        .filter(|(j, m)| m.owner != owner && j.enabled)
-        .count();
+    let unaffected = motors.iter().filter(|&&(on, o)| o != owner && on).count();
     if unaffected != 13 {
         return Err("One person's injury affected another person's muscles".into());
     }
@@ -341,43 +354,39 @@ fn setup(
     assets: Res<AssetServer>,
     rig: Res<HumanRig>,
     mut session: ResMut<Session>,
+    mut physics: ResMut<Physics>,
 ) {
     commands.spawn((
         Floor,
-        RigidBody::Static,
-        Collider::rectangle(20.0, 0.2),
-        Position(Vec2::new(0.0, -2.3)),
+        floor_body(&mut physics, -2.3, 20.0),
         Transform::from_xyz(0.0, -2.3, -1.0),
-        Friction::new(0.6),
-        Restitution::new(0.05),
-        CollisionLayers::ALL,
     ));
     spawn_human(
         &mut commands,
         &assets,
         &rig,
         &mut session,
+        &mut physics,
         Vec2::new(0.0, 0.6),
     );
-    spawn_box(&mut commands, Vec2::new(1.3, -1.7));
+    spawn_box(&mut commands, &mut physics, Vec2::new(1.3, -1.7));
 }
 
 fn check(app: &mut App, expected_bodies: usize, expected_joints: usize) -> Result<(), String> {
-    let mut bodies = app.world_mut().query_filtered::<(
-        &Name,
-        &Position,
-        &Rotation,
-        &Transform,
-        &GlobalTransform,
-        &LinearVelocity,
-    ), With<Grabbable>>();
-    let mut states = HashMap::new();
+    let mut bodies = app
+        .world_mut()
+        .query_filtered::<(&Name, &Body, &Transform, &GlobalTransform), With<Grabbable>>();
+    let physics = app.world().resource::<Physics>();
+    let mut count = 0;
     let mut max_transform_error = 0.0f32;
-    for (name, position, _, transform, global, velocity) in bodies.iter(app.world()) {
-        if !position.0.is_finite() || !velocity.0.is_finite() || position.0.y < -2.4 {
+    for (name, body, transform, global) in bodies.iter(app.world()) {
+        count += 1;
+        let b = physics.world.body(body.0);
+        let position = physics::bevy(b.xf.p);
+        if !position.is_finite() || !physics::bevy(b.linear_velocity).is_finite() || position.y < -2.4 {
             return Err(format!("Invalid simulated body: {name}"));
         }
-        let error = position.0.distance(transform.translation.truncate());
+        let error = position.distance(transform.translation.truncate());
         max_transform_error = max_transform_error.max(error);
         if error > 0.05 || transform.translation.distance(global.translation()) > 0.001 {
             return Err(format!(
@@ -385,24 +394,17 @@ fn check(app: &mut App, expected_bodies: usize, expected_joints: usize) -> Resul
             ));
         }
     }
-    let mut poses = app
-        .world_mut()
-        .query_filtered::<(Entity, &Position, &Rotation), With<Grabbable>>();
-    for (entity, position, rotation) in poses.iter(app.world()) {
-        states.insert(entity, (position.0, *rotation));
-    }
-    if states.len() != expected_bodies {
+    if count != expected_bodies {
         return Err("Unexpected rigid body count".into());
     }
-    let mut joints = app.world_mut().query::<&RevoluteJoint>();
+    let mut joints = app.world_mut().query::<&Hinge>();
+    let physics = app.world().resource::<Physics>();
     let mut count = 0;
     let mut max_gap = 0.0f32;
     for joint in joints.iter(app.world()) {
         count += 1;
-        let (a, ar) = states[&joint.body1];
-        let (b, br) = states[&joint.body2];
-        let gap = (a + ar * joint.local_anchor1().unwrap())
-            .distance(b + br * joint.local_anchor2().unwrap());
+        let (a, b) = physics.anchors(joint).ok_or("A hinge lost its joint")?;
+        let gap = a.distance(b);
         max_gap = max_gap.max(gap);
         if gap > 0.05 {
             return Err(format!("Joint separation is too large: {gap}"));
@@ -412,8 +414,7 @@ fn check(app: &mut App, expected_bodies: usize, expected_joints: usize) -> Resul
         return Err("Unexpected joint count".into());
     }
     println!(
-        "Headless physics: bodies={}, joints={count}, maximum anchor gap={max_gap:.6} m, maximum render-transform error={max_transform_error:.6} m",
-        states.len()
+        "Headless physics: bodies={expected_bodies}, joints={count}, maximum anchor gap={max_gap:.6} m, maximum render-transform error={max_transform_error:.6} m"
     );
     Ok(())
 }

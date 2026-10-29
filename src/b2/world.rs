@@ -225,6 +225,40 @@ impl Body {
         self.synchronize_transform();
     }
 
+    /// b2Body::ApplyForce (Rigidbody2D.AddForceAtPosition): dynamic bodies only, wakes the body.
+    pub fn apply_force(&mut self, force: Vec2, point: Vec2) {
+        if self.kind != BodyType::Dynamic {
+            return;
+        }
+        self.wake_up();
+        self.force = self.force + force;
+        let r = point - self.sweep.c;
+        self.torque += r.x * force.y - r.y * force.x;
+    }
+
+    /// b2Body::ApplyTorque (Rigidbody2D.AddTorque).
+    pub fn apply_torque(&mut self, torque: f32) {
+        if self.kind != BodyType::Dynamic {
+            return;
+        }
+        self.wake_up();
+        self.torque += torque;
+    }
+
+    /// b2Body::GetLinearVelocityFromWorldPoint.
+    pub fn velocity_at(&self, point: Vec2) -> Vec2 {
+        let r = point - self.sweep.c;
+        self.linear_velocity + Vec2::new(-self.angular_velocity * r.y, self.angular_velocity * r.x)
+    }
+
+    /// b2Body::SetAwake(true).
+    fn wake_up(&mut self) {
+        if self.flags & BODY_AWAKE == 0 {
+            self.flags |= BODY_AWAKE;
+            self.sleep_time = 0.0;
+        }
+    }
+
     fn active_and_moving(&self) -> bool {
         self.flags & BODY_AWAKE != 0 && self.kind != BodyType::Static
     }
@@ -443,6 +477,38 @@ impl World {
             self.flag_contacts_between(body_b, body_a);
         }
         id
+    }
+
+    /// b2World::DestroyBody (180bb9360): joints, contacts, then fixture proxies; Unity's body arrays swap-remove.
+    pub fn destroy_body(&mut self, id: BodyId) {
+        for (_, j) in self.body(id).joints.clone().into_iter().rev() {
+            self.destroy_joint(j);
+        }
+        for (_, c) in self.body(id).contacts.clone().into_iter().rev() {
+            self.destroy_contact(c);
+        }
+        let body = self.bodies[id].take().unwrap();
+        for &f in body.fixtures.iter().rev() {
+            for &(_, proxy) in &self.fixtures[f].as_ref().unwrap().proxies {
+                self.broad_phase.destroy_proxy(proxy);
+            }
+            self.fixtures[f] = None;
+        }
+        self.body_list.retain(|&b| b != id);
+        let list = if body.kind == BodyType::Static { &mut self.static_bodies } else { &mut self.non_static_bodies };
+        let at = list.iter().position(|&b| b == id).unwrap();
+        list.swap_remove(at);
+    }
+
+    /// b2Body::SetTransform: teleport, keeping velocities. ponytail: Unity's Rigidbody2D.position setter is not compared.
+    pub fn set_transform(&mut self, id: BodyId, position: Vec2, angle: f32) {
+        let b = self.body_mut(id);
+        b.xf = Transform { p: position, q: Rot::new(angle) };
+        b.sweep.c = b.xf.apply(b.sweep.local_center);
+        b.sweep.c0 = b.sweep.c;
+        b.sweep.a = angle;
+        b.sweep.a0 = angle;
+        self.synchronize_fixtures(id);
     }
 
     /// b2World::DestroyJoint (180bb9680).

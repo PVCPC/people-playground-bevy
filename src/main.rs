@@ -6,8 +6,13 @@ mod hinge;
 mod integration;
 mod living;
 mod motor;
+mod physics;
 
-use avian2d::prelude::*;
+use b2::{
+    math::Vec2 as V,
+    revolute::RevoluteDef,
+    world::{BodyDef, BodyType, Filter, RigidbodyMass},
+};
 use bevy::{
     app::AppExit,
     prelude::*,
@@ -18,6 +23,7 @@ use bevy::{
     },
 };
 use game_assets::{BoxShape, HumanRig};
+use physics::{Body, Hinge, Physics};
 use std::{collections::HashMap, path::PathBuf};
 
 const WORLD_SCALE: f32 = 0.006;
@@ -157,7 +163,8 @@ fn run() -> Result<(), String> {
                 })
                 .set(ImagePlugin::default_nearest()),
         )
-        .add_plugins(motor::PortPhysicsPlugin)
+        .add_plugins(physics::PhysicsPlugin)
+        .insert_resource(Physics::new(simulation.gravity))
         .insert_resource(simulation)
         .insert_resource(rig)
         .insert_resource(Session {
@@ -169,8 +176,6 @@ fn run() -> Result<(), String> {
             frames: 0,
         })
         .insert_resource(Time::<Fixed>::from_seconds(simulation.fixed_delta))
-        .insert_resource(SubstepCount(10))
-        .insert_resource(Gravity(Vec2::from_array(simulation.gravity)))
         .insert_resource(ClearColor(BACKGROUND))
         .init_resource::<Pointer>()
         .init_resource::<Drag>()
@@ -199,6 +204,7 @@ fn setup(
     assets: Res<AssetServer>,
     rig: Res<HumanRig>,
     mut session: ResMut<Session>,
+    mut physics: ResMut<Physics>,
 ) {
     commands.spawn((
         Camera2d,
@@ -209,14 +215,9 @@ fn setup(
     ));
     commands.spawn((
         Floor,
-        RigidBody::Static,
-        Collider::rectangle(12.0, 0.2),
-        Position(Vec2::new(0.0, -2.2)),
+        floor_body(&mut physics, -2.2, 12.0),
         Transform::from_xyz(0.0, -2.2, -1.0),
         Sprite::from_color(Color::srgb(0.19, 0.22, 0.26), Vec2::new(12.0, 0.2)),
-        Friction::new(0.6),
-        Restitution::new(0.05),
-        CollisionLayers::ALL,
     ));
     commands.spawn((
         Hud,
@@ -240,9 +241,27 @@ fn setup(
         &assets,
         &rig,
         &mut session,
+        &mut physics,
         Vec2::new(0.0, 0.6),
     );
-    spawn_box(&mut commands, Vec2::new(1.3, -1.7));
+    spawn_box(&mut commands, &mut physics, Vec2::new(1.3, -1.7));
+}
+
+fn floor_body(physics: &mut Physics, y: f32, width: f32) -> Body {
+    let id = physics.world.create_body(&BodyDef {
+        position: V::new(0.0, y),
+        ..BodyDef::default()
+    });
+    let shape = BoxShape {
+        offset: [0.0; 2],
+        size: [width, 0.2],
+    };
+    physics.world.create_fixture(
+        id,
+        &physics::box_fixture(&shape, 0.6, 0.05, Filter::default()),
+        true,
+    );
+    Body(id)
 }
 
 fn spawn_human(
@@ -250,12 +269,17 @@ fn spawn_human(
     assets: &AssetServer,
     rig: &HumanRig,
     session: &mut Session,
+    physics: &mut Physics,
     offset: Vec2,
 ) {
     if session.humans >= 28 {
         return;
     }
-    let group = 1u32 << (session.humans + 2);
+    // One negative group per person: its own limbs never collide, other people's do.
+    let filter = Filter {
+        group_index: -(session.humans as i16 + 1),
+        ..Filter::default()
+    };
     session.humans += 1;
     let owner = commands.spawn(SandboxObject).id();
     let mut entities = HashMap::new();
@@ -270,50 +294,36 @@ fn spawn_human(
         let mut sprite = Sprite::from_image(assets.load(part.texture.clone()));
         sprite.rect = Some(Rect::new(x, y, x + w, y + h));
         sprite.custom_size = Some(Vec2::from_array(part.size));
-        let collider = Collider::compound(
-            part.colliders
-                .iter()
-                .map(|shape| {
-                    (
-                        Vec2::from_array(shape.offset),
-                        0.0,
-                        Collider::rectangle(shape.size[0], shape.size[1]),
-                    )
-                })
-                .collect(),
-        );
-        let (friction, restitution) = part.physics_material.as_ref().map_or(
-            (Friction::new(0.5), Restitution::new(0.0)),
-            |material| {
-                (
-                    Friction::new(material.friction)
-                        .with_combine_rule(CoefficientCombine::GeometricMean),
-                    Restitution::new(material.restitution)
-                        .with_combine_rule(CoefficientCombine::Max),
-                )
+        let (friction, restitution) = part
+            .physics_material
+            .as_ref()
+            .map_or((0.5, 0.0), |m| (m.friction, m.restitution));
+        let position = Vec2::from_array(part.position) + offset;
+        // ponytail: limbs never sleep and are not bullets; PPG's sleep mode and CollisionQuality are not imported yet.
+        let id = physics.world.create_body(&BodyDef {
+            kind: BodyType::Dynamic,
+            position: physics::v(position),
+            angle: part.angle,
+            linear_damping: part.linear_drag,
+            angular_damping: part.angular_drag,
+            allow_sleep: false,
+            rigidbody: RigidbodyMass {
+                mass: part.mass,
+                ..RigidbodyMass::default()
             },
-        );
+            ..BodyDef::default()
+        });
+        for shape in &part.colliders {
+            let fixture = physics::box_fixture(shape, friction, restitution, filter);
+            physics.world.create_fixture(id, &fixture, true);
+        }
         let entity = commands
             .spawn((
-                (
-                    SandboxObject,
-                    Name::new(part.name.clone()),
-                    SleepingDisabled,
-                ),
-                RigidBody::Dynamic,
-                collider,
-                Mass(part.mass),
-                LinearDamping(part.linear_drag),
-                AngularDamping(part.angular_drag),
-                friction,
-                restitution,
-                CollisionLayers::from_bits(group, !group),
-                Position(Vec2::from_array(part.position) + offset),
-                Rotation::radians(part.angle),
-                Transform::from_translation(
-                    (Vec2::from_array(part.position) + offset).extend(order),
-                )
-                .with_rotation(Quat::from_rotation_z(part.angle)),
+                SandboxObject,
+                Name::new(part.name.clone()),
+                Body(id),
+                Transform::from_translation(position.extend(order))
+                    .with_rotation(Quat::from_rotation_z(part.angle)),
                 sprite,
                 Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)),
                 Grabbable {
@@ -323,11 +333,10 @@ fn spawn_human(
                 },
             ))
             .id();
-        commands.entity(entity).insert((
-            living::Limb { owner, definition },
-            CollidingEntities::default(),
-        ));
-        entities.insert(part.name.as_str(), entity);
+        commands
+            .entity(entity)
+            .insert(living::Limb { owner, definition });
+        entities.insert(part.name.as_str(), (entity, id));
     }
     let root = rig
         .parts
@@ -342,8 +351,8 @@ fn spawn_human(
     commands.entity(owner).insert(living::Human {
         awake: !rig.poses.is_empty(),
         pose: 0,
-        root: entities[root.name.as_str()],
-        brain: entities[brain.name.as_str()],
+        root: entities[root.name.as_str()].0,
+        brain: entities[brain.name.as_str()].0,
         grounded: false,
         connected: Default::default(),
     });
@@ -355,20 +364,25 @@ fn spawn_human(
             .unwrap();
         let parent = rig.parts.iter().find(|part| part.name == joint.b).unwrap();
         let reference = parent.angle - rig.parts[definition].angle;
-        let mut hinge = RevoluteJoint::new(entities[joint.a.as_str()], entities[joint.b.as_str()])
-            .with_local_anchor1(Vec2::from_array(joint.anchor_a))
-            .with_local_anchor2(Vec2::from_array(joint.anchor_b));
+        let (a, b) = (entities[joint.a.as_str()], entities[joint.b.as_str()]);
         // Native FetchBodyA is attached; FetchBodyB is connected. Both solvers measure B minus A.
-        if let Some([min, max]) = joint.radians_limits() {
-            hinge = hinge.with_angle_limits(min + reference, max + reference);
-        }
-        let mut velocity_motor = motor::VelocityMotor::default();
-        velocity_motor.reference_angle = reference;
+        let [lower_angle, upper_angle] = joint.radians_limits().unwrap_or([0.0; 2]);
+        let def = RevoluteDef {
+            local_anchor_a: physics::v(Vec2::from_array(joint.anchor_a)),
+            local_anchor_b: physics::v(Vec2::from_array(joint.anchor_b)),
+            reference_angle: reference,
+            enable_limit: joint.radians_limits().is_some(),
+            lower_angle,
+            upper_angle,
+            ..RevoluteDef::default()
+        };
         commands.spawn((
             SandboxObject,
-            hinge,
-            JointCollisionDisabled,
-            velocity_motor,
+            Hinge {
+                joint: physics.world.create_joint(def, a.1, b.1, false),
+                body_a: a.0,
+                body_b: b.0,
+            },
             living::MuscleJoint {
                 owner,
                 definition,
@@ -378,23 +392,29 @@ fn spawn_human(
     }
 }
 
-fn spawn_box(commands: &mut Commands, point: Vec2) {
+fn spawn_box(commands: &mut Commands, physics: &mut Physics, point: Vec2) {
+    let shape = BoxShape {
+        offset: [0.0; 2],
+        size: [0.5; 2],
+    };
+    let id = physics.world.create_body(&BodyDef {
+        kind: BodyType::Dynamic,
+        position: physics::v(point),
+        ..BodyDef::default()
+    });
+    physics.world.create_fixture(
+        id,
+        &physics::box_fixture(&shape, 0.6, 0.0, Filter::default()),
+        true,
+    );
     commands.spawn((
         SandboxObject,
         Name::new("Test crate"),
-        RigidBody::Dynamic,
-        Collider::rectangle(0.5, 0.5),
-        Mass(1.0),
-        Friction::new(0.6),
-        CollisionLayers::from_bits(1, u32::MAX),
-        Position(point),
+        Body(id),
         Transform::from_translation(point.extend(0.2)),
         Sprite::from_color(Color::srgb(0.63, 0.4, 0.22), Vec2::splat(0.5)),
         Grabbable {
-            shapes: vec![BoxShape {
-                offset: [0.0; 2],
-                size: [0.5; 2],
-            }],
+            shapes: vec![shape],
             mass: 1.0,
             order: 0.2,
         },
@@ -448,7 +468,7 @@ fn controls(
     objects: Query<Entity, With<SandboxObject>>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
     mut clear: ResMut<ClearColor>,
-    mut physics: ResMut<Time<Physics>>,
+    mut physics: ResMut<Physics>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if keys.just_pressed(KeyCode::Escape) || (session.overlay && desktop::key_down(0x1b)) {
@@ -478,11 +498,7 @@ fn controls(
     }
     if keys.just_pressed(KeyCode::Space) {
         session.paused = !session.paused;
-        if session.paused {
-            physics.pause();
-        } else {
-            physics.unpause();
-        }
+        physics.paused = session.paused;
     }
     if keys.just_pressed(KeyCode::KeyR) {
         for entity in &objects {
@@ -495,21 +511,29 @@ fn controls(
             &assets,
             &rig,
             &mut session,
+            &mut physics,
             Vec2::new(0.0, 0.6),
         );
-        spawn_box(&mut commands, Vec2::new(1.3, -1.7));
+        spawn_box(&mut commands, &mut physics, Vec2::new(1.3, -1.7));
     } else if let Some(point) = pointer.world {
         if keys.just_pressed(KeyCode::KeyN) {
-            spawn_human(&mut commands, &assets, &rig, &mut session, point);
+            spawn_human(
+                &mut commands,
+                &assets,
+                &rig,
+                &mut session,
+                &mut physics,
+                point,
+            );
         }
         if keys.just_pressed(KeyCode::KeyB) {
-            spawn_box(&mut commands, point);
+            spawn_box(&mut commands, &mut physics, point);
         }
     }
 }
 
-fn contains(point: Vec2, position: Vec2, rotation: Rotation, shapes: &[BoxShape]) -> bool {
-    let local = rotation.inverse() * (point - position);
+fn contains(point: Vec2, position: Vec2, angle: f32, shapes: &[BoxShape]) -> bool {
+    let local = Vec2::from_angle(-angle).rotate(point - position);
     shapes.iter().any(|s| {
         ((local - Vec2::from_array(s.offset)).abs() - Vec2::from_array(s.size) * 0.5).max_element()
             <= 0.025
@@ -521,8 +545,9 @@ fn mouse_actions(
     pointer: Res<Pointer>,
     mut drag: ResMut<Drag>,
     session: Res<Session>,
-    bodies: Query<(Entity, &Position, &Rotation, &Grabbable)>,
-    joints: Query<(Entity, &RevoluteJoint)>,
+    bodies: Query<(Entity, &Body, &Grabbable)>,
+    joints: Query<(Entity, &Hinge)>,
+    physics: Res<Physics>,
     mut window: Single<&mut CursorOptions, With<PrimaryWindow>>,
     keys: Res<ButtonInput<KeyCode>>,
     rig: Res<HumanRig>,
@@ -532,26 +557,27 @@ fn mouse_actions(
     let hovered = pointer.world.and_then(|point| {
         bodies
             .iter()
-            .filter(|(_, p, r, g)| contains(point, p.0, **r, &g.shapes))
-            .max_by(|a, b| a.3.order.total_cmp(&b.3.order))
+            .map(|(entity, body, g)| (entity, physics.pose(body), g))
+            .filter(|(_, (p, a), g)| contains(point, *p, *a, &g.shapes))
+            .max_by(|a, b| a.2.order.total_cmp(&b.2.order))
     });
     if pointer.left_pressed
-        && let Some((entity, position, rotation, _)) = hovered
+        && let Some((entity, (position, angle), _)) = hovered
     {
         drag.body = Some(entity);
-        drag.local_anchor = rotation.inverse() * (pointer.world.unwrap() - position.0);
+        drag.local_anchor = Vec2::from_angle(-angle).rotate(pointer.world.unwrap() - position);
     }
     if !pointer.left {
         drag.body = None;
     }
     if pointer.right_pressed
-        && let Some((body, _, _, _)) = hovered
+        && let Some((body, _, _)) = hovered
     {
-        if let Some((entity, _)) = joints.iter().find(|(_, j)| j.body1 == body) {
+        if let Some((entity, _)) = joints.iter().find(|(_, j)| j.body_a == body) {
             commands.entity(entity).despawn();
         }
     }
-    if let Some((body, _, _, _)) = hovered
+    if let Some((body, _, _)) = hovered
         && let Ok(limb) = limbs.get(body)
         && let Ok(mut human) = humans.get_mut(limb.owner)
     {
@@ -572,7 +598,8 @@ fn drag_body(
     pointer: Res<Pointer>,
     drag: Res<Drag>,
     session: Res<Session>,
-    mut bodies: Query<(&Position, &Rotation, &Grabbable, Forces)>,
+    mut physics: ResMut<Physics>,
+    bodies: Query<(&Body, &Grabbable)>,
 ) {
     if session.paused {
         return;
@@ -580,13 +607,15 @@ fn drag_body(
     let (Some(entity), Some(target)) = (drag.body, pointer.world) else {
         return;
     };
-    let Ok((position, rotation, grabbable, mut forces)) = bodies.get_mut(entity) else {
+    let Ok((body, grabbable)) = bodies.get(entity) else {
         return;
     };
-    let point = position.0 + *rotation * drag.local_anchor;
-    let acceleration =
-        ((target - point) * 180.0 - forces.velocity_at_point(point) * 20.0).clamp_length_max(350.0);
-    forces.apply_force_at_point(acceleration * grabbable.mass, point);
+    let body = physics.world.body_mut(body.0);
+    let point = body.xf.apply(physics::v(drag.local_anchor));
+    let velocity = physics::bevy(body.velocity_at(point));
+    let acceleration = ((target - physics::bevy(point)) * 180.0 - velocity * 20.0)
+        .clamp_length_max(350.0);
+    body.apply_force(physics::v(acceleration * grabbable.mass), point);
 }
 
 fn presentation(
@@ -594,20 +623,24 @@ fn presentation(
     drag: Res<Drag>,
     pointer: Res<Pointer>,
     window: Single<(&Window, &RawHandleWrapper), With<PrimaryWindow>>,
-    mut floor: Single<(&mut Position, &mut Sprite, &mut Collider), With<Floor>>,
+    mut floor: Single<(&mut Body, &mut Sprite), With<Floor>>,
+    mut physics: ResMut<Physics>,
     mut hud: Single<&mut Text, With<Hud>>,
-    bodies: Query<&Position, (With<Grabbable>, Without<Floor>)>,
+    bodies: Query<&Body, (With<Grabbable>, Without<Floor>)>,
     mut gizmos: Gizmos,
 ) {
     let (window, raw) = *window;
     desktop::non_activating(raw, session.overlay);
     let extent = Vec2::new(window.width(), window.height()) * WORLD_SCALE * 0.5;
     let floor_y = -extent.y + 0.1;
-    let (position, sprite, collider) = &mut *floor;
-    if position.0.y != floor_y || sprite.custom_size != Some(Vec2::new(extent.x * 2.0, 0.2)) {
-        position.0 = Vec2::new(0.0, floor_y);
+    let (body, sprite) = &mut *floor;
+    if physics.pose(body).0.y != floor_y
+        || sprite.custom_size != Some(Vec2::new(extent.x * 2.0, 0.2))
+    {
+        // A static body is rebuilt, not resized, so its hook-less id swap destroys the old one here.
+        physics.world.destroy_body(body.0);
+        **body = floor_body(&mut physics, floor_y, extent.x * 2.0);
         sprite.custom_size = Some(Vec2::new(extent.x * 2.0, 0.2));
-        **collider = Collider::rectangle(extent.x * 2.0, 0.2);
     }
     if !session.overlay {
         let color = Color::srgb(0.095, 0.11, 0.13);
@@ -627,9 +660,9 @@ fn presentation(
         }
     }
     if let (Some(entity), Some(target)) = (drag.body, pointer.world)
-        && let Ok(position) = bodies.get(entity)
+        && let Ok(body) = bodies.get(entity)
     {
-        gizmos.line_2d(position.0, target, Color::srgb(0.4, 0.85, 1.0));
+        gizmos.line_2d(physics.pose(body).0, target, Color::srgb(0.4, 0.85, 1.0));
     }
     hud.0 = format!(
         "PEOPLE PLAYGROUND / BEVY     {}     {}     {} bodies\nLMB: drag  RMB: detach  N: human  B: crate  M: limp  P: pose  Space: pause  R: reset  Esc: exit",
@@ -645,10 +678,10 @@ fn presentation(
 
 fn smoke_test(
     mut session: ResMut<Session>,
-    bodies: Query<(&Position, &Rotation, &LinearVelocity), With<Grabbable>>,
-    floor: Single<&Position, With<Floor>>,
-    joints: Query<&RevoluteJoint>,
-    physics: Res<Time<Physics>>,
+    bodies: Query<&Body, With<Grabbable>>,
+    floor: Single<&Body, With<Floor>>,
+    joints: Query<&Hinge>,
+    physics: Res<Physics>,
     images: Res<Assets<Image>>,
     rig: Res<HumanRig>,
     assets: Res<AssetServer>,
@@ -658,29 +691,25 @@ fn smoke_test(
         return;
     }
     session.frames += 1;
-    if session.frames < 240 || physics.elapsed_secs() < 4.0 {
+    if session.frames < 240 || physics.elapsed < 4.0 {
         return;
     }
     assert_eq!(bodies.iter().count(), rig.parts.len() + 1);
-    for (position, _, velocity) in &bodies {
+    let floor_y = physics.pose(&floor).0.y;
+    for body in &bodies {
+        let b = physics.world.body(body.0);
         assert!(
-            position.0.is_finite() && velocity.0.is_finite(),
+            physics::bevy(b.xf.p).is_finite() && physics::bevy(b.linear_velocity).is_finite(),
             "Physics produced non-finite values"
         );
-        assert!(
-            position.0.y > floor.0.y - 0.1,
-            "Body fell through the floor"
-        );
+        assert!(b.xf.p.y > floor_y - 0.1, "Body fell through the floor");
     }
     assert!(
-        bodies.iter().any(|(p, _, _)| p.0.y < floor.0.y + 0.5),
+        bodies.iter().any(|b| physics.pose(b).0.y < floor_y + 0.5),
         "No body reached the floor"
     );
     for joint in &joints {
-        let (a, ar, _) = bodies.get(joint.body1).unwrap();
-        let (b, br, _) = bodies.get(joint.body2).unwrap();
-        let anchor_a = a.0 + *ar * joint.local_anchor1().unwrap();
-        let anchor_b = b.0 + *br * joint.local_anchor2().unwrap();
+        let (anchor_a, anchor_b) = physics.anchors(joint).unwrap();
         assert!(
             anchor_a.distance(anchor_b) < 0.05,
             "Ragdoll joint separated"
@@ -710,8 +739,8 @@ mod tests {
             offset: [0.0; 2],
             size: [0.2, 1.0],
         }];
-        let rotation = Rotation::radians(std::f32::consts::FRAC_PI_2);
-        assert!(contains(Vec2::new(0.4, 0.0), Vec2::ZERO, rotation, &shape));
-        assert!(!contains(Vec2::new(0.0, 0.4), Vec2::ZERO, rotation, &shape));
+        let angle = std::f32::consts::FRAC_PI_2;
+        assert!(contains(Vec2::new(0.4, 0.0), Vec2::ZERO, angle, &shape));
+        assert!(!contains(Vec2::new(0.0, 0.4), Vec2::ZERO, angle, &shape));
     }
 }

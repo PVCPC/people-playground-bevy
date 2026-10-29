@@ -1,4 +1,5 @@
 use super::*;
+use b2::world::CONTACT_TOUCHING;
 use std::collections::HashSet;
 
 #[derive(Component)]
@@ -32,22 +33,24 @@ pub struct MuscleJoint {
 
 pub fn sense_humans(
     mut humans: Query<&mut Human>,
-    limbs: Query<(Entity, &Limb, &CollidingEntities)>,
-    joints: Query<&RevoluteJoint, With<MuscleJoint>>,
-    supports: Query<(), (With<Collider>, Without<Limb>)>,
+    limbs: Query<(Entity, &Body), With<Limb>>,
+    joints: Query<&Hinge, With<MuscleJoint>>,
+    physics: Res<Physics>,
 ) {
+    let world = &physics.world;
+    let limb_bodies: HashSet<_> = limbs.iter().map(|(_, body)| body.0).collect();
     for mut human in &mut humans {
         human.connected.clear();
         let root = human.root;
         human.connected.insert(root);
         loop {
             let old_len = human.connected.len();
-            for joint in &joints {
-                if human.connected.contains(&joint.body1) {
-                    human.connected.insert(joint.body2);
+            for joint in joints.iter().filter(|j| world.joints[j.joint].is_some()) {
+                if human.connected.contains(&joint.body_a) {
+                    human.connected.insert(joint.body_b);
                 }
-                if human.connected.contains(&joint.body2) {
-                    human.connected.insert(joint.body1);
+                if human.connected.contains(&joint.body_b) {
+                    human.connected.insert(joint.body_a);
                 }
             }
             if human.connected.len() == old_len {
@@ -55,9 +58,12 @@ pub fn sense_humans(
             }
         }
         // shortcut: contact membership approximates support; use upward normals as obstacle geometry expands.
-        human.grounded = limbs.iter().any(|(entity, _, contacts)| {
+        human.grounded = limbs.iter().any(|(entity, body)| {
             human.connected.contains(&entity)
-                && contacts.iter().any(|other| supports.contains(*other))
+                && world.body(body.0).contacts.iter().any(|&(other, contact)| {
+                    !limb_bodies.contains(&other)
+                        && world.contact(contact).flags & CONTACT_TOUCHING != 0
+                })
         });
     }
 }
@@ -71,15 +77,21 @@ pub fn drive_muscles(
     rig: Res<HumanRig>,
     session: Res<Session>,
     humans: Query<&Human>,
-    mut joints: Query<(&RevoluteJoint, &mut MuscleJoint, &mut motor::VelocityMotor)>,
-    rotations_and_masses: Query<(&Rotation, &Mass)>,
-    mut bodies: Query<(Entity, &Limb, &Rotation, Forces)>,
+    mut joints: Query<(&Hinge, &mut MuscleJoint)>,
+    bodies: Query<(Entity, &Limb, &Body)>,
+    mut physics: ResMut<Physics>,
 ) {
     if session.paused {
         return;
     }
-    for (joint, mut muscle, mut motor) in &mut joints {
-        motor.enabled = false;
+    let world = &mut physics.world;
+    for (hinge, mut muscle) in &mut joints {
+        let Some(joint) = world.joints[hinge.joint].as_mut() else {
+            continue;
+        };
+        joint.revolute.def.enable_motor = false;
+        let (body_a, body_b) = (joint.body_a, joint.body_b);
+        let reference_angle = joint.revolute.def.reference_angle;
         let human = humans.get(muscle.owner).unwrap();
         let Some(pose) = rig.poses.get(human.pose) else {
             continue;
@@ -88,27 +100,22 @@ pub fn drive_muscles(
         let Some(spec) = &part.muscle else {
             continue;
         };
-        if !human.capable(joint.body1) || !human.capable(joint.body2) {
+        if !human.capable(hinge.body_a) || !human.capable(hinge.body_b) {
             continue;
         }
         let target = pose.angles.iter().find(|angle| angle.part == part.name);
-        let (child, mass) = rotations_and_masses.get(joint.body1).unwrap();
-        let (parent, _) = rotations_and_masses.get(joint.body2).unwrap();
+        let (child, mass) = (world.body(body_a).sweep.a, world.body(body_a).mass);
+        let parent = world.body(body_b).sweep.a;
         let output = motor::command(&motor::MotorInput {
-            current_angle: hinge::joint_angle(
-                child.as_radians(),
-                parent.as_radians(),
-                motor.reference_angle,
-            )
-            .to_degrees(),
-            reference_angle: motor.reference_angle.to_degrees(),
+            current_angle: hinge::joint_angle(child, parent, reference_angle).to_degrees(),
+            reference_angle: reference_angle.to_degrees(),
             target_angle: target.map_or(0.0, |t| t.degrees()),
             previous_speed: muscle.previous_speed,
             rigidity: pose.rigidity,
             rigidity_modifier: target.map_or(0.0, |t| t.rigidity_modifier),
             global_rigidity: 1.0,
             angle_offset: 1.0,
-            mass: mass.0,
+            mass,
             initial_mass: part.mass,
             base_strength: spec.strength,
             force_multiplier: pose.force_multiplier,
@@ -117,11 +124,12 @@ pub fn drive_muscles(
         })
         .clamp_native_properties();
         muscle.previous_speed = output.speed;
-        motor.enabled = output.torque > 0.0;
-        motor.target_velocity = output.speed.to_radians();
-        motor.max_torque = output.torque;
+        let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute.def;
+        def.enable_motor = output.torque > 0.0;
+        def.motor_speed = output.speed.to_radians();
+        def.max_motor_torque = output.torque;
     }
-    for (entity, limb, rotation, mut forces) in &mut bodies {
+    for (entity, limb, body) in &bodies {
         let human = humans.get(limb.owner).unwrap();
         let Some(pose) = rig.poses.get(human.pose) else {
             continue;
@@ -132,7 +140,8 @@ pub fn drive_muscles(
         if !human.capable(entity) || !human.grounded || !pose.stand_upright {
             continue;
         }
-        let angle = angle_error(rotation.as_radians(), 0.0);
+        let body = world.body_mut(body.0);
+        let angle = angle_error(body.sweep.a, 0.0);
         if spec.upright_force > 0.001 && angle.cos() >= 0.0 {
             let torque = angle.to_degrees()
                 * spec.upright_force
@@ -141,10 +150,10 @@ pub fn drive_muscles(
                 * pose.force_multiplier
                 * 1.8
                 * pose.upright_multiplier;
-            forces.apply_torque(torque);
+            body.apply_torque(torque);
         }
-        *forces.angular_velocity_mut() *= 1.0 - 0.08 * pose.drag_influence;
-        *forces.linear_velocity_mut() *= 1.0 - 0.06 * pose.drag_influence;
+        body.angular_velocity *= 1.0 - 0.08 * pose.drag_influence;
+        body.linear_velocity = body.linear_velocity * (1.0 - 0.06 * pose.drag_influence);
     }
 }
 
