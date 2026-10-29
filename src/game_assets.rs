@@ -40,6 +40,33 @@ pub struct Part {
     pub size: [f32; 2],
     pub pivot: [f32; 2],
     pub layer: i32,
+    #[serde(default)]
+    pub muscle: Option<MuscleSpec>,
+}
+
+#[derive(Deserialize)]
+pub struct MuscleSpec {
+    pub strength: f32,
+    pub upright_force: f32,
+    pub has_brain: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PoseAngle {
+    pub part: String,
+    pub angle: f32,
+    pub rigidity_modifier: f32,
+}
+
+#[derive(Deserialize)]
+pub struct HumanPose {
+    pub name: String,
+    pub rigidity: f32,
+    pub force_multiplier: f32,
+    pub stand_upright: bool,
+    pub upright_multiplier: f32,
+    pub drag_influence: f32,
+    pub angles: Vec<PoseAngle>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +83,8 @@ pub struct HumanRig {
     pub source_files: Vec<SourceFile>,
     pub parts: Vec<Part>,
     pub joints: Vec<Joint>,
+    #[serde(default)]
+    pub poses: Vec<HumanPose>,
 }
 
 fn is_relative_file(path: &Path) -> bool {
@@ -144,6 +173,41 @@ impl HumanRig {
                     return Err(format!("Invalid collider: {}", p.name));
                 }
             }
+            if let Some(muscle) = &p.muscle
+                && (!muscle.strength.is_finite()
+                    || muscle.strength < 0.0
+                    || !muscle.upright_force.is_finite()
+                    || muscle.upright_force < 0.0)
+            {
+                return Err(format!("Invalid muscle settings: {}", p.name));
+            }
+        }
+        for pose in &self.poses {
+            if ![
+                pose.rigidity,
+                pose.force_multiplier,
+                pose.upright_multiplier,
+                pose.drag_influence,
+            ]
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0)
+                || pose.drag_influence > 1.0
+            {
+                return Err(format!("Invalid pose settings: {}", pose.name));
+            }
+            let mut posed = HashSet::new();
+            for angle in &pose.angles {
+                if !names.contains(angle.part.as_str())
+                    || !posed.insert(angle.part.as_str())
+                    || !angle.angle.is_finite()
+                    || !angle.rigidity_modifier.is_finite()
+                {
+                    return Err(format!("Invalid limb target in pose: {}", pose.name));
+                }
+            }
+        }
+        if !self.poses.is_empty() && self.parts.iter().any(|p| p.muscle.is_none()) {
+            return Err("Pose cache is missing muscle settings; prepare a fresh cache".into());
         }
         for j in &self.joints {
             if j.a == j.b
@@ -155,6 +219,30 @@ impl HumanRig {
             {
                 return Err("Invalid human joint".into());
             }
+        }
+        let child_names: HashSet<_> = self.joints.iter().map(|j| j.a.as_str()).collect();
+        if self.joints.len() + 1 != self.parts.len() || child_names.len() != self.joints.len() {
+            return Err("Human joints must form a single body tree".into());
+        }
+        let root = self
+            .parts
+            .iter()
+            .find(|p| !child_names.contains(p.name.as_str()))
+            .ok_or("Human has no root body")?;
+        let mut reached = HashSet::from([root.name.as_str()]);
+        loop {
+            let previous = reached.len();
+            for j in &self.joints {
+                if reached.contains(j.b.as_str()) {
+                    reached.insert(j.a.as_str());
+                }
+            }
+            if reached.len() == previous {
+                break;
+            }
+        }
+        if reached.len() != self.parts.len() {
+            return Err("Human joint graph is disconnected or cyclic".into());
         }
         Ok(())
     }
@@ -205,6 +293,54 @@ pub fn find_game(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_rig() -> HumanRig {
+        let part = serde_json::json!({"name":"A","position":[0,0],"angle":0,"mass":1,
+            "linear_drag":0,"angular_drag":0,"colliders":[{"offset":[0,0],"size":[1,1]}],
+            "texture":"test.png","rect":[0,0,1,1],"size":[1,1],"pivot":[0.5,0.5],"layer":0});
+        let mut second = part.clone();
+        second["name"] = "B".into();
+        serde_json::from_value(serde_json::json!({"source_files":[],"parts":[part, second],
+            "joints":[{"a":"B","b":"A","anchor_a":[0,0],"anchor_b":[0,0],"limits":null}]}))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_caches_remain_valid_and_unsafe_joint_graphs_are_rejected() {
+        let mut rig = test_rig();
+        assert!(rig.validate().is_ok());
+        rig.joints[0].a = "A".into();
+        rig.joints[0].b = "A".into();
+        assert!(rig.validate().is_err());
+        let mut rig = test_rig();
+        rig.joints.clear();
+        assert!(rig.validate().is_err());
+        let mut rig = test_rig();
+        let mut third = test_rig().parts.pop().unwrap();
+        third.name = "C".into();
+        rig.parts.push(third);
+        rig.joints[0].a = "A".into();
+        rig.joints[0].b = "B".into();
+        rig.joints.push(Joint {
+            a: "B".into(),
+            b: "A".into(),
+            anchor_a: [0.0; 2],
+            anchor_b: [0.0; 2],
+            limits: None,
+        });
+        assert!(rig.validate().is_err());
+    }
+
+    #[test]
+    fn invalid_muscle_values_do_not_reach_the_physics_engine() {
+        let mut rig = test_rig();
+        rig.parts[0].muscle = Some(MuscleSpec {
+            strength: f32::INFINITY,
+            upright_force: 0.0,
+            has_brain: true,
+        });
+        assert!(rig.validate().is_err());
+    }
+
     #[test]
     fn cache_paths_cannot_escape_the_cache() {
         assert!(is_relative_file(Path::new("skin.png")));

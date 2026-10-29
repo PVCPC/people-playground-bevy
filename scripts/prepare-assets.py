@@ -31,6 +31,40 @@ def source_stamp(game, relative):
     return {"path": relative, "bytes": stat.st_size, "modified_ns": stat.st_mtime_ns}
 
 
+def muscle_settings(components):
+    limb = next((data for kind, data in components
+                 if kind == "MonoBehaviour" and "BaseStrength" in data), None)
+    if limb is None:
+        raise ValueError("Human body has no limb strength settings")
+    strength = float(limb["BaseStrength"])
+    for multiplier in limb.get("StrengthMultipliers", []):
+        strength *= float(multiplier)
+    return {"strength": strength, "upright_force": float(limb["FakeUprightForce"]),
+            "has_brain": bool(limb["HasBrain"])}
+
+
+def static_poses(objects):
+    person = next(data for kind, data in objects.values()
+                  if kind == "MonoBehaviour" and "Poses" in data)
+    result = []
+    for pose in person["Poses"]:
+        if pose["Name"] not in ("Rest", "Sitting", "Flat"):
+            continue
+        if any(angle["Animated"] for angle in pose["Angles"]):
+            raise ValueError("Selected static pose contains animation")
+        result.append({"name": pose["Name"], "rigidity": float(pose["Rigidity"]),
+                       "force_multiplier": float(pose["ForceMultiplier"]),
+                       "stand_upright": bool(pose["ShouldStandUpright"]),
+                       "upright_multiplier": float(pose["UprightForceMultiplier"]),
+                       "drag_influence": float(pose["DragInfluence"]),
+                       "angles": [{"part": angle["Name"], "angle": math.radians(angle["Angle"]),
+                                   "rigidity_modifier": float(angle["PoseRigidityModifier"])}
+                                  for angle in pose["Angles"]]})
+    if not result or result[0]["name"] != "Rest":
+        raise ValueError("Human prefab has no default rest pose")
+    return result
+
+
 def prepare(game, exported, output, write):
     required = ["People Playground.exe", "People Playground_Data/Managed/Assembly-CSharp.dll",
                 "People Playground_Data/resources.assets", "People Playground_Data/sharedassets0.assets"]
@@ -103,7 +137,8 @@ def prepare(game, exported, output, write):
                       "angular_drag": float(body["m_AngularDrag"]), "colliders": colliders,
                       "texture": texture_guid + ".png", "rect": [x, height-y-h, w, h],
                       "size": [w/sprite["m_PixelsToUnits"], h/sprite["m_PixelsToUnits"]],
-                      "pivot": xy(sprite["m_Pivot"]), "layer": renderer["m_SortingOrder"]})
+                      "pivot": xy(sprite["m_Pivot"]), "layer": renderer["m_SortingOrder"],
+                      "muscle": muscle_settings(components)})
         for kind, data in components:
             if kind != "HingeJoint2D":
                 continue
@@ -115,7 +150,7 @@ def prepare(game, exported, output, write):
     if len({p["name"] for p in parts}) != len(parts) or len(joints) != len(parts) - 1:
         raise ValueError("Human rig is not a single named body tree")
     stamps = [source_stamp(game, p) for p in required]
-    rig = {"source_files": stamps, "parts": parts, "joints": joints}
+    rig = {"source_files": stamps, "parts": parts, "joints": joints, "poses": static_poses(objects)}
     print(json.dumps({"preview": not write, "bodies": len(parts), "joints": len(joints),
                       "textures": list(textures), "destination": str(output)}))
     if write:

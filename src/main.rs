@@ -1,6 +1,7 @@
 mod desktop;
 mod game_assets;
 mod headless;
+mod living;
 
 use avian2d::prelude::*;
 use bevy::{
@@ -91,6 +92,9 @@ fn run() -> Result<(), String> {
         rig.parts.len(),
         rig.joints.len()
     );
+    if rig.poses.is_empty() {
+        println!("This cache has no muscles or poses; prepare a fresh cache to enable them.");
+    }
     if headless {
         return headless::test(rig, cache);
     }
@@ -140,7 +144,10 @@ fn run() -> Result<(), String> {
             )
                 .chain(),
         )
-        .add_systems(FixedUpdate, drag_body)
+        .add_systems(
+            FixedUpdate,
+            (living::sense_humans, living::drive_muscles, drag_body).chain(),
+        )
         .run();
     Ok(())
 }
@@ -208,8 +215,9 @@ fn spawn_human(
     }
     let group = 1u32 << (session.humans + 2);
     session.humans += 1;
+    let owner = commands.spawn(SandboxObject).id();
     let mut entities = HashMap::new();
-    for part in &rig.parts {
+    for (definition, part) in rig.parts.iter().enumerate() {
         let [x, y, w, h] = part.rect;
         let order = part.layer as f32 * 0.01
             + if part.name.ends_with("Front") {
@@ -258,8 +266,30 @@ fn spawn_human(
                 },
             ))
             .id();
+        commands.entity(entity).insert((
+            living::Limb { owner, definition },
+            CollidingEntities::default(),
+        ));
         entities.insert(part.name.as_str(), entity);
     }
+    let root = rig
+        .parts
+        .iter()
+        .find(|part| !rig.joints.iter().any(|joint| joint.a == part.name))
+        .unwrap();
+    let brain = rig
+        .parts
+        .iter()
+        .find(|part| part.muscle.as_ref().is_some_and(|m| m.has_brain))
+        .unwrap_or(root);
+    commands.entity(owner).insert(living::Human {
+        awake: !rig.poses.is_empty(),
+        pose: 0,
+        root: entities[root.name.as_str()],
+        brain: entities[brain.name.as_str()],
+        grounded: false,
+        connected: Default::default(),
+    });
     for joint in &rig.joints {
         let mut hinge = RevoluteJoint::new(entities[joint.a.as_str()], entities[joint.b.as_str()])
             .with_local_anchor1(Vec2::from_array(joint.anchor_a))
@@ -268,8 +298,22 @@ fn spawn_human(
         if let Some([min, max]) = joint.limits {
             hinge = hinge.with_angle_limits(-max, -min);
         }
-        // shortcut: passive ragdoll, add the original muscle/pose controller before claiming living-human parity.
-        commands.spawn((SandboxObject, hinge, JointCollisionDisabled));
+        let definition = rig
+            .parts
+            .iter()
+            .position(|part| part.name == joint.a)
+            .unwrap();
+        let parent = rig.parts.iter().find(|part| part.name == joint.b).unwrap();
+        commands.spawn((
+            SandboxObject,
+            hinge,
+            JointCollisionDisabled,
+            living::MuscleJoint {
+                owner,
+                definition,
+                reference_angle: parent.angle - rig.parts[definition].angle,
+            },
+        ));
     }
 }
 
@@ -419,6 +463,10 @@ fn mouse_actions(
     bodies: Query<(Entity, &Position, &Rotation, &Grabbable)>,
     joints: Query<(Entity, &RevoluteJoint)>,
     mut window: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    rig: Res<HumanRig>,
+    limbs: Query<&living::Limb>,
+    mut humans: Query<&mut living::Human>,
 ) {
     let hovered = pointer.world.and_then(|point| {
         bodies
@@ -440,6 +488,17 @@ fn mouse_actions(
     {
         if let Some((entity, _)) = joints.iter().find(|(_, j)| j.body1 == body) {
             commands.entity(entity).despawn();
+        }
+    }
+    if let Some((body, _, _, _)) = hovered
+        && let Ok(limb) = limbs.get(body)
+        && let Ok(mut human) = humans.get_mut(limb.owner)
+    {
+        if keys.just_pressed(KeyCode::KeyM) {
+            human.awake = !human.awake;
+        }
+        if keys.just_pressed(KeyCode::KeyP) && !rig.poses.is_empty() {
+            human.pose = (human.pose + 1) % rig.poses.len();
         }
     }
     let toolbar = pointer
@@ -512,7 +571,7 @@ fn presentation(
         gizmos.line_2d(position.0, target, Color::srgb(0.4, 0.85, 1.0));
     }
     hud.0 = format!(
-        "PEOPLE PLAYGROUND / BEVY     {}     {}     {} bodies\nDrag: LMB   Detach: RMB   Human: N   Crate: B   Pause: Space   Reset: R   Desktop: F10   Exit: Esc",
+        "PEOPLE PLAYGROUND / BEVY     {}     {}     {} bodies\nLMB: drag  RMB: detach  N: human  B: crate  M: limp  P: pose  Space: pause  R: reset  Esc: exit",
         if session.overlay {
             "DESKTOP"
         } else {

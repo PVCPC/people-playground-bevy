@@ -18,6 +18,18 @@ class UnityDocumentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.documents("not a Unity export")
 
+    def test_muscle_settings_include_strength_modifiers(self):
+        components = [("MonoBehaviour", {"BaseStrength": 10, "StrengthMultipliers": [0.5],
+                                         "FakeUprightForce": 0.02, "HasBrain": 1})]
+        settings = module.muscle_settings(components)
+        self.assertEqual(settings["strength"], 5)
+        self.assertTrue(settings["has_brain"])
+
+    def test_animated_pose_is_not_silently_imported_as_static(self):
+        person = {"Poses": [{"Name": "Rest", "Angles": [{"Animated": 1}]}]}
+        with self.assertRaises(ValueError):
+            module.static_poses({1: ("MonoBehaviour", person)})
+
 
 if __name__ == "__main__":
     unittest.main()

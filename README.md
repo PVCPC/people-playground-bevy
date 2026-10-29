@@ -6,15 +6,17 @@ Requires your own installed copy of People Playground. Original assets, extracte
 
 ## Current behavior
 
-- A passive human ragdoll imported from the installed game's prefab: 14 bodies and 13 joints.
+- A human ragdoll imported from the installed game's prefab: 14 bodies and 13 joints.
 - Original skin texture, sprite rectangles, pivots, masses, damping, collider boxes, anchors, and joint limits loaded from a private local cache.
 - Mouse dragging and throwing, manual joint detachment, human/crate spawning, pause, and reset.
+- Healthy-muscle control with imported Rest, Sitting, and Flat pose targets and strength settings; upright support while grounded.
+- A limp toggle and joint-connectivity checks that disable muscles on disconnected limbs or after brain disconnection.
 - Installation and cache-fingerprint checks at startup.
 - Headless engine tests with no window or desktop control.
 
 Bevy 0.20 handles rendering and Avian 0.8 handles physics. The simulation uses a 50 Hz fixed update with 10 physics substeps. Unity/Box2D and Avian do not produce equivalent trajectories by assumption; behavioral parity remains unverified.
 
-Muscle control, living physiology, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
+Living physiology, injury-dependent strength, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The muscle servo uses Avian's implicit spring-damper model with imported torque limits; its response has not been matched to the original game's motor solver. Pose tracking can be obstructed by floor contact. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
 
 ## Requirements
 
@@ -47,6 +49,8 @@ Muscle control, living physiology, wounds and blood, heat and electricity, the o
 
 The importer resolves the prefab's sprite and texture references and writes `local-cache/`. It refuses to overwrite an existing cache. After a game update, export again and select a fresh directory with `--output`; pass that directory to the app with `--cache`.
 
+Caches prepared before muscle support still load as passive ragdolls. Prepare a fresh cache to import muscle settings and poses.
+
 Generated assets, exports, recovered source, binaries, and caches must stay out of Git. The included `.gitignore` excludes them.
 
 ## Run
@@ -69,6 +73,8 @@ cargo run -- --game-dir "F:\SteamLibrary\steamapps\common\People Playground"
 | Right mouse | Detach the selected limb's joint |
 | N | Spawn a human at the cursor |
 | B | Spawn a prototype crate |
+| M, while hovering a human | Toggle that human's muscles / limp state |
+| P, while hovering a human | Cycle Rest, Sitting, and Flat poses |
 | Space | Pause or resume |
 | R | Reset the sandbox |
 | Escape | Exit |
@@ -83,6 +89,6 @@ cargo test
 cargo run -- --headless-test
 ```
 
-The headless test requires a local game installation and prepared cache. It simulates settling, dragging, and release under gravity. It checks body/joint counts, finite physics values, floor containment, joint anchor gaps, and synchronization between physics and render transforms. It creates no window or renderer.
+The headless test requires a local game installation and prepared cache. It simulates passive settling, dragging, and release under gravity, checking body/joint counts, finite physics, floor containment, joint anchor gaps, and render-transform synchronization. With a muscle-enabled cache it also checks upright rest, limp collapse, all sitting-pose motors in free space, limb/brain disconnection, and independence between two humans. It creates no window or renderer.
 
 An optional `--smoke-test` opens a rendered window and checks the original texture, floor collisions, and joints over at least four seconds of simulation. Run that only when explicitly desired.
