@@ -670,6 +670,89 @@ fn compare_perlin(executable: &std::path::Path) -> Result<(), String> {
     report("Mathf.PerlinNoise", mismatches, inputs.len(), first)
 }
 
+const CURVE_EVALUATE: u32 = 0x746eb0;
+
+/// AnimationCurveTpl<float>::Evaluate on random curves and wrap modes (incl. infinite slopes and repeated key
+/// times), one cache carried through each curve's evaluation sequence; compares the result and the cache it leaves.
+fn compare_curve(executable: &std::path::Path) -> Result<(), String> {
+    use crate::game_assets::{CLAMP, Curve, CurveCache, PING_PONG, REPEAT, ping_pong, repeat};
+    let mut random = Random(0x5eed_c0e5);
+    let (mut calls, mut expected) = (vec![], vec![]);
+    for c in 0..600 {
+        let n = 1 + c % 6;
+        let mut time = random.range(-3.0, 3.0);
+        let keys: Vec<[f32; 4]> = (0..n)
+            .map(|_| {
+                let slope = |r: &mut Random| if r.next() % 23 == 0 { f32::INFINITY } else { r.range(-4.0, 4.0) };
+                let key = [time, random.range(-2.0, 2.0), slope(&mut random), slope(&mut random)];
+                time += if random.next() % 9 == 0 { 0.0 } else { random.range(1e-5, 2.0) };
+                key
+            })
+            .collect();
+        let curve = Curve { keys, pre: (random.next() % 4) as i32, post: (random.next() % 4) as i32 };
+        let (first, last) = (curve.keys[0][0], curve.keys[n - 1][0]);
+        let mut keys = vec![0; n * 0x1c];
+        for (i, k) in curve.keys.iter().enumerate() {
+            for (j, v) in k.iter().enumerate() {
+                put(&mut keys, i * 0x1c + j * 4, v.to_bits());
+            }
+        }
+        let mut cache = CurveCache::default();
+        let mut t = first;
+        for e in 0..24 {
+            t = match e % 4 {
+                0 => random.range(first - 3.0 * (last - first) - 1.0, last + 3.0 * (last - first) + 1.0),
+                1 => t + random.range(-0.05, 0.05),
+                2 => curve.keys[random.next() as usize % n][0],
+                _ => random.range(first, last),
+            };
+            // Skip times whose wrap rounds below the first key: the engine reads in front of its key array there.
+            let mode = if t < first { curve.pre } else { curve.post };
+            if (t < first || t > last) && mode != CLAMP && !(t > last && mode == REPEAT) {
+                let w = if mode == PING_PONG { ping_pong(t, first, last) } else { repeat(t, first, last) };
+                if w < first {
+                    continue;
+                }
+            }
+            let mut object = vec![0; 0x68];
+            put(&mut object, 0, cache.index as u32);
+            put(&mut object, 4, cache.time.to_bits());
+            put(&mut object, 8, cache.time_end.to_bits());
+            for (i, v) in cache.coeff.iter().enumerate() {
+                put(&mut object, 0xc + i * 4, v.to_bits());
+            }
+            put(&mut object, 0x20, f32::INFINITY.to_bits());
+            put(&mut object, 0x48, n as u32);
+            put(&mut object, 0x50, n as u32);
+            put(&mut object, 0x58, curve.pre as u32);
+            put(&mut object, 0x5c, curve.post as u32);
+            let mut call = call(CURVE_EVALUATE, vec![object, keys.clone()], &["b0", &format!("f{}", t.to_bits()), "i0"]);
+            call.returns_float = true;
+            call.links = vec![[0, 0x38, 1, 0]];
+            calls.push(call);
+            let value = curve.evaluate(&mut cache, t);
+            expected.push((c, t, value, cache));
+        }
+    }
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, expected.len())?;
+    let mut first = None;
+    let mismatches = expected
+        .iter()
+        .zip(&replies)
+        .filter(|((c, t, value, cache), r)| {
+            let b = unhex(&r.buffers[0]);
+            let engine = [get(&b, 0), get(&b, 4), get(&b, 8), get(&b, 0xc), get(&b, 0x10), get(&b, 0x14), get(&b, 0x18)];
+            let ours = [cache.index as u32, cache.time.to_bits(), cache.time_end.to_bits(), cache.coeff[0].to_bits(), cache.coeff[1].to_bits(), cache.coeff[2].to_bits(), cache.coeff[3].to_bits()];
+            let bad = value.to_bits() != r.ret_f || engine != ours;
+            if bad && first.is_none() {
+                first = Some(format!("curve {c} Evaluate({t}): engine {:08x} cache {engine:08x?}, rewrite {:08x} cache {ours:08x?}", r.ret_f, value.to_bits()));
+            }
+            bad
+        })
+        .count();
+    report("AnimationCurve.Evaluate", mismatches, expected.len(), first)
+}
+
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
     compare_manifolds(executable)?;
@@ -680,7 +763,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_island_solve(executable, false)?;
     compare_island_solve(executable, true)?;
     compare_revolute(executable)?;
-    compare_perlin(executable)
+    compare_perlin(executable)?;
+    compare_curve(executable)
 }
 
 fn sweep_bytes(b: &mut [u8], offset: usize, sweep: &Sweep) {

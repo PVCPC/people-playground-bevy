@@ -1,7 +1,7 @@
 //! PersonBehaviour / LimbBehaviour muscle logic (decompiled Assembly-CSharp), healthy subset.
 use super::*;
 use b2::world::CONTACT_TOUCHING;
-use game_assets::{HumanPose, MuscleSpec, STUMBLING};
+use game_assets::{CurveCache, HumanPose, MuscleSpec, STUMBLING};
 use motor::delta_angle;
 use std::collections::HashSet;
 
@@ -65,6 +65,21 @@ pub struct MuscleJoint {
     pub definition: usize,
     pub previous_speed: f32,
     pub stumble_time: f32,
+    /// This person's AnimationCurve caches for the limb's pose angles, by pose index.
+    pub curves: Vec<CurveCache>,
+}
+
+impl MuscleJoint {
+    pub fn new(owner: Entity, definition: usize) -> Self {
+        Self { owner, definition, previous_speed: 0.0, stumble_time: 0.0, curves: vec![] }
+    }
+
+    fn curve(&mut self, pose: usize) -> &mut CurveCache {
+        if self.curves.len() <= pose {
+            self.curves.resize(pose + 1, CurveCache::default());
+        }
+        &mut self.curves[pose]
+    }
 }
 
 /// Everything one LimbBehaviour.ManagedFixedUpdate reads for its muscle.
@@ -72,7 +87,8 @@ pub struct LimbInput<'a> {
     pub spec: &'a MuscleSpec,
     pub part: &'a str,
     pub pose: &'a HumanPose,
-    pub stumbling: Option<&'a HumanPose>,
+    pub pose_index: usize,
+    pub stumbling: Option<(usize, &'a HumanPose)>,
     pub person: PersonState,
     pub limb: LimbState,
     /// NodeBehaviour.IsConnectedToRoot (and the rewrite's limp toggle).
@@ -164,11 +180,12 @@ pub fn limb_motor<'a>(input: &LimbInput<'a>, muscle: &mut MuscleJoint) -> f32 {
         if active && input.person.shock < 0.5 && input.spec.do_stumble && num > 0.3 && num < 1.0 {
             muscle.stumble_time += (input.person.balance * -0.1).clamp(-1.7, 1.7);
             // MoveIntoPoseAt(Stumbling); a limb missing from that pose throws in the original and stops here.
-            if let Some(stumbling) = input.stumbling
+            if let Some((index, stumbling)) = input.stumbling
                 && let Some(angle) = target(stumbling)
             {
                 let rigidity = ((num as f64).powf(1.5) as f32) * 1.3 * num2;
-                let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(muscle.stumble_time) * input.angle_offset)
+                let time = muscle.stumble_time;
+                let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(muscle.curve(index), time) * input.angle_offset)
                     * rigidity
                     * 1.0
                     * stumbling.rigidity
@@ -182,7 +199,7 @@ pub fn limb_motor<'a>(input: &LimbInput<'a>, muscle: &mut MuscleJoint) -> f32 {
     if active && input.alive() {
         let angle = target(pose).unwrap();
         // ponytail: animated poses evaluated at time 0; EvaluateAngle's Time.time and Perlin noise are not rewritten yet.
-        let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(0.0) * input.angle_offset)
+        let value = delta_angle(input.joint_angle, input.reference + angle.degrees_at(muscle.curve(input.pose_index), 0.0) * input.angle_offset)
             * 1.0
             * 1.0
             * pose.rigidity
@@ -263,7 +280,7 @@ pub fn drive_muscles(
     if session.paused {
         return;
     }
-    let stumbling = rig.poses.iter().find(|p| p.state == STUMBLING);
+    let stumbling = rig.poses.iter().enumerate().find(|(_, p)| p.state == STUMBLING);
     let world = &mut physics.world;
     let mut hinges: Vec<_> = joints.iter_mut().collect();
     for (entity, limb, body) in &limbs {
@@ -278,6 +295,7 @@ pub fn drive_muscles(
             spec,
             part: &part.name,
             pose,
+            pose_index: human.pose,
             stumbling,
             person: human.state,
             limb: limb.state,

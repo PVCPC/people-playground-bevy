@@ -108,52 +108,197 @@ pub struct Curve {
     pub post: i32,
 }
 
-fn repeat(t: f32, length: f32) -> f32 {
-    (t - (t / length).floor() * length).clamp(0.0, length)
+/// InternalWrapMode
+pub const PING_PONG: i32 = 0;
+pub const REPEAT: i32 = 1;
+pub const CLAMP: i32 = 2;
+
+/// AnimationCurveTpl<float>::Cache: the segment polynomial the last Evaluate built, reused while time stays inside it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurveCache {
+    pub index: i32,
+    pub time: f32,
+    pub time_end: f32,
+    pub coeff: [f32; 4],
+}
+
+impl Default for CurveCache {
+    fn default() -> Self {
+        Self { index: 0, time: f32::INFINITY, time_end: 0.0, coeff: [0.0; 4] }
+    }
+}
+
+impl CurveCache {
+    fn polynomial(&self, t: f32) -> f32 {
+        let x = t - self.time;
+        ((x * self.coeff[0] + self.coeff[1]) * x + self.coeff[2]) * x + self.coeff[3]
+    }
+}
+
+/// The engine's inline repeat wrap.
+pub fn repeat(t: f32, first: f32, last: f32) -> f32 {
+    let length = last - first;
+    ((t - first) - ((t - first) / length).floor() * length) + first
+}
+
+/// PingPong (UnityPlayer 0x1800d1240)
+pub fn ping_pong(t: f32, first: f32, last: f32) -> f32 {
+    let length = last - first;
+    let double = length + length;
+    let r = (t - first) - ((t - first) / double).floor() * double;
+    (length - (r - length).abs()) + first
 }
 
 impl Curve {
-    // ponytail: Unity's Hermite form in f32; the native arithmetic order is not compared yet.
-    pub fn evaluate(&self, mut t: f32) -> f32 {
-        let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
-            return 0.0;
+    /// AnimationCurveTpl<float>::IsValid
+    fn is_valid(&self) -> bool {
+        !self.keys.is_empty() && self.keys[0][0].is_finite() && self.keys[self.keys.len() - 1][0].is_finite()
+    }
+
+    /// AnimationCurveTpl<float>::FindIndexForSampling: up to three steps from the cached index, then a binary search.
+    fn find_index(&self, cache: &CurveCache, t: f32) -> (usize, usize) {
+        let n = self.keys.len() as i32;
+        let time = |i: i32| self.keys[i as usize][0];
+        // A wrapped time that rounds below the first key gives -1, and the engine then reads the bytes in front of
+        // the key array; the rewrite reads key 0 there instead.
+        let found = |i: i32| (i.max(0) as usize, (i + 1).min(n - 1) as usize);
+        // Branches as compiled: a NaN time steps backward from the hint, then takes the right half of every split.
+        let mut i = cache.index;
+        if i != -1 {
+            if !(t > time(i)) {
+                for _ in 0..3 {
+                    if i >= 0 && t >= time(i) {
+                        return found(i);
+                    }
+                    i -= 1;
+                }
+            } else {
+                for _ in 0..3 {
+                    if i + 1 < n && t < time(i + 1) {
+                        return found(i);
+                    }
+                    i += 1;
+                }
+            }
+        }
+        let (mut first, mut count) = (0, n);
+        while count > 0 {
+            let step = count >> 1;
+            if !(time(first + step) > t) {
+                first += step + 1;
+                count -= step + 1;
+            } else {
+                count = step;
+            }
+        }
+        found(first - 1)
+    }
+
+    /// AnimationCurveTpl<float>::CalculateCacheData
+    fn cache_segment(&self, cache: &mut CurveCache, lhs: usize, rhs: usize, offset: f32) {
+        let (l, r) = (self.keys[lhs], self.keys[rhs]);
+        cache.index = lhs as i32;
+        cache.time = offset + l[0];
+        cache.time_end = offset + r[0];
+        let dv = r[1] - l[1];
+        let d = r[0] - l[0];
+        let dx = if 0.0001 <= d { d } else { 0.0001 };
+        let m0 = l[3] * dx;
+        let m1 = dx * r[2];
+        let inverse = 1.0 / (dx * dx);
+        cache.coeff = [((((m1 + m0) - dv) - dv) * inverse) / dx, ((((dv + dv) + dv) - m0) - m0 - m1) * inverse, l[3], l[1]];
+        if l[3] == f32::INFINITY || r[2] == f32::INFINITY {
+            cache.coeff = [0.0, 0.0, 0.0, l[1]];
+        }
+    }
+
+    /// AnimationCurveTpl<float>::EvaluateWithoutCacheCoefficients (ping-pong and unknown wrap modes).
+    fn evaluate_uncached(&self, cache: &CurveCache, t: f32) -> f32 {
+        let n = self.keys.len();
+        if n == 1 {
+            return self.keys[0][1];
+        }
+        let (first, last) = (self.keys[0][0], self.keys[n - 1][0]);
+        let wrap = |mode: i32, clamped: f32| match mode {
+            CLAMP => clamped,
+            PING_PONG => ping_pong(t, first, last),
+            _ => repeat(t, first, last),
         };
-        let (begin, end) = (first[0], last[0]);
-        if (t < begin || t > end) && end > begin {
-            let length = end - begin;
-            let mode = if t < begin { self.pre } else { self.post };
-            t = match mode {
-                0 => begin + length - (repeat(t - begin, 2.0 * length) - length).abs(),
-                1 => begin + repeat(t - begin, length),
-                _ => t.clamp(begin, end),
-            };
-        }
-        if t <= begin {
-            return first[1];
-        }
-        if t >= end {
-            return last[1];
-        }
-        let i = self.keys.iter().rposition(|k| k[0] <= t).unwrap();
-        let (l, r) = (self.keys[i], self.keys[i + 1]);
+        let x = if first <= t {
+            if last < t { wrap(self.post, last) } else { t }
+        } else {
+            wrap(self.pre, first)
+        };
+        let (lhs, rhs) = self.find_index(cache, x);
+        let (l, r) = (self.keys[lhs], self.keys[rhs]);
         let dx = r[0] - l[0];
-        let (u, m0, m1) = if dx != 0.0 { ((t - l[0]) / dx, l[3] * dx, r[2] * dx) } else { (0.0, 0.0, 0.0) };
-        if !m0.is_finite() || !m1.is_finite() {
-            return l[1];
+        let (p, m0, m1) = if dx == 0.0 { (0.0, 0.0, 0.0) } else { ((x - l[0]) / dx, dx * l[3], dx * r[2]) };
+        let p2 = p * p;
+        let p3 = p2 * p;
+        let value = ((p3 - (p2 + p2)) + p) * m0 + (((p3 + p3) - p2 * 3.0) + 1.0) * l[1] + (p3 - p2) * m1 + (p2 * 3.0 - (p3 + p3)) * r[1];
+        if l[3] == f32::INFINITY || r[2] == f32::INFINITY { l[1] } else { value }
+    }
+
+    /// AnimationCurveTpl<float>::Evaluate with the curve's own cache (AnimationCurve.Evaluate).
+    pub fn evaluate(&self, cache: &mut CurveCache, t: f32) -> f32 {
+        let n = self.keys.len();
+        if n == 1 {
+            return self.keys[0][1];
         }
-        let (u2, u3) = (u * u, u * u * u);
-        (2.0 * u3 - 3.0 * u2 + 1.0) * l[1] + (u3 - 2.0 * u2 + u) * m0 + (u3 - u2) * m1 + (-2.0 * u3 + 3.0 * u2) * r[1]
+        if cache.time <= t && t < cache.time_end {
+            return cache.polynomial(t);
+        }
+        if !self.is_valid() {
+            return 0.0;
+        }
+        let (first, last) = (self.keys[0][0], self.keys[n - 1][0]);
+        let constant = |cache: &mut CurveCache, time: f32, time_end: f32, value: f32| {
+            cache.time = time;
+            cache.time_end = time_end;
+            cache.coeff = [0.0, 0.0, 0.0, value];
+            cache.polynomial(t)
+        };
+        // comiss branches: an unordered time takes the in-range path.
+        let (sample, offset) = if t < last || t.is_nan() {
+            if first <= t || t.is_nan() {
+                (t, 0.0)
+            } else {
+                match self.pre {
+                    CLAMP => return constant(cache, t - 1000.0, first, self.keys[0][1]),
+                    REPEAT => {
+                        let w = repeat(t, first, last);
+                        (w, t - w)
+                    }
+                    _ => return self.evaluate_uncached(cache, t),
+                }
+            }
+        } else {
+            match self.post {
+                CLAMP => return constant(cache, last, f32::INFINITY, self.keys[n - 1][1]),
+                REPEAT => {
+                    // maxss/minss: a NaN takes the bound.
+                    let w = repeat(t, first, last);
+                    let w = if w > first { w } else { first };
+                    let w = if w < last { w } else { last };
+                    (w, t - w)
+                }
+                _ => return self.evaluate_uncached(cache, t),
+            }
+        };
+        let (lhs, rhs) = self.find_index(cache, sample);
+        self.cache_segment(cache, lhs, rhs, offset);
+        cache.polynomial(t)
     }
 }
 
 impl PoseAngle {
     /// LimbPose.EvaluateAngleAt: the pose angle in degrees at an explicit animation time.
-    pub fn degrees_at(&self, time: f32) -> f32 {
+    pub fn degrees_at(&self, cache: &mut CurveCache, time: f32) -> f32 {
         match &self.animation {
             None => self.degrees(),
             Some(a) => {
                 let t = a.time_offset + time / a.duration;
-                a.start + (a.end - a.start) * a.curve.evaluate(t).clamp(0.0, 1.0)
+                a.start + (a.end - a.start) * a.curve.evaluate(cache, t).clamp(0.0, 1.0)
             }
         }
     }
@@ -628,10 +773,12 @@ mod tests {
             pre: 0,
             post: 0,
         };
-        assert_eq!(curve.evaluate(0.25), 0.5);
-        assert_eq!(curve.evaluate(0.5), 1.0);
-        assert_eq!(curve.evaluate(1.25), curve.evaluate(0.75));
-        assert_eq!(curve.evaluate(-0.25), curve.evaluate(0.25));
+        let mut cache = CurveCache::default();
+        let mut at = |t| curve.evaluate(&mut cache, t);
+        assert_eq!(at(0.25), 0.5);
+        assert_eq!(at(0.5), 1.0);
+        assert_eq!(at(1.25), at(0.75));
+        assert_eq!(at(-0.25), at(0.25));
     }
 
     #[test]

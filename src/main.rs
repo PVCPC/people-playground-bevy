@@ -396,12 +396,7 @@ fn spawn_human(
                 body_a: a.0,
                 body_b: b.0,
             },
-            living::MuscleJoint {
-                owner,
-                definition,
-                previous_speed: 0.0,
-                stumble_time: 0.0,
-            },
+            living::MuscleJoint::new(owner, definition),
         ));
     }
 }

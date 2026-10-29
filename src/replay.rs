@@ -105,7 +105,7 @@ fn parse(text: &str) -> Recording {
 pub fn compare_motors(rig: &HumanRig, path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let recording = parse(&text);
-    let stumbling = rig.poses.iter().find(|p| p.state == STUMBLING);
+    let stumbling = rig.poses.iter().enumerate().find(|(_, p)| p.state == STUMBLING);
     let mut muscles: HashMap<&str, MuscleJoint> = HashMap::new();
     let (mut worst, mut mismatches, mut compared) = ([0.0f32; 3], 0, 0);
     let mut report = |what: String| {
@@ -117,23 +117,19 @@ pub fn compare_motors(rig: &HumanRig, path: &Path) -> Result<(), String> {
     for (k, pair) in recording.steps.windows(2).enumerate() {
         let (before, after) = (&pair[0], &pair[1]);
         let Some((person, pose_name)) = &after.person else { continue };
-        let Some(pose) = rig.poses.iter().find(|p| &p.name == pose_name) else {
+        let Some((pose_index, pose)) = rig.poses.iter().enumerate().find(|(_, p)| &p.name == pose_name) else {
             return Err(format!("step {}: pose {pose_name} is not in the rig", k + 1));
         };
         for joint in &rig.joints {
             let part = rig.parts.iter().find(|p| p.name == joint.a).unwrap();
             let (Some(spec), Some(limb)) = (&part.muscle, after.limbs.get(&joint.a)) else { continue };
-            let muscle = muscles.entry(&joint.a).or_insert(MuscleJoint {
-                owner: Entity::PLACEHOLDER,
-                definition: 0,
-                previous_speed: 0.0,
-                stumble_time: 0.0,
-            });
+            let muscle = muscles.entry(&joint.a).or_insert(MuscleJoint::new(Entity::PLACEHOLDER, 0));
             muscle.previous_speed = before.motor[&joint.a].1;
             let input = LimbInput {
                 spec,
                 part: &part.name,
                 pose,
+                pose_index,
                 stumbling,
                 person: *person,
                 limb: limb.state,
