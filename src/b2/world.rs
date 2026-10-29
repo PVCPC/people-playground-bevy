@@ -6,6 +6,7 @@ use super::broadphase::{Aabb, BroadPhase};
 use super::collide::*;
 use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
+use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
 use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
 use super::solver::*;
 use super::toi::{time_of_impact, Sweep, ToiState};
@@ -195,6 +196,8 @@ pub struct Body {
     pub fixtures: Vec<FixtureId>,
     /// Contact edges (other body, contact), head last.
     pub(crate) contacts: Vec<(BodyId, ContactId)>,
+    /// Joint edges (other body, joint), head last.
+    pub(crate) joints: Vec<(BodyId, JointId)>,
     pub mass: f32,
     pub inv_mass: f32,
     pub axis: Vec2,
@@ -298,6 +301,18 @@ pub struct Contact {
     manager_index: usize,
 }
 
+pub type JointId = usize;
+
+/// b2Joint: Unity's HingeJoint2D is the only joint the game's bodies use.
+#[derive(Clone, Debug)]
+pub struct Joint {
+    pub revolute: RevoluteJoint,
+    pub body_a: BodyId,
+    pub body_b: BodyId,
+    pub collide_connected: bool,
+    island_flag: bool,
+}
+
 pub struct World {
     pub bodies: Vec<Option<Body>>,
     pub fixtures: Vec<Option<Fixture>>,
@@ -309,6 +324,9 @@ pub struct World {
     static_bodies: Vec<BodyId>,
     /// Contact list, head last.
     pub(crate) contact_list: Vec<ContactId>,
+    pub joints: Vec<Option<Joint>>,
+    /// Joint list, head last.
+    joint_list: Vec<JointId>,
     contacts_non_toi: Vec<ContactId>,
     contacts_toi: Vec<ContactId>,
     pub broad_phase: BroadPhase,
@@ -339,6 +357,8 @@ impl World {
             non_static_bodies: Vec::new(),
             static_bodies: Vec::new(),
             contact_list: Vec::new(),
+            joints: Vec::new(),
+            joint_list: Vec::new(),
             contacts_non_toi: Vec::new(),
             contacts_toi: Vec::new(),
             broad_phase: BroadPhase::default(),
@@ -393,6 +413,7 @@ impl World {
             torque: 0.0,
             fixtures: Vec::new(),
             contacts: Vec::new(),
+            joints: Vec::new(),
             mass,
             inv_mass: mass,
             axis: Vec2::new(1.0, 1.0),
@@ -409,6 +430,52 @@ impl World {
         self.body_list.push(id);
         if def.kind == BodyType::Static { self.static_bodies.push(id) } else { self.non_static_bodies.push(id) }
         id
+    }
+
+    /// b2World::CreateJoint (180bb8f10).
+    pub fn create_joint(&mut self, def: RevoluteDef, body_a: BodyId, body_b: BodyId, collide_connected: bool) -> JointId {
+        let id = self.joints.len();
+        self.joints.push(Some(Joint { revolute: RevoluteJoint::new(def), body_a, body_b, collide_connected, island_flag: false }));
+        self.joint_list.push(id);
+        self.body_mut(body_a).joints.push((body_b, id));
+        self.body_mut(body_b).joints.push((body_a, id));
+        if !collide_connected {
+            self.flag_contacts_between(body_b, body_a);
+        }
+        id
+    }
+
+    /// b2World::DestroyJoint (180bb9680).
+    pub fn destroy_joint(&mut self, id: JointId) {
+        let j = self.joints[id].take().unwrap();
+        self.joint_list.retain(|&k| k != id);
+        for b in [j.body_a, j.body_b] {
+            let body = self.body_mut(b);
+            body.wake();
+            body.joints.retain(|&(_, k)| k != id);
+        }
+        if !j.collide_connected {
+            self.flag_contacts_between(j.body_b, j.body_a);
+        }
+    }
+
+    /// Re-filter every contact on `b` with `other`, so the next Collide re-checks ShouldCollide.
+    fn flag_contacts_between(&mut self, b: BodyId, other: BodyId) {
+        let edges: Vec<(BodyId, ContactId)> = self.body(b).contacts.clone();
+        for (o, c) in edges {
+            if o == other {
+                self.contact_mut(c).flags |= CONTACT_FILTER;
+            }
+        }
+    }
+
+    /// b2Body::ShouldCollide (180bba730), called on body B with body A.
+    fn bodies_should_collide(&self, b: BodyId, a: BodyId) -> bool {
+        let (body, other) = (self.body(b), self.body(a));
+        if body.kind == BodyType::Static && other.kind == BodyType::Static {
+            return false;
+        }
+        !body.joints.iter().rev().any(|&(o, j)| o == a && !self.joints[j].as_ref().unwrap().collide_connected)
     }
 
     /// b2Body::CreateFixture (180bb8d60) with Fixture::CreateProxies (180bb9040).
@@ -589,10 +656,10 @@ impl World {
                 }
             }
         }
-        if self.body(body_b).kind == BodyType::Static && self.body(body_a).kind == BodyType::Static {
+        if !self.bodies_should_collide(body_b, body_a) {
             return;
         }
-        // ponytail: joints' collideConnected and Unity's layer contact filter are not modelled yet.
+        // ponytail: Unity's layer contact filter is not modelled yet.
         if !should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) {
             return;
         }
@@ -699,8 +766,7 @@ impl World {
             let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
             let (body_a, body_b) = (fa.body, fb.body);
             if c.flags & CONTACT_FILTER != 0 {
-                let both_static = self.body(body_a).kind == BodyType::Static && self.body(body_b).kind == BodyType::Static;
-                if both_static || !should_collide(&fa.filter, &fb.filter) {
+                if !self.bodies_should_collide(body_b, body_a) || !should_collide(&fa.filter, &fb.filter) {
                     self.destroy_contact(id);
                     continue;
                 }
@@ -771,6 +837,9 @@ impl World {
         for &id in &self.contact_list {
             self.contacts[id].as_mut().unwrap().flags &= !CONTACT_ISLAND;
         }
+        for &id in &self.joint_list {
+            self.joints[id].as_mut().unwrap().island_flag = false;
+        }
         for seed_index in 0..self.non_static_bodies.len() {
             let seed = self.non_static_bodies[seed_index];
             let flags = self.body(seed).flags;
@@ -779,6 +848,7 @@ impl World {
             }
             let mut island_bodies: Vec<BodyId> = Vec::new();
             let mut island_contacts: Vec<ContactId> = Vec::new();
+            let mut island_joints: Vec<JointId> = Vec::new();
             let mut stack = vec![seed];
             self.body_mut(seed).flags |= BODY_ISLAND;
             while let Some(b) = stack.pop() {
@@ -807,7 +877,18 @@ impl World {
                         self.body_mut(other).flags |= BODY_ISLAND;
                     }
                 }
-                // ponytail: joint edges are not walked yet; jointed bodies only join through contacts.
+                let edges: Vec<(BodyId, JointId)> = self.body(b).joints.iter().rev().copied().collect();
+                for (other, jid) in edges {
+                    if self.joints[jid].as_ref().unwrap().island_flag || self.body(other).flags & BODY_ACTIVE == 0 {
+                        continue;
+                    }
+                    island_joints.push(jid);
+                    self.joints[jid].as_mut().unwrap().island_flag = true;
+                    if self.body(other).flags & BODY_ISLAND == 0 {
+                        stack.push(other);
+                        self.body_mut(other).flags |= BODY_ISLAND;
+                    }
+                }
             }
             for &cid in &island_contacts {
                 let c = self.contact(cid);
@@ -817,10 +898,18 @@ impl World {
                 c.island_index_a = a;
                 c.island_index_b = b;
             }
+            for &jid in &island_joints {
+                let j = self.joints[jid].as_ref().unwrap();
+                let (a, b) = (self.body(j.body_a), self.body(j.body_b));
+                let ends = [(a.island_index as usize, a.axis), (b.island_index as usize, b.axis)];
+                let r = &mut self.joints[jid].as_mut().unwrap().revolute;
+                (r.a.index, r.a.axis) = ends[0];
+                (r.b.index, r.b.axis) = ends[1];
+            }
             for &b in &island_bodies {
                 self.body_mut(b).island_index = -1;
             }
-            self.solve_island(&island_bodies, &island_contacts, step);
+            self.solve_island(&island_bodies, &island_contacts, &island_joints, step);
             for &b in &island_bodies {
                 let b = self.body_mut(b);
                 if b.kind == BodyType::Static {
@@ -837,8 +926,8 @@ impl World {
         self.find_new_contacts();
     }
 
-    /// b2Island::Solve (180bba770) without joints.
-    pub(crate) fn solve_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], step: &TimeStep) {
+    /// b2Island::Solve (180bba770).
+    pub(crate) fn solve_island(&mut self, island_bodies: &[BodyId], island_contacts: &[ContactId], island_joints: &[JointId], step: &TimeStep) {
         let h = step.dt;
         let gravity = self.gravity;
         let mut positions = Vec::with_capacity(island_bodies.len());
@@ -863,7 +952,19 @@ impl World {
         if step.warm_starting {
             solver.warm_start(&mut velocities);
         }
+        for &jid in island_joints {
+            let j = self.joints[jid].as_ref().unwrap();
+            let end = |id: BodyId, e: JointBody| {
+                let b = self.body(id);
+                JointBody { local_center: b.sweep.local_center, inv_mass: b.inv_mass, inv_i: b.inv_i, ..e }
+            };
+            let (a, b) = (end(j.body_a, j.revolute.a), end(j.body_b, j.revolute.b));
+            self.joints[jid].as_mut().unwrap().revolute.init_velocity_constraints(a, b, step, &positions, &mut velocities);
+        }
         for _ in 0..step.velocity_iterations {
+            for &jid in island_joints {
+                self.joints[jid].as_mut().unwrap().revolute.solve_velocity_constraints(&mut velocities);
+            }
             solver.solve_velocity_constraints(&mut velocities);
         }
         let mut manifolds: Vec<Manifold> = solver_contacts.iter().map(|c| c.manifold).collect();
@@ -891,7 +992,12 @@ impl World {
         }
         let mut position_solved = false;
         for _ in 0..step.position_iterations {
-            if solver.solve_position_constraints(&mut positions) {
+            let contacts_solved = solver.solve_position_constraints(&mut positions);
+            let mut joints_solved = true;
+            for &jid in island_joints {
+                joints_solved &= self.joints[jid].as_ref().unwrap().revolute.solve_position_constraints(&mut positions);
+            }
+            if contacts_solved && joints_solved {
                 position_solved = true;
                 break;
             }
@@ -1275,5 +1381,26 @@ mod tests {
         };
         assert!(run(false) > 5.0, "a discrete body tunnels");
         assert!(run(true) < 5.0, "a bullet stops at the wall");
+    }
+
+    #[test]
+    fn hinged_box_swings_without_touching_its_pivot() {
+        let mut world = World::default();
+        let pivot = world.create_body(&BodyDef::default());
+        world.create_fixture(pivot, &box_fixture(Vec2::new(0.5, 0.5)), true);
+        let arm = world.create_body(&BodyDef { kind: BodyType::Dynamic, position: Vec2::new(1.0, 0.0), ..BodyDef::default() });
+        world.create_fixture(arm, &box_fixture(Vec2::new(1.5, 0.2)), true);
+        let def = RevoluteDef { local_anchor_b: Vec2::new(-1.0, 0.0), ..RevoluteDef::default() };
+        world.create_joint(def, pivot, arm, false);
+        let mut lowest = 0.0f32;
+        for _ in 0..120 {
+            world.step(1.0 / 60.0, 16, 16);
+            let b = world.body(arm);
+            let anchor = b.xf.p + b.xf.q.apply(Vec2::new(-1.0, 0.0));
+            assert!(anchor.x.abs() < 0.02 && anchor.y.abs() < 0.02, "anchor drifted to {anchor:?}");
+            lowest = lowest.min(b.xf.p.y);
+        }
+        assert!(lowest < -0.9, "the arm should swing down, lowest {lowest}");
+        assert!(world.body(arm).contacts.is_empty(), "jointed bodies must not collide");
     }
 }

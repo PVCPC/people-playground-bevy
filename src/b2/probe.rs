@@ -1024,7 +1024,7 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
             call.args = ["b0", "b3", "i0", "i1"].map(String::from).to_vec();
             world.solve_toi_island(&bodies, &contacts, &step, 0, 1);
         } else {
-            world.solve_island(&bodies, &contacts, &step);
+            world.solve_island(&bodies, &contacts, &[], &step);
         }
         calls.push(call);
         let (_, after, _) = island_call(&world, &bodies, &contacts, &step);
