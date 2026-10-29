@@ -1069,7 +1069,7 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
     let mut expected = Vec::new();
     for case in 0..192 {
         let mut world = World::default();
-        let fixture = |shape, random: &mut Random| FixtureDef { shape, friction: random.range(0.0, 1.0), restitution: random.range(0.0, 0.5), density: random.range(0.5, 3.0), is_sensor: false, filter: Filter::default() };
+        let fixture = |shape, random: &mut Random| FixtureDef { shape, friction: random.range(0.0, 1.0), restitution: random.range(0.0, 0.5), density: random.range(0.5, 3.0), is_sensor: false, filter: Filter::default(), collider: Default::default() };
         let ground = world.create_body(&BodyDef::default());
         let ground_box = Polygon::from_points(&box_corners(Vec2::ZERO, Vec2::new(30.0, 1.0)), POLYGON_RADIUS);
         world.create_fixture(ground, &fixture(Shape::Polygon(ground_box), &mut random), true);

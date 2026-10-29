@@ -4,13 +4,28 @@
 use super::*;
 use crate::b2::broadphase::Aabb;
 use crate::b2::collide::{ContactFeature, Manifold, ManifoldPoint, ManifoldType};
+use crate::b2::contacts2d::{Collision2D, ContactState, Manifold2D, Message, Report};
 use crate::b2::shape::{MassData, Polygon};
-use crate::b2::world::{Body, BodyId, ContactId, Filter, FixtureDef, FixtureId, JointId, Shape, World};
+use crate::b2::world::{Body, BodyId, ColliderRef, ContactId, Filter, FixtureDef, FixtureId, JointId, RigidbodyRef, Shape, World, CONTACT_TOUCHING};
 
-struct Restored {
-    world: World,
-    bodies: HashMap<String, BodyId>,
-    fixtures: HashMap<String, FixtureId>,
+pub struct Restored {
+    pub world: World,
+    pub bodies: HashMap<String, BodyId>,
+    pub fixtures: HashMap<String, FixtureId>,
+    /// GameObjects by name (the recorder names components by their object); ids are this restore's own.
+    pub objects: HashMap<String, i32>,
+}
+
+/// "Name#id" (or "Name#id:shape") -> (Name, id).
+fn object_ref(text: &str) -> Result<(&str, i32), String> {
+    let (name, rest) = text.rsplit_once('#').ok_or(format!("bad reference {text}"))?;
+    let id = rest.split(':').next().unwrap().parse().map_err(|_| format!("bad reference {text}"))?;
+    Ok((name, id))
+}
+
+fn object_id(objects: &mut HashMap<String, i32>, name: &str) -> i32 {
+    let next = objects.len() as i32 + 1;
+    *objects.entry(name.to_string()).or_insert(next)
 }
 
 fn names(text: &str) -> Vec<&str> {
@@ -39,6 +54,7 @@ fn fixture_def(r: &Record) -> Result<(FixtureDef, MassData), String> {
         restitution: fw(7),
         is_sensor: (w[10] >> 16) & 0xff != 0,
         filter: Filter { category_bits: w[9] as u16, mask_bits: (w[9] >> 16) as u16, group_index: w[10] as u16 as i16 },
+        collider: ColliderRef::default(),
     };
     Ok((def, MassData { mass: fw(0), center: V::new(fw(1), fw(2)), inertia: fw(3), area: fw(4) }))
 }
@@ -98,8 +114,9 @@ fn body_words(b: &Body) -> Vec<u32> {
 }
 
 /// The world as the game holds it at one snapshot.
-fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
+pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
     let mut world = World::new(gravity);
+    let mut objects = HashMap::new();
     let edges: HashMap<&str, &Record> = s.of("b2Edges").map(|r| (r.name.as_str(), r)).collect();
     let fixture_records: HashMap<&str, &Record> = s.of("b2Fixture").map(|r| (r.name.as_str(), r)).collect();
     let order = names(s.of("b2World").next().ok_or("no b2World record")?.req("bodies")?);
@@ -113,11 +130,19 @@ fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
             1 => BodyType::Kinematic,
             _ => BodyType::Dynamic,
         };
-        let id = world.create_body(&BodyDef { kind, ..Default::default() });
+        let user = if name == "ground" {
+            None
+        } else {
+            let (object, id) = object_ref(name)?;
+            Some(RigidbodyRef { id, game_object: object_id(&mut objects, object) })
+        };
+        let id = world.create_body(&BodyDef { kind, user, ..Default::default() });
         load_body(world.body_mut(id), e)?;
         bodies.insert(name.to_string(), id);
         for &f in names(e.req("fixtures")?).iter().rev() {
-            let (def, mass) = fixture_def(fixture_records.get(f).ok_or(format!("no b2Fixture {f}"))?)?;
+            let (mut def, mass) = fixture_def(fixture_records.get(f).ok_or(format!("no b2Fixture {f}"))?)?;
+            let (object, collider) = object_ref(f)?;
+            def.collider = ColliderRef { id: collider, game_object: object_id(&mut objects, object) };
             let fid = world.create_fixture(id, &def, false);
             world.fixtures[fid].as_mut().unwrap().mass_data = mass;
             fixtures.insert(f.to_string(), fid);
@@ -203,7 +228,31 @@ fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         c.restitution = f32::from_bits(toi[3]);
         c.tangent_speed = f32::from_bits(toi[4]);
         c.manager_index = toi[5] as usize;
+        c.user_index = toi.get(6).map_or(-1, |&u| u as i32);
         contacts[i] = id;
+    }
+    // Unity's Collision2D records in m_Collisions order; touching contacts point at their pair's record.
+    for r in s.of("Collision2DRecord") {
+        let col = collision_record(r, &bodies, &fixtures, &contacts, &mut objects)?;
+        let rid = world.contacts2d.restore(col);
+        world.contacts2d.simulation_id = r.req("sim")?.parse().map_err(|_| "bad sim")?;
+        let _ = rid;
+    }
+    let recorded = s.of("Collision2DRecord").next().is_some();
+    for &id in &contacts {
+        let c = world.contact(id);
+        if c.flags & CONTACT_TOUCHING == 0 {
+            continue;
+        }
+        // Dumps from before the record recorder: rebuild the records as the listener would have begun them.
+        if !recorded {
+            world.begin_contact(id);
+            continue;
+        }
+        let (a, b) = (world.fixture(c.fixture_a).collider.id, world.fixture(c.fixture_b).collider.id);
+        let at = *world.contacts2d.index.get(&(a.min(b), a.max(b))).ok_or(format!("touching contact without a Collision2D record"))?;
+        let rid = world.contacts2d.collisions[at];
+        world.contact_mut(id).user_data = Some(rid);
     }
     // Edge lists in native order; contact creation already wakes bodies, so their state is loaded again.
     for (name, &id) in &bodies {
@@ -221,7 +270,215 @@ fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         load_body(b, e)?;
     }
     world.finish_restore(inv_dt0, world_flags & 1 != 0, moves)?;
-    Ok(Restored { world, bodies, fixtures })
+    Ok(Restored { world, bodies, fixtures, objects })
+}
+
+fn contact_state(v: u32) -> Result<ContactState, String> {
+    Ok(match v {
+        0 => ContactState::Invalid,
+        1 => ContactState::Enter,
+        2 => ContactState::Exit,
+        3 => ContactState::EnterAndExit,
+        4 => ContactState::Stay,
+        _ => return Err(format!("contact state {v}")),
+    })
+}
+
+/// A Collision2DRecord line: the record's state, pair, flags and manifolds (0x70 bytes each).
+fn collision_record(r: &Record, bodies: &HashMap<String, BodyId>, fixtures: &HashMap<String, FixtureId>, contacts: &[ContactId], objects: &mut HashMap<String, i32>) -> Result<Collision2D, String> {
+    let collider = |t: &str, objects: &mut HashMap<String, i32>| -> Result<ColliderRef, String> {
+        let (object, id) = object_ref(t)?;
+        Ok(ColliderRef { id, game_object: object_id(objects, object) })
+    };
+    let rb = |t: &str| -> Result<Option<BodyId>, String> { if t == "null" { Ok(None) } else { bodies.get(t).copied().map(Some).ok_or(format!("no body {t}")) } };
+    let state = words(r.req("state")?);
+    let flags = words(r.req("flags")?)[0].to_le_bytes();
+    let mut manifolds = Vec::new();
+    for m in names(r.req("manifolds")?) {
+        let parts: Vec<&str> = m.split(',').collect();
+        let w = words(&parts[4..].join(","));
+        let fl = |i: usize| f32::from_bits(w[i]);
+        let v = |i: usize| V::new(fl(i), fl(i + 1));
+        let fixture = |t: &str| fixtures.get(t).copied().ok_or(format!("no fixture {t}"));
+        manifolds.push(Manifold2D {
+            enabled: u32::from_str_radix(parts[0], 16).map_err(|_| "bad manifold")? & 0xff != 0,
+            contact: if parts[1] == "null" { None } else { Some(contacts[parts[1].parse::<usize>().map_err(|_| "bad manifold contact")?]) },
+            fixture_a: fixture(parts[2])?,
+            fixture_b: fixture(parts[3])?,
+            index_a: w[0] as usize,
+            index_b: w[1] as usize,
+            simulation_id: w[2] as i32,
+            point_count: w[3] as usize,
+            normal: v(4),
+            points: [v(6), v(8)],
+            relative_velocity: [v(10), v(12)],
+            separations: [fl(14), fl(15)],
+            normal_impulses: [fl(16), fl(17)],
+            tangent_impulses: [fl(18), fl(19)],
+        });
+    }
+    Ok(Collision2D {
+        manifolds,
+        state: contact_state(state[0])?,
+        contact_count: state[1] as i32,
+        collider_a: collider(r.req("a")?, objects)?,
+        collider_b: collider(r.req("b")?, objects)?,
+        rigidbody_a: rb(r.req("rba")?)?,
+        rigidbody_b: rb(r.req("rbb")?)?,
+        enabled: flags[0] != 0,
+        is_trigger: flags[1] != 0,
+        flag_for_recreate: flags[2] != 0,
+        swapped: flags[3] != 0,
+    })
+}
+
+fn manifold2d_words(m: &Manifold2D) -> Vec<u32> {
+    let mut w = vec![m.enabled as u32, m.index_a as u32, m.index_b as u32, m.simulation_id as u32, m.point_count as u32, m.normal.x.to_bits(), m.normal.y.to_bits()];
+    for v in m.points.iter().chain(&m.relative_velocity) {
+        w.extend([v.x.to_bits(), v.y.to_bits()]);
+    }
+    w.extend(m.separations.iter().chain(&m.normal_impulses).chain(&m.tangent_impulses).map(|f| f.to_bits()));
+    w
+}
+
+/// Unity's Collision2D records after ProcessContacts against the snapshot's, in array order. Point words past
+/// pointCount are stale in the game, so only live points compare.
+fn compare_contacts2d(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> {
+    let w = &r.world;
+    let mut out = Vec::new();
+    let fixture_name: HashMap<FixtureId, &str> = r.fixtures.iter().map(|(n, &f)| (f, n.as_str())).collect();
+    let contact_index: HashMap<ContactId, usize> = w.contact_list.iter().rev().enumerate().map(|(i, &c)| (c, i)).collect();
+    let game: Vec<&Record> = s.of("Collision2DRecord").collect();
+    let ours: Vec<&Collision2D> = w.contacts2d.collisions.iter().map(|&id| w.contacts2d.records[id].as_ref().unwrap()).collect();
+    if game.len() != ours.len() {
+        out.push(format!("Collision2D.count: game {} ours {}", game.len(), ours.len()));
+    }
+    for (i, (g, o)) in game.iter().zip(&ours).enumerate() {
+        let key = format!("{}/{}", g.req("a")?, g.req("b")?);
+        let ok_pair = (o.collider_a.id, o.collider_b.id) == (object_ref(g.req("a")?)?.1, object_ref(g.req("b")?)?.1);
+        if !ok_pair {
+            out.push(format!("Collision2D[{i}] pair: game {key} ours {}/{}", o.collider_a.id, o.collider_b.id));
+            continue;
+        }
+        let state = words(g.req("state")?);
+        let flags = words(g.req("flags")?)[0];
+        let our_flags = u32::from_le_bytes([o.enabled as u8, o.is_trigger as u8, o.flag_for_recreate as u8, o.swapped as u8]);
+        let our_state = [ContactState::Invalid, ContactState::Enter, ContactState::Exit, ContactState::EnterAndExit, ContactState::Stay].iter().position(|s| *s == o.state).unwrap() as u32;
+        for (k, gv, ov) in [("state", state[0], our_state), ("count", state[1], o.contact_count as u32), ("flags", flags, our_flags)] {
+            if gv != ov {
+                out.push(format!("Collision2D[{i}] {key}.{k}: game {gv:08x} ours {ov:08x}"));
+            }
+        }
+        let gm = names(g.req("manifolds")?);
+        if gm.len() != o.manifolds.len() {
+            out.push(format!("Collision2D[{i}] {key}.manifolds: game {} ours {}", gm.len(), o.manifolds.len()));
+            continue;
+        }
+        for (k, (gm, om)) in gm.iter().zip(&o.manifolds).enumerate() {
+            let parts: Vec<&str> = gm.split(',').collect();
+            let oc = om.contact.map_or("null".to_string(), |c| contact_index[&c].to_string());
+            let names_ours = [oc, fixture_name[&om.fixture_a].to_string(), fixture_name[&om.fixture_b].to_string()];
+            for (n, (gv, ov)) in ["contact", "fixtureA", "fixtureB"].iter().zip(parts[1..4].iter().zip(&names_ours)) {
+                if gv != ov {
+                    out.push(format!("Collision2D[{i}] {key}.m{k}.{n}: game {gv} ours {ov}"));
+                }
+            }
+            let mut gw = vec![u32::from_str_radix(parts[0], 16).unwrap() & 0xff];
+            gw.extend(words(&parts[4..].join(",")));
+            let ow = manifold2d_words(om);
+            let count = gw[4] as usize;
+            // Words: enabled, indexA/B, simulationId, pointCount, normal, points, relativeVelocity, separations, normal and tangent impulses.
+            let live = |j: usize| match j {
+                0..=6 => true,
+                7..=10 => (j - 7) / 2 < count,
+                11..=14 => (j - 11) / 2 < count,
+                15..=16 => j - 15 < count,
+                17..=18 => j - 17 < count,
+                _ => j - 19 < count,
+            };
+            for j in (0..gw.len()).filter(|&j| live(j)) {
+                if gw[j] != ow[j] {
+                    out.push(format!("Collision2D[{i}] {key}.m{k}.w{j}: game {:08x} ours {:08x}", gw[j], ow[j]));
+                }
+            }
+        }
+    }
+    for c in s.of("b2Contact") {
+        let key = format!("{}/{}", c.req("a")?, c.req("b")?);
+        let Some(&id) = w.contact_list.iter().find(|&&id| format!("{}/{}", fixture_name[&w.contact(id).fixture_a], fixture_name[&w.contact(id).fixture_b]) == key) else { continue };
+        if let Some(&u) = words(c.req("toi")?).get(6) {
+            if u as i32 != w.contact(id).user_index {
+                out.push(format!("b2Contact {key}.userIndex: game {} ours {}", u as i32, w.contact(id).user_index));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn message_name(m: Message) -> &'static str {
+    match m {
+        Message::CollisionEnter => "OnCollisionEnter2D",
+        Message::CollisionStay => "OnCollisionStay2D",
+        Message::CollisionExit => "OnCollisionExit2D",
+        Message::TriggerEnter => "OnTriggerEnter2D",
+        Message::TriggerStay => "OnTriggerStay2D",
+        Message::TriggerExit => "OnTriggerExit2D",
+    }
+}
+
+/// The reports against the game's OnCollision*2D log: consecutive calls on one object with one collision are
+/// one delivery (one per receiving collider), compared by message, the receiving pair and every Collision2D field.
+fn compare_reports(r: &Restored, reports: &[Report], s: &Snapshot) -> Result<Vec<String>, String> {
+    let w = &r.world;
+    let mut out = Vec::new();
+    let mut game: Vec<(String, String)> = Vec::new();
+    for c in s.of("Collision2D") {
+        let method = c.name.split(':').next().unwrap().rsplit('.').next().unwrap();
+        let rest: Vec<String> = ["collider", "other", "rigidbody", "otherRigidbody", "rv", "enabled", "contacts"].iter().map(|k| format!("{k}={}", c.get(k).unwrap_or("?"))).collect();
+        let line = (method.to_string(), rest.join(" "));
+        if game.last() != Some(&line) {
+            game.push(line);
+        }
+    }
+    let collider_name: HashMap<i32, String> = r.fixtures.keys().map(|n| (object_ref(n).unwrap().1, n.rsplit_once(':').unwrap().0.to_string())).collect();
+    let rb_name: HashMap<i32, String> = r.bodies.keys().filter(|n| *n != "ground").map(|n| (object_ref(n).unwrap().1, n.clone())).collect();
+    let h = |f: f32| format!("{:08x}", f.to_bits());
+    let mut ours = Vec::new();
+    for rep in reports {
+        let Some(col) = &rep.collision else { continue };
+        for receiving in [rep.collider_a.id, rep.collider_b.id] {
+            let sc = w.script_collision(col, receiving);
+            let rbn = |b: Option<i32>| b.map_or("null".to_string(), |id| rb_name[&id].clone());
+            let contacts: Vec<String> = sc
+                .contacts
+                .iter()
+                .map(|p| {
+                    [h(p.point.x), h(p.point.y), h(p.normal.x), h(p.normal.y), h(p.separation), h(p.normal_impulse), h(p.tangent_impulse), h(p.relative_velocity.x), h(p.relative_velocity.y), (p.enabled as u8).to_string(), collider_name[&p.collider].clone(), collider_name[&p.other_collider].clone()].join(",")
+                })
+                .collect();
+            let line = format!(
+                "collider={} other={} rigidbody={} otherRigidbody={} rv={},{} enabled={} contacts=[{}]",
+                collider_name[&sc.collider],
+                collider_name[&sc.other_collider],
+                rbn(sc.rigidbody),
+                rbn(sc.other_rigidbody),
+                h(sc.relative_velocity.x),
+                h(sc.relative_velocity.y),
+                sc.enabled as u8,
+                contacts.join(";")
+            );
+            ours.push((message_name(rep.message).to_string(), line));
+        }
+    }
+    for (i, (g, o)) in game.iter().zip(&ours).enumerate() {
+        if g != o {
+            out.push(format!("Callback[{i}] {}: game {} ours {} {}", g.0, g.1, o.0, o.1));
+        }
+    }
+    if game.len() != ours.len() {
+        out.push(format!("Callback.count: game {} ours {}", game.len(), ours.len()));
+    }
+    Ok(out)
 }
 
 /// The world against the snapshot after its step: bodies, contacts (by fixture pair) and hinges.
@@ -349,7 +606,12 @@ pub fn physics_test(dump: &Path) -> Result<(), String> {
         let dt = f(pair[0].snap("fixedDt"));
         let mut r = restore(&pair[0], V::new(g[0], g[1]))?;
         r.world.step(dt, vel, pos);
-        let diffs = compare_world(&r, &pair[1])?;
+        let reports = r.world.process_contacts(true);
+        let mut diffs = compare_world(&r, &pair[1])?;
+        if pair[0].of("Collision2DRecord").next().is_some() {
+            diffs.extend(compare_contacts2d(&r, &pair[1])?);
+            diffs.extend(compare_reports(&r, &reports, &pair[0])?);
+        }
         if let Ok(path) = std::env::var("PPG_DIFFS") {
             use std::io::Write;
             let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();

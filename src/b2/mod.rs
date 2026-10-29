@@ -3,6 +3,7 @@
 
 pub mod broadphase;
 pub mod collide;
+pub mod contacts2d;
 pub mod distance;
 pub mod math;
 pub mod probe;

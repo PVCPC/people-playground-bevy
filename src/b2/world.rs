@@ -4,6 +4,7 @@
 
 use super::broadphase::{Aabb, BroadPhase};
 use super::collide::*;
+use super::contacts2d::{CollisionId, Contacts2D};
 use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
@@ -142,6 +143,20 @@ impl Default for RigidbodyMass {
     }
 }
 
+/// Unity's b2Fixture user data: the Collider2D (instance id) and its GameObject.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColliderRef {
+    pub id: i32,
+    pub game_object: i32,
+}
+
+/// Unity's b2Body user data: the Rigidbody2D (instance id) and its GameObject.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RigidbodyRef {
+    pub id: i32,
+    pub game_object: i32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BodyDef {
     pub kind: BodyType,
@@ -158,6 +173,8 @@ pub struct BodyDef {
     pub active: bool,
     pub gravity_scale: f32,
     pub rigidbody: RigidbodyMass,
+    /// None for a body without a Rigidbody2D (the static ground body).
+    pub user: Option<RigidbodyRef>,
 }
 
 impl Default for BodyDef {
@@ -177,6 +194,7 @@ impl Default for BodyDef {
             active: true,
             gravity_scale: 1.0,
             rigidbody: RigidbodyMass::default(),
+            user: None,
         }
     }
 }
@@ -208,6 +226,7 @@ pub struct Body {
     pub gravity_scale: f32,
     pub sleep_time: f32,
     pub rigidbody: RigidbodyMass,
+    pub user: Option<RigidbodyRef>,
 }
 
 impl Body {
@@ -299,6 +318,7 @@ pub struct FixtureDef {
     pub density: f32,
     pub is_sensor: bool,
     pub filter: Filter,
+    pub collider: ColliderRef,
 }
 
 #[derive(Clone, Debug)]
@@ -313,6 +333,7 @@ pub struct Fixture {
     /// (aabb, proxy id) per shape child; circles and polygons have one.
     proxies: Vec<(Aabb, i32)>,
     pub mass_data: MassData,
+    pub collider: ColliderRef,
 }
 
 #[derive(Clone, Debug)]
@@ -333,6 +354,9 @@ pub struct Contact {
     pub restitution: f32,
     pub tangent_speed: f32,
     pub(crate) manager_index: usize,
+    /// Unity: the contact's manifold index in its Collision2D record (-1 for none) and the record.
+    pub user_index: i32,
+    pub user_data: Option<CollisionId>,
 }
 
 pub type JointId = usize;
@@ -374,6 +398,8 @@ pub struct World {
     inv_dt0: f32,
     /// Physics2D.IgnoreCollision pairs (lower fixture id first), checked where Unity's contact filter runs.
     pub ignored: std::collections::HashSet<(FixtureId, FixtureId)>,
+    /// The contact listener's PhysicsContacts2D.
+    pub contacts2d: Contacts2D,
 }
 
 impl Default for World {
@@ -407,6 +433,7 @@ impl World {
             step_complete: true,
             inv_dt0: 0.0,
             ignored: Default::default(),
+            contacts2d: Contacts2D::default(),
         }
     }
 
@@ -461,6 +488,7 @@ impl World {
             gravity_scale: def.gravity_scale,
             sleep_time: 0.0,
             rigidbody: def.rigidbody,
+            user: def.user,
         };
         let id = self.bodies.len();
         self.bodies.push(Some(body));
@@ -495,7 +523,8 @@ impl World {
             for &(_, proxy) in &self.fixtures[f].as_ref().unwrap().proxies {
                 self.broad_phase.destroy_proxy(proxy);
             }
-            self.fixtures[f] = None;
+            let collider = self.fixtures[f].take().unwrap().collider;
+            *self.contacts2d.collider_shapes.get_mut(&collider.id).unwrap() -= 1;
         }
         self.body_list.retain(|&b| b != id);
         let list = if body.kind == BodyType::Static { &mut self.static_bodies } else { &mut self.non_static_bodies };
@@ -567,7 +596,9 @@ impl World {
             filter: def.filter,
             proxies,
             mass_data: MassData::default(),
+            collider: def.collider,
         }));
+        *self.contacts2d.collider_shapes.entry(def.collider.id).or_default() += 1;
         self.body_mut(body_id).fixtures.push(id);
         if reset_mass && 0.0 < def.density {
             self.reset_mass_data(body_id);
@@ -656,8 +687,10 @@ impl World {
         b.linear_velocity.x = -((c.y - old.y) * w) + b.linear_velocity.x;
     }
 
-    /// b2World::Step (180bbc560) on the single-threaded path.
+    /// b2World::Step (180bbc560) on the single-threaded path, as PhysicsScene2D::Simulate (180c24660) inlines it
+    /// after counting the simulation step.
     pub fn step(&mut self, dt: f32, velocity_iterations: i32, position_iterations: i32) {
+        self.contacts2d.simulation_id += 1;
         if self.flags & WORLD_NEW_FIXTURE != 0 {
             self.find_new_contacts();
             self.flags &= !WORLD_NEW_FIXTURE;
@@ -756,6 +789,8 @@ impl World {
             restitution: if a.restitution <= b.restitution { b.restitution } else { a.restitution },
             tangent_speed: 0.0,
             manager_index: 0,
+            user_index: -1,
+            user_data: None,
         };
         match self.free_contacts.pop() {
             Some(id) => {
@@ -853,6 +888,9 @@ impl World {
 
     /// b2ContactManager::Destroy (180bb90e0).
     fn destroy_contact(&mut self, id: ContactId) {
+        if self.contact(id).flags & CONTACT_TOUCHING != 0 {
+            self.end_contact(id);
+        }
         let c = self.contacts[id].take().unwrap();
         self.free_contacts.push(id);
         let pos = self.contact_list.iter().position(|&x| x == id).unwrap();
@@ -908,7 +946,7 @@ impl World {
         }
     }
 
-    /// b2Contact::Update (180bbd6e0) without a listener.
+    /// b2Contact::Update (180bbd6e0) with Unity's WorldContactListener2D.
     fn update_contact(&mut self, id: ContactId) {
         let c = self.contact(id);
         let old = c.manifold;
@@ -946,6 +984,15 @@ impl World {
         };
         let c = self.contact_mut(id);
         if touching { c.flags |= CONTACT_TOUCHING } else { c.flags &= !CONTACT_TOUCHING }
+        if !was_touching && touching {
+            self.begin_contact(id);
+        }
+        if was_touching && !touching {
+            self.end_contact(id);
+        }
+        if !sensor && touching {
+            self.pre_solve(id);
+        }
     }
 
     /// b2World::Solve (180bbae90): Unity seeds islands from m_nonStaticBodies and skips kinematic-only contacts.
@@ -1132,6 +1179,7 @@ impl World {
             b.angular_velocity = velocities[i].w;
             b.synchronize_transform();
         }
+        self.post_solve(island_contacts, &solver.velocity_constraints);
         if !self.allow_sleep {
             return;
         }
@@ -1411,6 +1459,7 @@ impl World {
             b.angular_velocity = w;
             b.synchronize_transform();
         }
+        self.post_solve(island_contacts, &solver.velocity_constraints);
     }
 
     /// b2Body::SynchronizeFixtures (180bbc900) with Fixture::Synchronize (180bbc7d0).
@@ -1463,7 +1512,7 @@ mod tests {
 
     fn box_fixture(size: Vec2) -> FixtureDef {
         let shape = Shape::Polygon(Polygon::from_points(&box_corners(Vec2::ZERO, size), POLYGON_RADIUS));
-        FixtureDef { shape, friction: 0.4, restitution: 0.0, density: 1.0, is_sensor: false, filter: Filter::default() }
+        FixtureDef { shape, friction: 0.4, restitution: 0.0, density: 1.0, is_sensor: false, filter: Filter::default(), collider: ColliderRef::default() }
     }
 
     #[test]
