@@ -121,6 +121,12 @@ impl Shape {
         }
     }
 
+    /// b2TestOverlap (180bb1970) on child 0 of each: GJK with radii from an empty cache, under 10·FLT_EPSILON apart.
+    pub fn test_overlap(&self, xf_a: &Transform, other: &Shape, xf_b: &Transform) -> bool {
+        let mut cache = SimplexCache::default();
+        super::distance::distance(&mut cache, &self.proxy(), xf_a, &other.proxy(), xf_b, true).distance < 10.0 * f32::EPSILON
+    }
+
     fn proxy(&self) -> DistanceProxy<'_> {
         match self {
             Shape::Circle(c) => DistanceProxy { vertices: std::slice::from_ref(&c.p), radius: c.radius },
@@ -621,9 +627,14 @@ impl World {
 
     /// b2World::QueryAABB (180bb9c20) on a point's AABB: each overlapping proxy's fixture, in tree order.
     pub fn query_point(&self, p: Vec2) -> Vec<FixtureId> {
+        self.query_aabb(&super::broadphase::Aabb { lower: p, upper: p })
+    }
+
+    /// b2World::QueryAABB: each overlapping proxy's fixture, in tree order.
+    pub fn query_aabb(&self, aabb: &super::broadphase::Aabb) -> Vec<FixtureId> {
         let mut out = Vec::new();
         let tree = &self.broad_phase.tree;
-        tree.query(&super::broadphase::Aabb { lower: p, upper: p }, |proxy| {
+        tree.query(aabb, |proxy| {
             out.push(tree.user_data(proxy));
             true
         });

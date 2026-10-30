@@ -23,13 +23,12 @@ struct LimbSprite(usize);
 struct Hud;
 
 fn load(recording: &Path, rig: &HumanRig) -> Result<Game, String> {
-    let text = std::fs::read_to_string(recording).map_err(|e| e.to_string())?;
-    let snaps = dump::parse(&text);
-    let start = snaps
-        .iter()
+    let start = dump::snapshots(recording)?
         .find(|s| s.pt == "FS" && s.of("b2World").next().is_some())
         .ok_or("--play needs a recording with the b2 world (dump12 on)")?;
-    Game::from_snapshot(start, rig)
+    let mut g = Game::from_snapshot(&start, rig)?;
+    g.load_layers(&dump::header(recording)?);
+    Ok(g)
 }
 
 /// --play-test: 30 s of 60 fps frames without a window; prints where each limb ends up.
@@ -63,7 +62,7 @@ pub fn run(recording: &Path, rig: HumanRig, cache: PathBuf) -> Result<(), String
         .insert_resource(rig)
         .insert_resource(Play { game, stopped: None, paused: false })
         .add_systems(Startup, setup)
-        .add_systems(Update, (controls, frame, draw).chain())
+        .add_systems(Update, (controls, mouse, frame, draw).chain())
         .run();
     Ok(())
 }
@@ -101,6 +100,33 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Play>, mut exit: M
     if keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
     }
+}
+
+/// The cursor and left button as InputSystem's "drag" control and Input.mousePosition, through this window's camera.
+fn mouse(
+    buttons: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut play: ResMut<Play>,
+) {
+    let (camera, at) = *camera;
+    let size = window.size();
+    let (Ok(origin), Ok(one)) = (camera.viewport_to_world_2d(at, Vec2::new(0.0, size.y)), camera.viewport_to_world_2d(at, Vec2::new(1.0, size.y))) else { return };
+    let input = &mut play.game.input;
+    if let Some(c) = window.cursor_position() {
+        // Unity's screen y runs up from the bottom.
+        let pixel = [c.x, size.y - c.y];
+        let screen = crate::game::tool::Screen { mouse: pixel, origin: origin.to_array(), scale: one.x - origin.x };
+        let w = screen.to_world(pixel);
+        input.mouse = [w[0], w[1], 0.0];
+        input.screen = Some(screen);
+    }
+    let control = crate::game::tool::Control {
+        down: buttons.just_pressed(MouseButton::Left),
+        held: buttons.pressed(MouseButton::Left),
+        up: buttons.just_released(MouseButton::Left),
+    };
+    input.controls.insert("drag".into(), control);
 }
 
 /// One Unity player-loop frame: FixedUpdate scripts and the physics pass until fixed time catches up with the
@@ -178,6 +204,18 @@ fn draw(
                     gizmos.circle_2d(world(c.p), c.radius, color);
                 }
             }
+        }
+    }
+    // SelectionBoxBehaviour, shown past √200 px.
+    if let (Some(t), Some(s)) = (g.tool.as_ref(), g.input.screen) {
+        let d = [s.mouse[0] - t.selectionDragStart[0], s.mouse[1] - t.selectionDragStart[1]];
+        if t.isSelecting && d[0] * d[0] + d[1] * d[1] > 200.0 {
+            let (a, b) = (Vec2::from_array(s.to_world(t.selectionDragStart)), Vec2::from_array(s.to_world(s.mouse)));
+            gizmos.rect_2d((a + b) * 0.5, (a - b).abs(), Color::srgb(0.6, 0.8, 1.0));
+        }
+        for &p in &t.rawSelection {
+            let [x, y, _] = g.physicals[p].transform.position;
+            gizmos.circle_2d(Vec2::new(x, y), 0.05, Color::srgb(0.4, 0.9, 0.5));
         }
     }
     hud.0 = match &play.stopped {

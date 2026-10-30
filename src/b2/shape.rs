@@ -133,6 +133,18 @@ fn collinear(a: Vec2, b: Vec2, c: Vec2) -> bool {
 }
 
 impl Polygon {
+    /// b2PolygonShape::SetAsBox (180bb5870) at angle 0 about `center`, keeping the shape's radius.
+    pub fn set_as_box(hx: f32, hy: f32, center: Vec2, radius: f32) -> Self {
+        let mut p = Polygon { radius, centroid: center, count: 4, ..Default::default() };
+        let corners = [Vec2::new(-hx, -hy), Vec2::new(hx, -hy), Vec2::new(hx, hy), Vec2::new(-hx, hy)];
+        let normals = [Vec2::new(0.0, -1.0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0), Vec2::new(-1.0, 0.0)];
+        for i in 0..4 {
+            p.vertices[i] = Vec2::new(corners[i].x + center.x, corners[i].y + center.y);
+            p.normals[i] = normals[i];
+        }
+        p
+    }
+
     /// b2PolygonShape::Set (180bb4b90). The radius stays at the caller's value.
     pub fn from_points(points: &[Vec2], radius: f32) -> Self {
         let Some(mut vertices) = (points.len() >= 3).then(|| weld_and_hull(points)).flatten() else {
