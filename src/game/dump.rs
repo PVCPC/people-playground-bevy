@@ -417,6 +417,7 @@ impl Game {
                         movement: raw.and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
                         detached: None,
                         component: 0,
+                        simulated: true,
                         detached_props: [0.0; 3],
                     };
                     // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
@@ -435,7 +436,7 @@ impl Game {
                         Some((_, &b)) => b,
                         None => g.world.create_body(&BodyDef::default()),
                     };
-                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None, component: 0, detached_props: [0.0; 3] };
+                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3] };
                     // From dump16 on the record carries the object's Transform.
                     if let Some(pos) = r.get("tpos") {
                         p.parent = r.get("parent").and_then(|t| node_of(&g, t));

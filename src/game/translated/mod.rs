@@ -42,7 +42,7 @@ impl Default for Translated {
             disable_when_wet: Vec::new(),
             emit_particles_on_shake_behaviour: Vec::new(),
             fan_behaviour: Vec::new(),
-            fan_behaviour__buffer: vec![0; 128],
+            fan_behaviour__buffer: rt::new_array(128),
             fire_sound_emitter: Vec::new(),
             guide_temperature_behaviour: Vec::new(),
             jack_o_latern_behaviour: Vec::new(),
@@ -168,6 +168,8 @@ pub enum LinkKind {
     Prefab,
     /// A LayerMask's bits.
     Mask,
+    /// A UnityEvent: its persistent calls that are not presentation.
+    Event,
     /// A Transform in the prefab.
     Transform,
     /// A component of a hand-written class: its index in that class's arena.
@@ -175,7 +177,7 @@ pub enum LinkKind {
 }
 
 /// The value the linker found for a field.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum LinkVal {
     Physical(Option<usize>),
     Script(Option<TBehaviour>),
@@ -183,6 +185,7 @@ pub enum LinkVal {
     Len(usize),
     Prefab(Option<rt::Go>),
     Mask(u32),
+    Event(Vec<crate::game::link::EventCall>),
     Transform(Option<rt::Xf>),
     Handwritten(Option<usize>),
 }

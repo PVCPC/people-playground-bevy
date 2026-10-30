@@ -89,6 +89,11 @@ pub fn index(i: i32) -> usize {
     usize::try_from(i).unwrap_or_else(|_| unimplemented!("IndexOutOfRangeException in a translated script"))
 }
 
+/// `new T[n]` (zero or null entries).
+pub fn new_array<T: Clone + Default>(n: i32) -> Vec<T> {
+    vec![T::default(); usize::try_from(n).unwrap_or_else(|_| unimplemented!("OverflowException: a negative array size in a translated script"))]
+}
+
 /// `(int)` of a double: cvttsd2si, int.MinValue when out of range or NaN.
 pub fn to_int(v: f64) -> i32 {
     if v.is_nan() || v >= 2147483648.0 || v <= -2147483649.0 { i32::MIN } else { v as i32 }

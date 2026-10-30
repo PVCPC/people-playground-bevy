@@ -865,6 +865,26 @@ impl World {
         }
     }
 
+    /// b2Body::SetActive(true) (180bba1c0): Fixture::CreateProxies (180bb9040) for each fixture from the list head, at the
+    /// body's transform.
+    pub fn activate_body(&mut self, id: BodyId) {
+        if self.body(id).flags & BODY_ACTIVE != 0 {
+            return;
+        }
+        self.body_mut(id).flags |= BODY_ACTIVE;
+        let xf = self.body(id).xf;
+        for f in self.body(id).fixtures.clone().into_iter().rev() {
+            let shape = self.fixtures[f].as_ref().unwrap().shape.clone();
+            let proxies = (0..shape.child_count())
+                .map(|child| {
+                    let aabb = shape.compute_aabb(&xf, child);
+                    (aabb, self.broad_phase.create_proxy(&aabb, proxy_key(f, child)))
+                })
+                .collect();
+            self.fixtures[f].as_mut().unwrap().proxies = proxies;
+        }
+    }
+
     /// b2Body::SetType (180bba4c0): the body moves between the world's static and non-static arrays (Unity's swap
     /// removal), the mass is reset, a static body stops, and every contact goes, with its fixtures' proxies touched.
     pub fn set_body_type(&mut self, id: BodyId, kind: BodyType) {

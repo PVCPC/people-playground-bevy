@@ -284,30 +284,61 @@ fn car_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance) -> Ve
     out
 }
 
-/// A persistent call `event_calls` keeps: CarBehaviour's, or DetachFromParent.Detach by its component id.
+/// A persistent call `event_calls` keeps: CarBehaviour's, DetachFromParent.Detach by its component id,
+/// ActOnDestroy.Clear by its GameObject's Transform id, Behaviour.set_enabled(true) on a DeleteAfterTime (its component
+/// id) or a RandomForceAtStart (its Rigidbody2D's component id, PositionalVelocityStrength, RotationalVelocityStrength),
+/// or Rigidbody2D.set_simulated(true) (the Rigidbody2D's component id).
 #[derive(Clone, Copy, Debug)]
 pub enum EventCall {
     Car(i32, super::car::CarCall),
     Detach(i32),
+    ClearDestroyWith(i32),
+    EnableDeleteAfter(i32),
+    EnableRandomForce(i32, f32, f32),
+    Simulate(i32),
 }
 
-/// The calls of an event that are not presentation (`presentation_call`), in order: CarBehaviour (`car_calls`) and
-/// DetachFromParent.Detach.
-fn event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance, what: &str) -> Result<Vec<EventCall>, String> {
+/// UseEventTrigger: Use runs Event while enabled and (not OnlyOnce or never used). Nothing sets its Action.
+#[derive(Clone, Debug)]
+pub struct UseEvent {
+    pub enabled: bool,
+    pub only_once: bool,
+    pub use_count: i32,
+    pub calls: Vec<EventCall>,
+}
+
+/// The calls of an event that are not presentation (`presentation_call`; `animations` also lets the animation
+/// behaviours of `animation_call` through), in order: CarBehaviour (`car_calls`), DetachFromParent.Detach,
+/// ActOnDestroy.Clear, Behaviour.set_enabled(true) on a DeleteAfterTime or RandomForceAtStart and
+/// Rigidbody2D.set_simulated(true).
+fn event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance, what: &str, animations: bool) -> Result<Vec<EventCall>, String> {
     let mut cars = car_calls(prefab, file, event, inst).into_iter();
     let mut out = Vec::new();
     for call in invoked_calls(event) {
-        if presentation_call(prefab, file, call) {
+        if presentation_call(prefab, file, call) || animations && animation_call(prefab, file, inst, call) {
             continue;
         }
-        let class = call_target(prefab, file, call).and_then(|(o, c)| match &prefab.objects[o].components[c].1 {
-            Component::Script { class, .. } => Some((class.as_str(), inst.objects[o].components[c])),
+        let method = string(call, "m_MethodName")?;
+        let on = call.get("m_Arguments").and_then(|a| a.get("m_BoolArgument")).and_then(Value::bool);
+        let target = call_target(prefab, file, call);
+        let kept = target.and_then(|(o, c)| match &prefab.objects[o].components[c].1 {
+            Component::Script { class, fields, .. } => match (class.as_str(), method.as_str()) {
+                ("CarBehaviour", _) => cars.next().map(|(id, c)| EventCall::Car(id, c)),
+                ("DetachFromParent", "Detach") => Some(EventCall::Detach(inst.objects[o].components[c])),
+                ("ActOnDestroy", "Clear") => Some(EventCall::ClearDestroyWith(inst.objects[o].components[0])),
+                ("DeleteAfterTime", "set_enabled") if on == Some(true) => Some(EventCall::EnableDeleteAfter(inst.objects[o].components[c])),
+                ("RandomForceAtStart", "set_enabled") if on == Some(true) => {
+                    let k = prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_)))?;
+                    Some(EventCall::EnableRandomForce(inst.objects[o].components[k], float(fields, "PositionalVelocityStrength").ok()?, float(fields, "RotationalVelocityStrength").ok()?))
+                }
+                _ => None,
+            },
+            Component::Rigidbody2D(_) if method == "set_simulated" && on == Some(true) => Some(EventCall::Simulate(inst.objects[o].components[c])),
             _ => None,
         });
-        match class {
-            Some(("CarBehaviour", _)) => out.push(cars.next().map(|(id, c)| EventCall::Car(id, c)).unwrap()),
-            Some(("DetachFromParent", id)) if string(call, "m_MethodName")? == "Detach" => out.push(EventCall::Detach(id)),
-            _ => unimplemented!("{what}: a persistent call beyond audio, particles, CarBehaviour and DetachFromParent.Detach ({})", string(call, "m_MethodName")?),
+        match kept {
+            Some(e) => out.push(e),
+            None => unimplemented!("{what}: a persistent call beyond audio, particles, CarBehaviour, DetachFromParent.Detach, ActOnDestroy.Clear, set_enabled(true) of a DeleteAfterTime or RandomForceAtStart and Rigidbody2D.set_simulated(true) ({method})"),
         }
     }
     Ok(out)
@@ -332,16 +363,20 @@ fn check_presentation_event(prefab: &Prefab, file: usize, inst: &Instance, event
         if presentation_call(prefab, file, call) {
             continue;
         }
-        let animation = call_target(prefab, file, call).filter(|&(to, tc)| {
-            matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if matches!(class.as_str(), "TranslationAnimationBehaviour" | "RotationAnimationBehaviour" | "ColorAnimationBehaviour"))
-                && string(call, "m_MethodName").is_ok_and(|m| m == "Play")
-                && std::iter::once(to).chain(inst.descendants(to)).all(|x| prefab.objects[x].components.iter().all(|(_, c)| !matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_))))
-        });
-        if animation.is_none() {
+        if !animation_call(prefab, file, inst, call) {
             unimplemented!("{what}: a persistent call beyond audio, particles and animations ({})", string(call, "m_MethodName")?);
         }
     }
     Ok(())
+}
+
+/// Play on a Translation/Rotation/ColorAnimationBehaviour animating a subtree without physics.
+fn animation_call(prefab: &Prefab, file: usize, inst: &Instance, call: &Value) -> bool {
+    call_target(prefab, file, call).is_some_and(|(to, tc)| {
+        matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if matches!(class.as_str(), "TranslationAnimationBehaviour" | "RotationAnimationBehaviour" | "ColorAnimationBehaviour"))
+            && string(call, "m_MethodName").is_ok_and(|m| m == "Play")
+            && std::iter::once(to).chain(inst.descendants(to)).all(|x| prefab.objects[x].components.iter().all(|(_, c)| !matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_))))
+    })
 }
 
 fn presentation_call(prefab: &Prefab, file: usize, call: &Value) -> bool {
@@ -521,7 +556,7 @@ impl Game {
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
             let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
-            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
+            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             let mut driven_by = None;
             if rb.body_type != 2 && detached.is_none() {
@@ -617,7 +652,7 @@ impl Game {
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
             let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
-            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
+            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
             // Rigidbody2D::Create set the scene's m_RigidbodyHierarchyChanged.
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             p.transform = pose(inst, o);
@@ -898,17 +933,18 @@ impl Game {
                 x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
                 x.before_destroyable = script(prefab, o, "DestroyableBehaviour").is_some_and(|(dc, _, _)| c < dc);
                 x.index = c;
-                x.OnExplodeCalls = event_calls(prefab, file, field(v, "OnExplode")?, inst, "ExplosiveBehaviour.OnExplode")?;
+                x.OnExplodeCalls = event_calls(prefab, file, field(v, "OnExplode")?, inst, "ExplosiveBehaviour.OnExplode", false)?;
                 x.OnArmPresentation = presentation_event(prefab, file, field(v, "OnArm")?);
                 let vfx = field(v, "VFXOverride")?.pptr().ok_or("VFXOverride")?;
                 x.VFXOverride = if vfx.is_null() { None } else { Some(db.resolve(file, vfx).ok_or("VFXOverride outside the data")?) };
                 explosives.insert(o, self.explosives.len());
                 self.explosives.push(x);
             }
-            if let Some((c, _, v)) = script(prefab, o, "DeleteAfterTime") {
+            if let Some((c, enabled, v)) = script(prefab, o, "DeleteAfterTime") {
                 let mut x = super::explosion::DeleteAfter::default();
                 load_values(x.fields(), v)?;
                 x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
                 x.OnEndOfLifePresentation = presentation_event(prefab, file, field(v, "OnEndOfLife")?);
                 delete_afters.insert(o, self.delete_afters.len());
                 self.delete_afters.push(x);
@@ -1032,10 +1068,12 @@ impl Game {
             launchers.insert(o, self.launchers.len());
             self.launchers.push(x);
         }
-        // UseEventTrigger.Use invokes Event (nothing sets its Action): presentation only, so Use skips it.
+        // UseEventTrigger.Use invokes Event (nothing sets its Action).
         for o in 0..n {
-            if let Some((_, _, v)) = script(prefab, o, "UseEventTrigger") {
-                check_presentation_event(prefab, file, inst, field(v, "Event")?, "UseEventTrigger.Event")?;
+            if let Some((c, enabled, v)) = script(prefab, o, "UseEventTrigger") {
+                let calls = event_calls(prefab, file, field(v, "Event")?, inst, "UseEventTrigger.Event", true)?;
+                let only_once = field(v, "OnlyOnce")?.bool().ok_or("OnlyOnce")?;
+                self.use_events.insert(inst.objects[o].components[c], UseEvent { enabled, only_once, use_count: 0, calls });
             }
         }
         let (mut act_on_collides, mut point_to_velocities, mut cars, mut tyres, mut flasks, mut truck_doors) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
@@ -1050,6 +1088,15 @@ impl Game {
                 let (center, extent) = (field(b, "m_Center")?, field(b, "m_Extent")?);
                 // Bounds.min and max: center -/+ extents.
                 (x.min, x.max) = ([float(center, "x")? - float(extent, "x")?, float(center, "y")? - float(extent, "y")?], [float(center, "x")? + float(extent, "x")?, float(center, "y")? + float(extent, "y")?]);
+                x.center = [float(center, "x")?, float(center, "y")?, float(center, "z")?];
+                x.extents = [float(extent, "x")?, float(extent, "y")?, float(extent, "z")?];
+                // base.transform: the Transforms down from the nearest physical or node.
+                (x.anchor, x.chain) = anchor_of(o);
+                // Rigidbody (a Rigidbody2D of this prefab; null stops SimulateLiquid).
+                if let Some(p) = field(v, "Rigidbody")?.pptr().filter(|p| !p.is_null()) {
+                    let (ro, rc) = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or("LiquidContainerController.Rigidbody outside the prefab")?;
+                    x.Rigidbody = Some(inst.objects[ro].components[rc]);
+                }
                 liquid_containers.insert(o, self.liquid_containers.len());
                 self.liquid_containers.push(x);
             }
@@ -1076,8 +1123,13 @@ impl Game {
                         Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "ProjectileLauncherBehaviour") && string(call, "m_MethodName")? == "Launch" => {
                             x.targets.push(super::acts::ActTarget::Launch(launchers[&to]));
                         }
+                        Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "DamagableMachineryBehaviour") && string(call, "m_MethodName")? == "ForceBreak" => {
+                            // The machinery loop below pushes this clone's DamagableMachineryBehaviours in object order.
+                            let before = (0..to).filter(|&x| script(prefab, x, "DamagableMachineryBehaviour").is_some()).count();
+                            x.targets.push(super::acts::ActTarget::ForceBreak(self.machinery.len() + before));
+                        }
                         _ if presentation_call(prefab, file, call) => {}
-                        _ => unimplemented!("ActOnCollide.Actions: a persistent call beyond ExplosiveBehaviour.Activate, audio and particles ({})", string(call, "m_MethodName")?),
+                        _ => unimplemented!("ActOnCollide.Actions: a persistent call beyond ExplosiveBehaviour.Activate, FirearmBehaviour.Shoot, ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, audio and particles ({})", string(call, "m_MethodName")?),
                     }
                 }
                 act_on_collides.insert(o, self.act_on_collides.len());
@@ -1661,6 +1713,7 @@ impl Game {
                         p => Some(super::translated::rt::Go::Asset(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?)),
                     }),
                     K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
+                    K::Event => V::Event(event_calls(prefab, file, x, inst, &format!("{class}.{name}"), true)?),
                     K::Handwritten(arena) => V::Handwritten(match l.object(x)? {
                         None => None,
                         Some(t) => Some(*match arena {
@@ -1732,6 +1785,40 @@ impl Game {
             EventCall::Car(car, c) => self.car_invoke(car, c),
             // DetachFromParent.Detach: transform.parent = null.
             EventCall::Detach(id) => self.set_parent_null_of(id, |_, _, _| {}),
+            // ActOnDestroy.Clear: DestroyWith = null. A destroyed ActOnDestroy (its entry is gone) is a destroyed target: the call is skipped.
+            EventCall::ClearDestroyWith(key) => {
+                if let Some(a) = self.act_on_destroy.get_mut(&key) {
+                    a.destroy_with.clear();
+                }
+            }
+            // A destroyed target's call is skipped (BaseInvokableCall.AllowInvoke).
+            EventCall::EnableDeleteAfter(id) if self.destroyed_components.contains(&id) => {}
+            // Behaviour.enabled = true: nothing when it already is; else, on an active object, Behaviour::AddToManager.
+            EventCall::EnableDeleteAfter(id) => {
+                let i = self.delete_afters.iter().position(|d| d.id == id).expect("a DeleteAfterTime in the arena");
+                if !std::mem::replace(&mut self.delete_afters[i].enabled, true) && self.with_component_instance(id, |_, inst, o| inst.objects[o].active) {
+                    let (order, b) = self.behaviour_of[&id];
+                    self.behaviours.add(order, b);
+                }
+            }
+            // Behaviour.enabled = true on a RandomForceAtStart that never ran Awake: Start follows before its first
+            // Update (it destroys itself, so it only enables once).
+            EventCall::EnableRandomForce(rb, ..) if self.destroyed_components.contains(&rb) => {}
+            EventCall::EnableRandomForce(rb, positional, rotational) => self.pending_starts.push(super::misc::PendingStart::RandomForce(rb, positional, rotational)),
+            EventCall::Simulate(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::Simulate(id) => self.rigidbody_set_simulated(id),
+        }
+    }
+
+    /// UseEventTrigger.Use (a Messages.IUse receiver): the Event's persistent calls in order, once with OnlyOnce.
+    pub(super) fn use_event_trigger_use(&mut self, id: i32) {
+        let e = self.use_events.get_mut(&id).expect("a UseEventTrigger in the arena");
+        if (e.only_once && e.use_count > 0) || !e.enabled {
+            return;
+        }
+        e.use_count += 1;
+        for call in e.calls.clone() {
+            self.event_call(call);
         }
     }
 
@@ -1779,11 +1866,19 @@ impl Game {
             let (pos, xf) = (inst.position(o), self.world.body(b).xf.p);
             if pos[0] != xf.x || pos[1] != xf.y {
                 let p = self.physicals.iter().position(|p| inst.objects[o].components.contains(&p.id)).filter(|&p| self.physicals[p].transform.local.is_some());
-                let Some(p) = p else {
-                    unimplemented!("{}: Transform.SetParent after its body moved (the clone's Transforms are stale)", prefab.objects[o].name);
-                };
-                let t = &self.physicals[p].transform;
-                live = Some((t.position, t.rotation, self.lossy_scale(p)));
+                // A Rigidbody2D without a PhysicalBehaviour: its Transform node is kept live.
+                let k = self.node_rigidbodies.iter().position(|n| self.transform_nodes[n.node].id == inst.objects[o].components[0]);
+                match (p, k) {
+                    (Some(p), _) => {
+                        let t = &self.physicals[p].transform;
+                        live = Some((t.position, t.rotation, self.lossy_scale(p)));
+                    }
+                    (None, Some(k)) => {
+                        let (position, rotation) = self.node_world(self.node_rigidbodies[k].node);
+                        live = Some((position, rotation, self.owner_lossy_scale(BodyOwner::Node(k))));
+                    }
+                    (None, None) => unimplemented!("{}: Transform.SetParent after its body moved (the clone's Transforms are stale)", prefab.objects[o].name),
+                }
             }
         }
         let bodies: Vec<_> = subtree.iter().filter_map(|x| inst.bodies.get(x).copied()).collect();
@@ -2256,6 +2351,7 @@ impl Game {
                     PendingStart::FirearmAttachmentPoint
                 }
                 "GasTankBehaviour" | "FlaskBehaviour" => PendingStart::Flask(linked.flasks[&o]),
+                "LiquidContainerController" => PendingStart::LiquidContainer(linked.liquid_containers[&o]),
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),

@@ -456,6 +456,8 @@ pub enum PendingStart {
     Translated(super::translated::TBehaviour),
     /// FlaskBehaviour.Start: the `Game::flasks` index.
     Flask(usize),
+    /// LiquidContainerController.Start: the `Game::liquid_containers` index.
+    LiquidContainer(usize),
     /// DetectorBehaviour.Start: the `Game::detectors` index.
     Detector(usize),
     /// SingleFloodlightBehaviour.Start: the `Game::floodlights` index.
@@ -932,6 +934,7 @@ impl Game {
                 PendingStart::MachineGun(m) => self.machine_gun_start(m),
                 PendingStart::Translated(b) => self.tr_start(b),
                 PendingStart::Flask(f) => self.flask_start(f),
+                PendingStart::LiquidContainer(c) => self.liquid_container_start(c),
                 PendingStart::Detector(i) => self.detector_start(i),
                 PendingStart::Floodlight(i) => self.floodlight_start(i),
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),

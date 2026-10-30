@@ -45,6 +45,8 @@ pub enum ActTarget {
     Shoot(usize),
     /// ProjectileLauncherBehaviour.Launch (`Game::launchers`)
     Launch(usize),
+    /// DamagableMachineryBehaviour.ForceBreak (`Game::machinery`)
+    ForceBreak(usize),
 }
 
 /// A script that takes a physical object's collision messages besides the PhysicalBehaviour and LimbBehaviour.
@@ -101,6 +103,7 @@ impl Game {
                     ActTarget::Activate(e) => self.explosive_activate(e),
                     ActTarget::Shoot(f) => self.firearm_shoot(f),
                     ActTarget::Launch(l) => self.launcher_launch(l),
+                    ActTarget::ForceBreak(m) => self.machinery_force_break(m),
                 }
             }
         }

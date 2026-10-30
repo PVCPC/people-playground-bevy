@@ -162,7 +162,7 @@ script! {
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
-        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None, component: 0, detached_props: [0.0; 3] },
+        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3] },
         transform: Pose = Pose::default(),
         /// The Transform's parent (index into Game.transform_nodes).
         parent: Option<usize> = None,
@@ -1393,6 +1393,7 @@ impl Game {
         // BloodTankBehaviour.
         let body = self.physicals[p].rigidbody.body;
         self.world.deactivate_body(body);
+        self.physicals[p].rigidbody.simulated = false;
         self.deactivate(p);
         self.physicals[p].isDisintegrated = true;
         // InvokeOnItemRemoved: the modding event only.

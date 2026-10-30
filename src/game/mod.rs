@@ -293,6 +293,21 @@ impl<const N: usize> Field for [f32; N] {
         Ok(())
     }
 }
+impl Field for Vec<f32> {
+    fn parse(&mut self, text: &str) -> Result<(), String> {
+        *self = if text.is_empty() { Vec::new() } else { text.split(',').map(bits).collect::<Result<_, _>>()? };
+        Ok(())
+    }
+    fn show(&self) -> String {
+        self.iter().map(Field::show).collect::<Vec<_>>().join(",")
+    }
+    /// float[]: the array's elements.
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+        let crate::assets::mono::Value::Array(items) = v else { return Err(format!("not an array: {v:?}")) };
+        *self = items.iter().map(|x| x.f32().ok_or(format!("not a float: {x:?}"))).collect::<Result<_, _>>()?;
+        Ok(())
+    }
+}
 impl Field for Option<f32> {
     fn parse(&mut self, text: &str) -> Result<(), String> {
         *self = if text == "null" { None } else { Some(bits(text)?) };
@@ -552,6 +567,9 @@ pub struct Rigidbody {
     pub detached: Option<crate::b2::world::RigidbodyMass>,
     /// The Rigidbody2D component's instance id.
     pub component: i32,
+    /// Rigidbody2D.simulated (+0x48): PhysicsManager2D::Simulate's write-back and Update's interpolation skip a body
+    /// without it.
+    pub simulated: bool,
     /// While detached, the component's linear drag, angular drag and gravity scale (the next Create reads them).
     pub detached_props: [f32; 3],
 }
@@ -848,10 +866,11 @@ impl Hinge {
 }
 
 /// What a bare collider's Transform hangs from.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum BareAnchor {
     Physical(usize),
     Node(usize),
+    #[default]
     Root,
 }
 
@@ -1186,6 +1205,8 @@ pub struct Game {
     /// The components of destroyed GameObjects (they read null).
     pub destroyed_components: std::collections::HashSet<i32>,
     pub act_on_destroy: HashMap<i32, destroyable::ActOnDestroy>,
+    /// UseEventTrigger components by instance id.
+    pub use_events: HashMap<i32, link::UseEvent>,
     /// What `spawn` linked of each clone with an object that was inactive when it spawned (by the id of the root
     /// Transform): the first GameObject.SetActive(true) of such an object runs its scripts' Awake with it.
     pub first_activation: HashMap<i32, link::Linked>,

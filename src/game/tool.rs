@@ -105,6 +105,12 @@ pub const SELECTION_MASS: i32 = 1;
 
 const DEG2RAD: f32 = f32::from_bits(0x3c8efa35);
 
+/// A receiver of BroadcastMessage("Use"): a rewritten behaviour or a UseEventTrigger (its component id).
+enum UseReceiver {
+    Behaviour(Behaviour),
+    Event(i32),
+}
+
 /// The classes with a Use(ActivationPropagation) method, and their subclasses.
 const USE_RECEIVERS: &[&str] = &[
     "AcidSyringe", "ActivatorElectrodeBehaviour", "AdhesiveCouplerBehaviour", "AdrenalineSyringe",
@@ -311,11 +317,9 @@ impl Game {
         self.anchored_world(b.anchor, &b.chain).0
     }
 
-    /// Transform.position, rotation and the product of the local scales of an object `chain` (object first) below
-    /// `anchor`.
-    pub fn anchored_world(&self, anchor: super::BareAnchor, chain: &[crate::unity::transform::Trs]) -> ([f32; 3], [f32; 4], [f32; 3]) {
-        use crate::unity::transform::{global_position, global_rotation, Trs};
-        let mut nodes: Vec<Trs> = chain.to_vec();
+    /// The Transforms of an object `chain` below `anchor`: the object first, then each ancestor up to the root.
+    pub fn anchored_nodes(&self, anchor: super::BareAnchor, chain: &[crate::unity::transform::Trs]) -> Vec<crate::unity::transform::Trs> {
+        let mut nodes = chain.to_vec();
         match anchor {
             super::BareAnchor::Physical(p) => nodes.extend(self.local_chain(p).into_iter().rev()),
             super::BareAnchor::Node(mut i) => loop {
@@ -325,6 +329,24 @@ impl Game {
             },
             super::BareAnchor::Root => {}
         }
+        nodes
+    }
+
+    /// Transform.InverseTransformVector (1807f29f0 -> 1807f27e0) of an object `chain` below `anchor`: each
+    /// ancestor's inverse from the root down, then the object's.
+    pub fn anchored_inverse_vector(&self, anchor: super::BareAnchor, chain: &[crate::unity::transform::Trs], v: [f32; 3]) -> [f32; 3] {
+        let mut v = [v[0], v[1], v[2], 0.0];
+        for node in self.anchored_nodes(anchor, chain).iter().rev() {
+            v = crate::unity::transform::inverse_vector(node, v);
+        }
+        [v[0], v[1], v[2]]
+    }
+
+    /// Transform.position, rotation and the product of the local scales of an object `chain` (object first) below
+    /// `anchor`.
+    pub fn anchored_world(&self, anchor: super::BareAnchor, chain: &[crate::unity::transform::Trs]) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        use crate::unity::transform::{global_position, global_rotation};
+        let nodes = self.anchored_nodes(anchor, chain);
         let (mut v, mut r, mut s) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0], [1.0f32; 3]);
         for n in &nodes {
             (v, r) = (global_position(n, v), global_rotation(n, r));
@@ -445,7 +467,7 @@ impl Game {
     /// components in order.
     fn broadcast_use(&mut self, p: usize) {
         let id = self.physicals[p].id;
-        let receivers: Vec<Behaviour> = self.with_component_instance(id, |g, inst, start| {
+        let receivers: Vec<UseReceiver> = self.with_component_instance(id, |g, inst, start| {
             let mut out = Vec::new();
             for x in std::iter::once(start).chain(inst.descendants(start)) {
                 if !inst.objects[x].active {
@@ -453,14 +475,17 @@ impl Game {
                 }
                 for (k, (_, c)) in inst.prefab.objects[x].components.iter().enumerate() {
                     let crate::assets::db::Component::Script { class, .. } = c else { continue };
-                    // PhysicalBehaviour.Use only invokes ModdingApi.Events.OnItemActivated (no mods); link checks
-                    // UseEventTrigger's Event is presentation.
-                    if !USE_RECEIVERS.contains(&class.as_str()) || matches!(class.as_str(), "PhysicalBehaviour" | "UseEventTrigger") {
+                    // PhysicalBehaviour.Use only invokes ModdingApi.Events.OnItemActivated (no mods).
+                    if !USE_RECEIVERS.contains(&class.as_str()) || class == "PhysicalBehaviour" {
+                        continue;
+                    }
+                    if class == "UseEventTrigger" {
+                        out.push(UseReceiver::Event(inst.objects[x].components[k]));
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_)))) => out.push(b),
-                        Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(b),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_)))) => out.push(UseReceiver::Behaviour(b)),
+                        Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                         _ => unimplemented!("{class}.Use"),
                     }
                 }
@@ -468,6 +493,13 @@ impl Game {
             out
         });
         for b in receivers {
+            let b = match b {
+                UseReceiver::Event(id) => {
+                    self.use_event_trigger_use(id);
+                    continue;
+                }
+                UseReceiver::Behaviour(b) => b,
+            };
             match b {
                 Behaviour::Firearm(f) => self.firearm_use(f),
                 Behaviour::Explosive(e) => self.explosive_use(e),

@@ -82,6 +82,8 @@ script! {
         /// The component's instance id.
         id: i32 = 0,
         time: f32 = 0.0,
+        /// Behaviour.enabled (a UseEventTrigger sets it at run time).
+        enabled: bool = true,
         /// OnEndOfLife's persistent calls reach only audio and particle components.
         OnEndOfLifePresentation: bool = true,
     }

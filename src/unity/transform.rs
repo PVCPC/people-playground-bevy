@@ -82,6 +82,12 @@ pub fn inverse(n: &Trs, pos: [f32; 4], rot: [f32; 4]) -> ([f32; 4], [f32; 4]) {
     }
 }
 
+/// One node of InverseTransformVector (1807f27e0, the parent's step first): `inverse`'s position lanes without the
+/// translation subtract (every lane is `v - 0`, so -0 stays -0).
+pub fn inverse_vector(n: &Trs, v: [f32; 4]) -> [f32; 4] {
+    inverse(&Trs { t: [0.0; 4], ..*n }, v, [0.0, 0.0, 0.0, 1.0]).0
+}
+
 /// SetLocalTR's rotation: each lane over the square root of its own horizontal sum; identity when tiny.
 pub fn normalize(q: [f32; 4]) -> [f32; 4] {
     unsafe {

@@ -149,7 +149,7 @@ impl Game {
             Some(&(r, _)) if poolable => {
                 let ps = crate::assets::components::ParticleSystemHead::read(db.data(r)).map_err(|e| format!("ParticleSystem: {e}"))?;
                 if (ps.stop_action != 3 && !helper) || ps.looping || ps.simulation_speed != 1.0 {
-                    unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback", root.name);
+                    unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback at simulationSpeed 1 (stopAction {}, looping {}, simulationSpeed {}): OnParticleSystemStopped fires once emission ended and the last particle died, which depends on the native particle RNG's startLifetime draws", root.name, ps.stop_action, ps.looping, ps.simulation_speed);
                 }
                 ps.length_in_sec as f64
             }
@@ -387,7 +387,7 @@ impl Game {
                 let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
                 let id = inst.objects[d].components[k];
                 // Behaviour::AddToManager with the OnEnable.
-                if let (Some(&(order, b)), true) = (self.behaviour_of.get(&id), *enabled && !self.script_disabled(id)) {
+                if let (Some(&(order, b)), true) = (self.behaviour_of.get(&id), self.script_enabled(id, *enabled)) {
                     self.behaviours.add(order, b);
                 }
                 match class.as_str() {

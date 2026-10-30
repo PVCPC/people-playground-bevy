@@ -103,6 +103,15 @@ impl Game {
         }
     }
 
+    /// DamagableMachineryBehaviour.ForceBreak
+    pub(super) fn machinery_force_break(&mut self, m: usize) {
+        let mc = &mut self.machinery[m];
+        if !mc.Indestructible && !mc.Destroyed {
+            mc.Health = -1.0;
+            self.machinery_act_on_damage(m);
+        }
+    }
+
     /// DamagableMachineryBehaviour.ActOnDamage
     pub(super) fn machinery_act_on_damage(&mut self, m: usize) {
         let mc = &self.machinery[m];
@@ -214,6 +223,15 @@ impl Game {
                 }
             }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
+        }
+    }
+
+    /// Whether script `id` is enabled for an OnEnable: a DeleteAfterTime's runtime flag (a UseEventTrigger enables it),
+    /// else the prefab's m_Enabled unless it was disabled at run time.
+    pub(super) fn script_enabled(&self, id: i32, prefab_enabled: bool) -> bool {
+        match self.delete_afters.iter().find(|d| d.id == id) {
+            Some(d) => d.enabled,
+            None => prefab_enabled && !self.script_disabled(id),
         }
     }
 

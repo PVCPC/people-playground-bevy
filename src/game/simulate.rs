@@ -123,7 +123,7 @@ impl Game {
     fn write_back_transforms(&mut self) {
         for p in self.rigidbody_order() {
             // A disintegrated object's Rigidbody2D left the scene's list with its body.
-            if self.physicals[p].rigidbody.detached.is_some() {
+            if self.physicals[p].rigidbody.detached.is_some() || !self.physicals[p].rigidbody.simulated {
                 continue;
             }
             let ph = &self.physicals[p];
@@ -159,7 +159,7 @@ impl Game {
         // parent ahead of its children as the depth lists do.
         for k in 0..self.node_rigidbodies.len() {
             let nb = &self.node_rigidbodies[k];
-            if nb.rigidbody.detached.is_some() {
+            if nb.rigidbody.detached.is_some() || !nb.rigidbody.simulated {
                 continue;
             }
             let b = self.world.body(nb.rigidbody.body);
@@ -237,7 +237,7 @@ impl Game {
     }
 
     /// Transform.lossyScale of a Rigidbody2D's owner.
-    fn owner_lossy_scale(&self, o: BodyOwner) -> [f32; 3] {
+    pub(super) fn owner_lossy_scale(&self, o: BodyOwner) -> [f32; 3] {
         match o {
             BodyOwner::Physical(p) => self.lossy_scale(p),
             BodyOwner::Node(k) => {
@@ -247,6 +247,30 @@ impl Game {
                 transform::lossy_scale(&nodes, self.node_world(n).1)
             }
         }
+    }
+
+    /// Rigidbody2D.simulated = true (Rigidbody2D::SetSimulated 180c23ea0, called by the property setter): the movement
+    /// state restarts from the body pose (previous and current := body, interpolating cleared), the body goes to the
+    /// Transform's position and angle (b2Body::SetTransform) and b2Body::SetActive(true) creates its proxies. A
+    /// Rigidbody2D without a body (its object inactive) only keeps the flag. The pending velocity writes (+0x7d, +0x7e)
+    /// it flushes are only set by a Rigidbody2D velocity write on a body-less component, which no script does.
+    pub(super) fn rigidbody_set_simulated(&mut self, id: i32) {
+        let owner = self.rigidbody_owner(id).expect("Rigidbody2D.simulated: a Rigidbody2D outside the arenas");
+        let (position, rotation) = match owner {
+            BodyOwner::Physical(p) => (self.physicals[p].transform.position, self.physicals[p].transform.rotation),
+            BodyOwner::Node(k) => self.node_world(self.node_rigidbodies[k].node),
+        };
+        let rb = self.owner_rigidbody_mut(owner);
+        rb.simulated = true;
+        if rb.detached.is_some() {
+            return;
+        }
+        let body = rb.body;
+        rb.movement.previous = rb.movement.body;
+        rb.movement.current = rb.movement.body;
+        rb.movement.interpolating = false;
+        self.world.set_transform(body, Vec2::new(position[0], position[1]), super::spawn::body_angle(rotation));
+        self.world.activate_body(body);
     }
 
     /// PhysicsScene2D's rigidbody update lists (AddRigidbodyUpdates, 180c1c280): by GetTransformDepth capped at 63,
@@ -343,7 +367,7 @@ impl Game {
         for p in self.rigidbody_order() {
             let rb = &self.physicals[p].rigidbody;
             // A kinematic body driven by a parent body follows the parent instead.
-            if !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && self.physicals[p].driven_by.is_some() {
+            if !rb.simulated || !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && self.physicals[p].driven_by.is_some() {
                 continue;
             }
             // RigidbodyInterpolation2D.Extrapolate is never set by the game (prefabs and Global.CurrentInterpolationMode
@@ -360,7 +384,7 @@ impl Game {
         for k in 0..self.node_rigidbodies.len() {
             let nb = &self.node_rigidbodies[k];
             let rb = &nb.rigidbody;
-            if !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && nb.driven_by.is_some() {
+            if !rb.simulated || !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && nb.driven_by.is_some() {
                 continue;
             }
             assert_eq!(rb.interpolation, 1, "Rigidbody2D extrapolation");

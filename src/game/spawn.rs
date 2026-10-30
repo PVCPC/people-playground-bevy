@@ -361,7 +361,7 @@ fn z_rot_angle(q: [f32; 4]) -> f32 {
 
 /// The body angle Rigidbody2D::Create and SyncTransforms take from a rotation: the quaternion's sign flipped
 /// when w < 0, then twice the half angle.
-fn body_angle(mut q: [f32; 4]) -> f32 {
+pub(super) fn body_angle(mut q: [f32; 4]) -> f32 {
     if q[3] < 0.0 {
         (q[2], q[3]) = (neg(q[2]), neg(q[3]));
     }
@@ -699,6 +699,15 @@ impl Game {
             } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(id)) {
                 // A Fixed/SliderJoint2D HingeJointLimitAutofixBehaviour took over from the instance.
                 self.fixed_joint_cleanup(f, false);
+            } else if self.tool.as_ref().is_some_and(|t| t.dragJoint.iter().chain(&t.destroying).any(|d| d.joint == Some(id))) {
+                // The drag tool's HingeJoint2D: Joint2D::Cleanup (180c03500) destroys the b2 joint, as in rigidbody_cleanup.
+                let t = self.tool.as_mut().unwrap();
+                for d in t.dragJoint.iter_mut().chain(&mut t.destroying) {
+                    if d.joint == Some(id) {
+                        d.joint = None;
+                    }
+                }
+                self.world.destroy_joint(id);
             } else {
                 unimplemented!("{}: Rigidbody2D::Cleanup with another instance's joint", prefab.objects[o].name);
             }
