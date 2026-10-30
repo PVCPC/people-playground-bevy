@@ -155,6 +155,43 @@ pub fn sinf(x: f32) -> f32 {
     (if xd < 0.0 { -v } else { v }) as f32
 }
 
+/// The engine's statically linked CRT acosf (181592fcc).
+pub fn acosf(x: f32) -> f32 {
+    let c = f32::from_bits;
+    let ux = x.to_bits();
+    let e = (ux >> 23) & 0xff;
+    if ux & 0x7fff_ffff > 0x7f80_0000 {
+        return x + x;
+    }
+    if e < 0x65 {
+        return c(0x3fc90fdb);
+    }
+    if e >= 0x7f {
+        return if x == 1.0 { 0.0 } else if x == -1.0 { c(0x40490fdb) } else { c(0xffc00000) };
+    }
+    // |x| >= 0.5 works on sqrt((1 - |x|) / 2).
+    let transform = e >= 0x7e;
+    let (r, s) = if transform {
+        let r = (1.0 - x.abs()) * 0.5;
+        (r, r.sqrt())
+    } else {
+        (x * x, 0.0)
+    };
+    let p = (((c(0xbc5b3fe1) - r * c(0x3b81ce6b)) * r - c(0x3d678bdd)) * r + c(0x3e3c94dc)) * r;
+    let u = p / (c(0x3f8d6fa5) - r * c(0x3f561f0d));
+    let pio2_lo = f64::from_bits(0x3c91a62633145c07);
+    if !transform {
+        return (f64::from_bits(0x3ff921fb54442d18) - (x as f64 - (pio2_lo - (u * x) as f64))) as f32;
+    }
+    if (ux as i32) < 0 {
+        let v = ((u * s) as f64 - pio2_lo) + s as f64;
+        return (f64::from_bits(0x400921fb54442d18) - (v + v)) as f32;
+    }
+    let s1 = c(s.to_bits() & 0xffff_0000);
+    let t = (r - s1 * s1) / (s1 + s);
+    ((s + s) * u + (t + t)) + s1 * 2.0
+}
+
 /// Checks cosf/sinf against the engine's (NativeProbe `trig`) on every angle Random.Range(0, 2pi) yields.
 pub fn compare_trig(probe: &std::path::Path) -> Result<(), String> {
     let output = std::process::Command::new(probe).arg("trig").output().map_err(|e| e.to_string())?;
@@ -388,6 +425,15 @@ pub fn atan2f(y: f32, x: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acosf_within_an_ulp() {
+        for i in -1000..=1000 {
+            let x = i as f32 / 1000.0;
+            let (ours, exact) = (acosf(x), (x as f64).acos() as f32);
+            assert!((ours.to_bits() as i32 - exact.to_bits() as i32).abs() <= 1, "acosf({x}) = {ours} vs {exact}");
+        }
+    }
 
     #[test]
     fn random_follows_the_engine_xorshift() {

@@ -273,6 +273,7 @@ pub struct Time {
     pub time: f32,
     pub timeAsDouble: f64,
     pub fixedTime: f32,
+    pub fixedTimeAsDouble: f64,
     pub deltaTime: f32,
     pub fixedDeltaTime: f32,
     pub maximumDeltaTime: f32,
@@ -402,9 +403,28 @@ pub struct Rigidbody {
     pub bodyType: i32,
     pub collisionDetectionMode: i32,
     pub interpolation: i32,
+    pub movement: MovementState,
+}
+
+/// RigidbodyMovementState2D (Rigidbody2D+0x98): the body pose before and after the last physics step, and the
+/// pose PhysicsManager2D::Update interpolates between them for the Transform.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MovementState {
+    pub previous: ([f32; 3], [f32; 4]),
+    pub current: ([f32; 3], [f32; 4]),
+    pub body: ([f32; 3], [f32; 4]),
+    pub interpolating: bool,
+    /// In PhysicsScene2D.m_RigidbodyMovementStates (m_MovementIndex != -1).
+    // ponytail: membership only; the index is the scripts' Start order and never changes a result.
+    pub listed: bool,
 }
 
 impl Rigidbody {
+    /// The movement state's interpolation flag with a non-None mode (both checked by the interpolation pass).
+    pub fn interpolating(&self) -> bool {
+        self.movement.listed && self.movement.interpolating && self.interpolation != 0
+    }
+
     pub fn velocity(&self, w: &World) -> [f32; 2] {
         let b = w.body(self.body);
         if self.bodyType == 2 { [0.0, 0.0] } else { [b.linear_velocity.x, b.linear_velocity.y] }
@@ -675,6 +695,10 @@ pub struct Game {
     pub joint_break_limits: Vec<usize>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
+    /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.
+    pub last_simulation: (f64, f32),
+    /// PhysicsScene2D m_RigidbodyHierarchyChanged: the movement-state list is rebuilt after the next step.
+    pub rigidbody_hierarchy_changed: bool,
 }
 
 impl Default for Random {

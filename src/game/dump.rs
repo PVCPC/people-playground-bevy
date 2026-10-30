@@ -306,7 +306,11 @@ impl Game {
                         bodyType: rb.req("bodyType")?.parse().unwrap(),
                         collisionDetectionMode: rb.req("cdm")?.parse().unwrap(),
                         interpolation: rb.req("interpolation")?.parse().unwrap(),
+                        movement: s.of("b2Body").nth(l).and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
                     };
+                    // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
+                    let changed = s.of("b2Body").nth(l).and_then(|r| r.get("hierarchyChanged"));
+                    g.rigidbody_hierarchy_changed |= changed.map_or(!p.rigidbody.movement.listed && p.rigidbody.bodyType != 2, |v| v == "1");
                     p.parent = rb.get("parent").and_then(|t| node_of(&g, t));
                     p.transform = Pose {
                         position: floats(rb.req("tpos")?),
@@ -319,7 +323,7 @@ impl Game {
                         Some((_, &b)) => b,
                         None => g.world.create_body(&BodyDef::default()),
                     };
-                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0 };
+                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default() };
                 }
             }
             g.physicals.push(p);
@@ -589,6 +593,7 @@ impl Game {
             time: f(s.snap("time")),
             timeAsDouble: s.of("Time").next().and_then(|r| r.get("timeAsDouble")).map_or(f(s.snap("time")) as f64, |w| f64::from_bits(u64::from_str_radix(w, 16).unwrap())),
             fixedTime: f(s.snap("fixedTime")),
+            fixedTimeAsDouble: s.of("Time").next().and_then(|r| r.get("fixedTimeAsDouble")).map_or(f(s.snap("fixedTime")) as f64, |w| f64::from_bits(u64::from_str_radix(w, 16).unwrap())),
             deltaTime: f(s.snap("dt")),
             fixedDeltaTime: f(s.snap("fixedDt")),
             maximumDeltaTime: f(s.snap("maxDt")),
@@ -866,6 +871,14 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         if ours != theirs {
             out.push(format!("b2Body {}: game {theirs:08x?} ours {ours:08x?}", r.name));
         }
+        if let Some(m) = r.get("move") {
+            let w = words(m);
+            let theirs = [&[(w[0] != u32::MAX) as u32], &w[4..25], &[w[31] & 0xff]].concat();
+            let ours = movement_words(&g.physicals[g.limbs[i].PhysicalBehaviour].rigidbody.movement);
+            if ours != theirs {
+                out.push(format!("RigidbodyMovementState2D {}: game {theirs:08x?} ours {ours:08x?}", r.name));
+            }
+        }
         let sleep = words(r.req("mass").unwrap())[9];
         if sleep != b.sleep_time.to_bits() {
             out.push(format!("b2Body {}.sleepTime: game {sleep:08x} ours {:08x}", r.name, b.sleep_time.to_bits()));
@@ -878,16 +891,28 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     out
 }
 
-/// The physics pass's results at FE: the b2 world, the Collision2D records and each awake body's Transform.
-fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
-    // A second restore of the same snapshot builds the same ids, so its name maps fit the game's world.
-    let mut r = physics::restore(from, V::new(0.0, -9.81))?;
-    r.world = std::mem::replace(&mut g.world, World::new(V::ZERO));
-    let mut out = physics::compare_world(&r, to)?;
-    out.extend(physics::compare_contacts2d(&r, to)?);
-    g.world = std::mem::replace(&mut r.world, World::new(V::ZERO));
-    // Limb Transforms need the group objects between limb and root (TransformChain parents, from dump11 on).
-    let chain = from.of("TransformChain").any(|r| r.get("parent").is_some());
+/// RigidbodyMovementState2D from the recorder's `move` words (Rigidbody2D+0x98 on).
+fn movement_state(w: &[u32]) -> MovementState {
+    let v = |i: usize| f32::from_bits(w[i]);
+    let pose = |i: usize| ([v(i), v(i + 1), v(i + 2)], [v(i + 3), v(i + 4), v(i + 5), v(i + 6)]);
+    MovementState { previous: pose(4), current: pose(11), body: pose(18), interpolating: w[31] & 0xff != 0, listed: w[0] != u32::MAX }
+}
+
+/// The inverse of movement_state: listed, words 4-24 and the flag byte.
+fn movement_words(m: &MovementState) -> Vec<u32> {
+    let mut out = vec![m.listed as u32];
+    for (p, q) in [m.previous, m.current, m.body] {
+        out.extend(p.iter().chain(&q).map(|f| f.to_bits()));
+    }
+    out.push(m.interpolating as u32);
+    out
+}
+
+/// Each limb's Transform against the recording; needs the group objects between limb and root (TransformChain
+/// parents, from dump11 on).
+fn compare_transforms(g: &Game, chained: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let chain = chained.of("TransformChain").any(|r| r.get("parent").is_some());
     for (l, rb) in to.of("Rigidbody2D").enumerate().filter(|_| chain) {
         let t = &g.physicals[g.limbs[l].PhysicalBehaviour].transform;
         let (pos, rot): ([f32; 3], [f32; 4]) = (floats(rb.req("tpos")?), floats(rb.req("trot")?));
@@ -896,6 +921,18 @@ fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<S
             out.push(format!("Transform {}: game {:08x?} {:08x?} ours {:08x?} {:08x?}", rb.name, bits(&pos), bits(&rot), bits(&t.position), bits(&t.rotation)));
         }
     }
+    Ok(out)
+}
+
+/// The physics pass's results at FE: the b2 world, the Collision2D records and each awake body's Transform.
+fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
+    // A second restore of the same snapshot builds the same ids, so its name maps fit the game's world.
+    let mut r = physics::restore(from, V::new(0.0, -9.81))?;
+    r.world = std::mem::replace(&mut g.world, World::new(V::ZERO));
+    let mut out = physics::compare_world(&r, to)?;
+    out.extend(physics::compare_contacts2d(&r, to)?);
+    g.world = std::mem::replace(&mut r.world, World::new(V::ZERO));
+    out.extend(compare_transforms(g, from, to)?);
     Ok(out)
 }
 
@@ -910,7 +947,10 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
     let start = snaps.iter().position(|s| s.pt == "FS" && s.of("b2World").next().is_some()).ok_or("no FS snapshot")?;
     let mut g = Game::from_snapshot(&snaps[start], rig)?;
     for (n, pair) in snaps[start..].windows(2).enumerate() {
+        // Only Time comes from the recording: the scripts' Random state carries over.
+        let random = g.random.clone();
         g.load_time(&pair[0]);
+        g.random = random;
         let mut diffs = Vec::new();
         match (pair[0].pt.as_str(), pair[1].pt.as_str()) {
             ("FS", "FM") => g.fixed_update_scripts(),
@@ -919,6 +959,14 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
             }
             ("US", "UE") => g.update_scripts(),
+            // PreUpdate's Physics2DUpdate at the frame's time.
+            ("FE", "US") => {
+                let random = g.random.clone();
+                g.load_time(&pair[1]);
+                g.random = random;
+                g.interpolate_bodies();
+                diffs = compare_transforms(&g, &snaps[start], &pair[1])?;
+            }
             _ => {}
         }
         diffs.extend(compare(&mut g, &pair[1]));
