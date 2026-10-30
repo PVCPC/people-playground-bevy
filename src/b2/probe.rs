@@ -15,6 +15,8 @@ const COLLIDE_CIRCLES: u32 = 0xbaeff0;
 const COLLIDE_POLYGON_AND_CIRCLE: u32 = 0xbaf500;
 const COLLIDE_POLYGONS: u32 = 0xbaf8f0;
 const COLLIDE_RADIAL_POLYGONS: u32 = 0xbaffe0;
+const COLLIDE_EDGE_AND_CIRCLE: u32 = 0xbaf0e0;
+const COLLIDE_EDGE_AND_POLYGON: u32 = 0xbaf4c0;
 const WORLD_MANIFOLD: u32 = 0xbadb50;
 const INITIALIZE_VELOCITY: u32 = 0xbbe5f0;
 const WARM_START: u32 = 0xbc0780;
@@ -770,6 +772,7 @@ fn compare_curve(executable: &std::path::Path) -> Result<(), String> {
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
     compare_manifolds(executable)?;
+    compare_edge_manifolds(executable)?;
     compare_solver(executable)?;
     compare_distance(executable)?;
     compare_toi(executable)?;
@@ -1710,4 +1713,66 @@ fn compare_prismatic(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     report("PRISMATIC JOINT", bad, replies.len(), first)
+}
+
+fn edge_bytes(edge: &Edge) -> Vec<u8> {
+    let mut b = vec![0; 0x38];
+    put(&mut b, 8, 1);
+    put(&mut b, 0xc, edge.radius.to_bits());
+    put_vec(&mut b, 0x10, edge.v1);
+    put_vec(&mut b, 0x18, edge.v2);
+    put_vec(&mut b, 0x20, edge.v0);
+    put_vec(&mut b, 0x28, edge.v3);
+    b[0x30] = edge.has_v0 as u8;
+    b[0x31] = edge.has_v3 as u8;
+    b
+}
+
+/// A chain child: a random segment, each ghost vertex present half the time (zeroed when absent, as GetChildEdge
+/// leaves it).
+fn random_edge(random: &mut Random) -> Edge {
+    let radius = super::settings::globals().polygon_radius + [0.0, 0.0, random.range(0.0, 0.2)][random.next() as usize % 3];
+    let (v1, v2) = (random.vec(0.8), random.vec(0.8));
+    let (has_v0, has_v3) = (random.next() % 2 == 0, random.next() % 2 == 0);
+    let v0 = if has_v0 { random.vec(0.8) } else { Vec2::ZERO };
+    let v3 = if has_v3 { random.vec(0.8) } else { Vec2::ZERO };
+    Edge { radius, v1, v2, v0, v3, has_v0, has_v3 }
+}
+
+fn compare_edge_manifolds(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_0e09);
+    let (mut calls, mut expected, mut names) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..8192 {
+        let xf_a = random_transform(&mut random, 0.4);
+        let xf_b = random_transform(&mut random, 0.4);
+        let a = random_edge(&mut random);
+        let mut manifold = Manifold::default();
+        if i % 2 == 0 {
+            let b = random_polygon(&mut random, i / 2);
+            collide_edge_and_polygon(&mut manifold, &a, &xf_a, &b, &xf_b);
+            calls.push(call(COLLIDE_EDGE_AND_POLYGON, vec![vec![0; 72], edge_bytes(&a), transform_bytes(&xf_a), polygon_bytes(&b), transform_bytes(&xf_b)], &["b0", "b1", "b2", "b3", "b4"]));
+            names.push("edge-polygon");
+        } else {
+            let b = Circle { radius: random.range(0.02, 0.6), p: random.vec(0.3) };
+            collide_edge_and_circle(&mut manifold, &a, &xf_a, &b, &xf_b);
+            calls.push(call(COLLIDE_EDGE_AND_CIRCLE, vec![vec![0; 72], edge_bytes(&a), transform_bytes(&xf_a), circle_bytes(&b), transform_bytes(&xf_b)], &["b0", "b1", "b2", "b3", "b4"]));
+            names.push("edge-circle");
+        }
+        expected.push(manifold);
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first, mut touching) = (0, None, 0);
+    for (i, reply) in replies.iter().enumerate() {
+        let native = unhex(&reply.buffers[0]);
+        let rust = manifold_bytes(&expected[i]);
+        if manifold_bits(&native) != manifold_bits(&rust) {
+            bad += 1;
+            first.get_or_insert_with(|| format!("{} case {i}: native={:x?} rust={:x?}", names[i], manifold_bits(&native), manifold_bits(&rust)));
+        }
+        touching += (expected[i].point_count > 0) as usize;
+    }
+    report("EDGE MANIFOLD", bad, replies.len(), first)?;
+    println!("  ({touching} of them touching)");
+    Ok(())
 }

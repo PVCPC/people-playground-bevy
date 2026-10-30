@@ -1,7 +1,7 @@
 //! Narrow-phase manifolds: Box2D 2.3 plus Unity's rounded-polygon path, in UnityPlayer.dll's operand grouping.
 
-use super::math::{dot, Transform, Vec2};
-use super::shape::{Circle, Polygon};
+use super::math::{cross, dot, Rot, Transform, Vec2};
+use super::shape::{Circle, Edge, Polygon, MAX_POLYGON_VERTICES};
 
 const LINEAR_SLOP_TOLERANCE: f32 = 0.1 * 0.005;
 
@@ -369,4 +369,234 @@ impl WorldManifold {
         }
         world
     }
+}
+
+/// b2CollideEdgeAndCircle (180baf0e0): the circle against the segment's interior (face) or an end vertex, an end's
+/// region left to the neighbouring edge when there is one.
+pub fn collide_edge_and_circle(manifold: &mut Manifold, a: &Edge, xf_a: &Transform, b: &Circle, xf_b: &Transform) {
+    manifold.point_count = 0;
+    let q = xf_a.apply_t(xf_b.apply(b.p));
+    let (pa, pb) = (a.v1, a.v2);
+    let e = pb - pa;
+    let u = dot(e, pb - q);
+    let v = dot(e, q - pa);
+    let radius = a.radius + b.radius;
+    let mut vertex = |index_a: u8, p: Vec2| {
+        manifold.point_count = 1;
+        manifold.kind = ManifoldType::Circles;
+        manifold.local_normal = Vec2::ZERO;
+        manifold.local_point = p;
+        manifold.points[0].id = ContactFeature { index_a, index_b: 0, type_a: FEATURE_VERTEX, type_b: FEATURE_VERTEX };
+        manifold.points[0].local_point = b.p;
+    };
+    if v <= 0.0 {
+        let d = q - pa;
+        if dot(d, d) > radius * radius {
+            return;
+        }
+        if a.has_v0 && dot(pa - a.v0, pa - q) > 0.0 {
+            return;
+        }
+        return vertex(0, pa);
+    }
+    if u <= 0.0 {
+        let d = q - pb;
+        if dot(d, d) > radius * radius {
+            return;
+        }
+        if a.has_v3 && dot(a.v3 - pb, q - pb) > 0.0 {
+            return;
+        }
+        return vertex(1, pb);
+    }
+    let den = dot(e, e);
+    let p = (pa * u + pb * v) * (1.0 / den);
+    let d = q - p;
+    if dot(d, d) > radius * radius {
+        return;
+    }
+    let mut n = Vec2::new(-e.y, e.x);
+    if dot(n, q - pa) < 0.0 {
+        n = -n;
+    }
+    n.normalize();
+    manifold.kind = ManifoldType::FaceA;
+    manifold.local_normal = n;
+    manifold.local_point = pa;
+    manifold.point_count = 1;
+    manifold.points[0].id = ContactFeature { index_a: 0, index_b: 0, type_a: FEATURE_FACE, type_b: FEATURE_VERTEX };
+    manifold.points[0].local_point = b.p;
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EpAxisType {
+    Unknown,
+    EdgeA,
+    EdgeB,
+}
+
+#[derive(Clone, Copy)]
+struct EpAxis {
+    kind: EpAxisType,
+    index: usize,
+    separation: f32,
+}
+
+/// b2CollideEdgeAndPolygon (180baf4c0): b2EPCollider::Collide (180bab0f0), Box2D 2.3's adjacency-aware edge-polygon
+/// collider with Unity's radius, the polygon's plus the edge's (2.3 has twice b2_polygonRadius).
+pub fn collide_edge_and_polygon(manifold: &mut Manifold, edge: &Edge, xf_a: &Transform, polygon: &Polygon, xf_b: &Transform) {
+    let xf = Transform {
+        p: xf_a.q.apply_t(xf_b.p - xf_a.p),
+        q: Rot { s: xf_a.q.c * xf_b.q.s - xf_a.q.s * xf_b.q.c, c: xf_a.q.c * xf_b.q.c + xf_a.q.s * xf_b.q.s },
+    };
+    let centroid = xf.apply(polygon.centroid);
+    let (v0, v1, v2, v3) = (edge.v0, edge.v1, edge.v2, edge.v3);
+    let edge1 = (v2 - v1).normalized();
+    let normal1 = edge1.skew_neg();
+    let offset1 = dot(normal1, centroid - v1);
+    let (mut offset0, mut offset2) = (0.0, 0.0);
+    let (mut convex1, mut convex2) = (false, false);
+    let (mut normal0, mut normal2) = (Vec2::ZERO, Vec2::ZERO);
+    if edge.has_v0 {
+        let edge0 = (v1 - v0).normalized();
+        normal0 = edge0.skew_neg();
+        convex1 = cross(edge0, edge1) >= 0.0;
+        offset0 = dot(normal0, centroid - v0);
+    }
+    if edge.has_v3 {
+        let edge2 = (v3 - v2).normalized();
+        normal2 = edge2.skew_neg();
+        convex2 = cross(edge1, edge2) > 0.0;
+        offset2 = dot(normal2, centroid - v2);
+    }
+    // (front, (lower, upper) limits when front, (lower, upper) when back)
+    let (front, limits_front, limits_back) = match (edge.has_v0, edge.has_v3) {
+        (true, true) => match (convex1, convex2) {
+            (true, true) => (offset0 >= 0.0 || offset1 >= 0.0 || offset2 >= 0.0, (normal0, normal2), (-normal1, -normal1)),
+            (true, false) => (offset0 >= 0.0 || (offset1 >= 0.0 && offset2 >= 0.0), (normal0, normal1), (-normal2, -normal1)),
+            (false, true) => (offset2 >= 0.0 || (offset0 >= 0.0 && offset1 >= 0.0), (normal1, normal2), (-normal1, -normal0)),
+            (false, false) => (offset0 >= 0.0 && offset1 >= 0.0 && offset2 >= 0.0, (normal1, normal1), (-normal2, -normal0)),
+        },
+        (true, false) if convex1 => (offset0 >= 0.0 || offset1 >= 0.0, (normal0, -normal1), (normal1, -normal1)),
+        (true, false) => (offset0 >= 0.0 && offset1 >= 0.0, (normal1, -normal1), (normal1, -normal0)),
+        (false, true) if convex2 => (offset1 >= 0.0 || offset2 >= 0.0, (-normal1, normal2), (-normal1, normal1)),
+        (false, true) => (offset1 >= 0.0 && offset2 >= 0.0, (-normal1, normal1), (-normal2, normal1)),
+        (false, false) => (offset1 >= 0.0, (-normal1, -normal1), (normal1, normal1)),
+    };
+    let normal = if front { normal1 } else { -normal1 };
+    let (lower_limit, upper_limit) = if front { limits_front } else { limits_back };
+
+    let count = polygon.count;
+    let mut vertices = [Vec2::ZERO; MAX_POLYGON_VERTICES];
+    let mut normals = [Vec2::ZERO; MAX_POLYGON_VERTICES];
+    for i in 0..count {
+        vertices[i] = xf.apply(polygon.vertices[i]);
+        normals[i] = xf.q.apply(polygon.normals[i]);
+    }
+    let radius = polygon.radius + edge.radius;
+    manifold.point_count = 0;
+
+    // ComputeEdgeSeparation (180bac520)
+    let mut edge_axis = EpAxis { kind: EpAxisType::EdgeA, index: if front { 0 } else { 1 }, separation: f32::MAX };
+    for &v in &vertices[..count] {
+        let s = dot(normal, v - v1);
+        if s < edge_axis.separation {
+            edge_axis.separation = s;
+        }
+    }
+    if edge_axis.separation > radius {
+        return;
+    }
+
+    // ComputePolygonSeparation, inlined; -b2_angularSlop as the DLL's constant.
+    let neg_angular_slop = f32::from_bits(0xbd0e_fa36);
+    let mut polygon_axis = EpAxis { kind: EpAxisType::Unknown, index: usize::MAX, separation: -f32::MAX };
+    let perp = Vec2::new(-normal.y, normal.x);
+    for i in 0..count {
+        let n = -normals[i];
+        let s1 = dot(n, vertices[i] - v1);
+        let s2 = dot(n, vertices[i] - v2);
+        let s = if s1 < s2 { s1 } else { s2 };
+        if s > radius {
+            polygon_axis = EpAxis { kind: EpAxisType::EdgeB, index: i, separation: s };
+            break;
+        }
+        let limit = if dot(n, perp) >= 0.0 { upper_limit } else { lower_limit };
+        if dot(n - limit, normal) < neg_angular_slop {
+            continue;
+        }
+        if s > polygon_axis.separation {
+            polygon_axis = EpAxis { kind: EpAxisType::EdgeB, index: i, separation: s };
+        }
+    }
+    if polygon_axis.kind != EpAxisType::Unknown && polygon_axis.separation > radius {
+        return;
+    }
+
+    // Hysteresis for jitter reduction.
+    let primary = if polygon_axis.kind != EpAxisType::Unknown && polygon_axis.separation > edge_axis.separation * 0.98 + 0.001 { polygon_axis } else { edge_axis };
+
+    let feature = |index_a: usize, index_b: usize, type_a, type_b| ContactFeature { index_a: index_a as u8, index_b: index_b as u8, type_a, type_b };
+    let (ie, i1, i2, rv1, rv2, rnormal);
+    if primary.kind == EpAxisType::EdgeA {
+        manifold.kind = ManifoldType::FaceA;
+        let mut best = 0;
+        let mut best_value = dot(normal, normals[0]);
+        for i in 1..count {
+            let value = dot(normal, normals[i]);
+            if value < best_value {
+                best_value = value;
+                best = i;
+            }
+        }
+        let next = if best + 1 < count { best + 1 } else { 0 };
+        ie = [
+            ClipVertex { v: vertices[best], id: feature(0, best, FEATURE_FACE, FEATURE_VERTEX) },
+            ClipVertex { v: vertices[next], id: feature(0, next, FEATURE_FACE, FEATURE_VERTEX) },
+        ];
+        (i1, i2, rv1, rv2, rnormal) = if front { (0, 1, v1, v2, normal1) } else { (1, 0, v2, v1, -normal1) };
+    } else {
+        manifold.kind = ManifoldType::FaceB;
+        ie = [
+            ClipVertex { v: v1, id: feature(0, primary.index, FEATURE_VERTEX, FEATURE_FACE) },
+            ClipVertex { v: v2, id: feature(0, primary.index, FEATURE_VERTEX, FEATURE_FACE) },
+        ];
+        i1 = primary.index;
+        i2 = if i1 + 1 < count { i1 + 1 } else { 0 };
+        (rv1, rv2, rnormal) = (vertices[i1], vertices[i2], normals[i1]);
+    }
+    let side_normal1 = rnormal.skew_neg();
+    let side_normal2 = -side_normal1;
+    let side_offset1 = dot(side_normal1, rv1);
+    let side_offset2 = dot(side_normal2, rv2);
+    let (clip1, np) = clip_segment_to_line(ie, side_normal1, side_offset1, i1);
+    if np < 2 {
+        return;
+    }
+    let (clip2, np) = clip_segment_to_line(clip1, side_normal2, side_offset2, i2);
+    if np < 2 {
+        return;
+    }
+    if primary.kind == EpAxisType::EdgeA {
+        manifold.local_normal = rnormal;
+        manifold.local_point = rv1;
+    } else {
+        manifold.local_normal = polygon.normals[i1];
+        manifold.local_point = polygon.vertices[i1];
+    }
+    let mut point_count = 0;
+    for c in &clip2 {
+        if dot(rnormal, c.v - rv1) <= radius {
+            let cp = &mut manifold.points[point_count];
+            if primary.kind == EpAxisType::EdgeA {
+                cp.local_point = xf.apply_t(c.v);
+                cp.id = c.id;
+            } else {
+                cp.local_point = c.v;
+                cp.id = c.id.swapped();
+            }
+            point_count += 1;
+        }
+    }
+    manifold.point_count = point_count;
 }

@@ -8,9 +8,10 @@ use super::*;
 use crate::assets::components::{ColliderShape, Joint2D as Joint2DData, JointKind as JointData, Rigidbody2D as RigidbodyData};
 use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
 use crate::b2::revolute::RevoluteDef;
-use crate::b2::shape::{box_collider_polygon, Circle, ColliderMatrix};
-use crate::b2::weld::check_bodies;
-use crate::b2::world::{BodyDef, BodyId, BodyType, ColliderRef, FixtureDef, FixtureId, JointId, RigidbodyMass, RigidbodyRef, Shape};
+use crate::b2::shape::{box_collider_polygon, edge_collider_chain, polygon_collider_polygons, Circle, ColliderMatrix};
+use crate::b2::prismatic::SliderJoint2d;
+use crate::b2::weld::{check_bodies, BodyFrame, Connected, FixedJoint2d};
+use crate::b2::world::{BodyDef, BodyId, BodyType, ColliderRef, FixtureDef, FixtureId, JointId, JointKind, RigidbodyMass, RigidbodyRef, Shape};
 use crate::unity::transform::{global_position, global_rotation, local_to_world, lossy_scale, quaternion_to_matrix, Trs};
 use std::collections::HashMap;
 
@@ -39,6 +40,8 @@ pub struct Instance {
     pub joints: HashMap<(usize, usize), JointId>,
     /// The HingeJoint2Ds' native state by (object, component).
     pub hinges: HashMap<(usize, usize), HingeState>,
+    /// The FixedJoint2Ds', SliderJoint2Ds' and SpringJoint2Ds' native state by (object, component).
+    pub anchored: HashMap<(usize, usize), AnchoredState>,
     /// The Collider2Ds' native state by (object, component).
     pub colliders: HashMap<(usize, usize), ColliderState>,
     /// Each object's TransformChangeDispatch interest in the Physics2D systems (the CHANGE_* bits).
@@ -60,6 +63,34 @@ const GLOBAL_T: u8 = CHANGE_RB_T | CHANGE_COLLIDER;
 const GLOBAL_R: u8 = CHANGE_RB_R | CHANGE_COLLIDER;
 const GLOBAL_S: u8 = CHANGE_RB_S | CHANGE_COLLIDER;
 
+/// A FixedJoint2D, SliderJoint2D or SpringJoint2D component's native state: the AnchoredJoint2D/Joint2D fields
+/// every kind shares, the kind's own, and the slot in `Game.anchored_joints` the break-limit walk reads.
+#[derive(Clone, Debug)]
+pub struct AnchoredState {
+    pub base: FixedJoint2d,
+    pub slider: Option<SliderJoint2d>,
+    pub spring: Option<SpringState>,
+    pub distance: Option<DistanceState>,
+    pub slot: Option<usize>,
+}
+
+/// DistanceJoint2D +0x98..+0x9d: distance, maxDistanceOnly and autoConfigureDistance.
+#[derive(Clone, Copy, Debug)]
+pub struct DistanceState {
+    pub auto_configure_distance: bool,
+    pub distance: f32,
+    pub max_distance_only: bool,
+}
+
+/// SpringJoint2D +0x98..+0xa4: distance, damping ratio, frequency and autoConfigureDistance.
+#[derive(Clone, Copy, Debug)]
+pub struct SpringState {
+    pub auto_configure_distance: bool,
+    pub distance: f32,
+    pub damping_ratio: f32,
+    pub frequency: f32,
+}
+
 /// HingeJoint2D's runtime fields.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HingeState {
@@ -71,6 +102,34 @@ pub struct HingeState {
     pub reference_angle: f32,
     pub body_angle_a: f32,
     pub body_angle_b: f32,
+    /// The slot in `Game.anchored_joints` the break-limit walk reads (a prefab hinge no script links).
+    pub slot: Option<usize>,
+}
+
+/// AnchoredJoint2D / Joint2D serialized state of a FixedJoint2D or SliderJoint2D component.
+fn anchored_base(j: &Joint2DData, damping_ratio: f32, frequency: f32) -> FixedJoint2d {
+    FixedJoint2d {
+        anchor: V::new(j.anchor[0], j.anchor[1]),
+        connected_anchor: V::new(j.connected_anchor[0], j.connected_anchor[1]),
+        auto_configure_connected_anchor: j.auto_configure_connected_anchor,
+        anchor_configured: false,
+        damping_ratio,
+        frequency,
+        stored_reference_angle: None,
+        enable_collision: j.enable_collision,
+        break_force: j.break_force,
+        break_torque: j.break_torque,
+    }
+}
+
+/// The prefab object a Joint2D's connectedBody points at.
+fn joint_connected_object(prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) -> Option<usize> {
+    (!j.connected_body.is_null()).then(|| {
+        let r = prefab.objects[o].components[c].0;
+        let target = ObjRef { file: r.file, path_id: j.connected_body.path_id };
+        assert_eq!(j.connected_body.file, 0, "a joint connected outside its prefab");
+        prefab.index[&target].0
+    })
 }
 
 /// Collider2D's runtime transform fields, set by CreateFixtures.
@@ -705,12 +764,22 @@ impl Game {
                 let r = if r <= 0.0001 { 0.0001 } else { f32::min(1e6, r) };
                 vec![Shape::Circle(Circle { radius: r, p: matrix.apply(V::new(col.offset[0], col.offset[1])) })]
             }
+            ColliderShape::Polygon { tiling, auto_tiling, paths } => {
+                // ColliderTilingExtension::IsTilingOn (180bfd370)
+                if *auto_tiling && tiling.draw_mode != 0 {
+                    unimplemented!("PolygonCollider2D auto-tiling");
+                }
+                polygon_collider_polygons(paths, &m, V::new(col.offset[0], col.offset[1])).into_iter().map(Shape::Polygon).collect()
+            }
+            ColliderShape::Edge { edge_radius, points, adjacent_start, adjacent_end } => {
+                edge_collider_chain(points, &m, V::new(col.offset[0], col.offset[1]), *edge_radius, *adjacent_start, *adjacent_end).map(Shape::Chain).into_iter().collect()
+            }
             other => unimplemented!("Collider2D::PrepareShapes for {other:?}"),
         };
         if shapes.is_empty() {
             return;
         }
-        let (friction, restitution) = self.collider_material_state(prefab, o, col, body_object);
+        let (friction, restitution) = self.collider_material_state(prefab, o, c, body_object);
         let body = match body_object {
             Some(b) => inst.bodies[&b],
             None => self.world.ground_body(),
@@ -735,18 +804,11 @@ impl Game {
 
     /// Collider2D::GetColliderMaterialState (180c11360): the collider's PhysicsMaterial2D, else its body's, else
     /// Physics2DSettings' default material, else friction 0.4 and bounciness 0.
-    fn collider_material_state(&self, prefab: &Prefab, o: usize, col: &crate::assets::components::Collider2D, body_object: Option<usize>) -> (f32, f32) {
-        if !col.material.is_null() {
-            unimplemented!("{}: a Collider2D PhysicsMaterial2D", prefab.objects[o].name);
-        }
-        if let Some(b) = body_object {
-            if prefab.objects[b].components.iter().any(|(_, c)| matches!(c, Component::Rigidbody2D(r) if !r.material.is_null())) {
-                unimplemented!("{}: a Rigidbody2D PhysicsMaterial2D", prefab.objects[b].name);
-            }
-        }
-        match self.default_material2d {
-            Some(m) => m,
-            None => (0.4, 0.0),
+    fn collider_material_state(&self, prefab: &Prefab, o: usize, c: usize, body_object: Option<usize>) -> (f32, f32) {
+        let body_material = body_object.and_then(|b| (0..prefab.objects[b].components.len()).find_map(|k| prefab.materials.get(&(b, k)).filter(|_| matches!(prefab.objects[b].components[k].1, Component::Rigidbody2D(_)))));
+        match prefab.materials.get(&(o, c)).or(body_material) {
+            Some(&m) => m,
+            None => self.default_material2d.unwrap_or((0.4, 0.0)),
         }
     }
 
@@ -756,6 +818,7 @@ impl Game {
         if inst.objects[o].active && j.enabled {
             match &j.kind {
                 JointData::Hinge { .. } => self.hinge_joint2d_create(inst, prefab, o, c, j),
+                JointData::Fixed { .. } | JointData::Slider { .. } | JointData::Spring { .. } | JointData::Distance { .. } => self.anchored_joint2d_create(inst, prefab, o, c, j),
                 other => unimplemented!("{}: Joint2D Create for {other:?}", prefab.objects[o].name),
             }
         }
@@ -765,12 +828,7 @@ impl Game {
     /// Joint2D::FinalizeCreateJoint (180c048c0).
     fn hinge_joint2d_create(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) {
         let JointData::Hinge { use_motor, motor_speed, max_motor_torque, use_limits, lower, upper } = j.kind else { unreachable!() };
-        let connected = (!j.connected_body.is_null()).then(|| {
-            let r = prefab.objects[o].components[c].0;
-            let target = crate::assets::db::ObjRef { file: r.file, path_id: j.connected_body.path_id };
-            assert_eq!(j.connected_body.file, 0, "a joint connected outside its prefab");
-            prefab.index[&target].0
-        });
+        let connected = joint_connected_object(prefab, o, c, j);
         if let Some(b) = connected {
             if !inst.objects[b].active {
                 return;
@@ -857,11 +915,142 @@ impl Game {
         self.world.wake_joined(a);
         self.world.wake_joined(b);
         inst.joints.insert((o, c), id);
-        if j.break_force.is_finite() || j.break_torque.is_finite() {
-            unimplemented!("HingeJoint2D break limits on a spawned joint");
-        }
+        // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
+        let st = inst.hinges.get_mut(&(o, c)).unwrap();
+        let slot = *st.slot.get_or_insert_with(|| {
+            self.anchored_joints.push(AnchoredJoint { break_force: j.break_force, break_torque: j.break_torque, joint: None });
+            self.anchored_joints.len() - 1
+        });
         // The world is playing.
-        inst.hinges.get_mut(&(o, c)).unwrap().auto_configuration_complete = true;
+        st.auto_configuration_complete = true;
+        self.anchored_joints[slot].joint = Some(id);
+        self.add_break_limits_update(BreakJoint::Anchored(slot), j.break_force, j.break_torque);
+    }
+
+    /// FixedJoint2D::Create (180c04160), SliderJoint2D::Create (180c04400), SpringJoint2D::Create (180bfd060) and
+    /// DistanceJoint2D::Create (180bebd50)
+    /// with Joint2D::FinalizeCreateJoint (180c048c0): the definition the native side builds from the component,
+    /// bodies A (attached) and B (connected, or the ground body).
+    fn anchored_joint2d_create(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) {
+        let connected = joint_connected_object(prefab, o, c, j);
+        if let Some(b) = connected {
+            if !inst.objects[b].active {
+                return;
+            }
+        }
+        let body_a = inst.bodies.get(&o).copied();
+        let body_b = match connected {
+            Some(b) => inst.bodies.get(&b).copied(),
+            None => Some(self.world.ground_body()),
+        };
+        let (Some(a), Some(b)) = (body_a, body_b) else { unimplemented!("Joint2D on an object without a created Rigidbody2D") };
+        let AnchoredState { mut base, mut slider, spring, mut distance, mut slot } = inst.anchored.remove(&(o, c)).unwrap_or_else(|| {
+            let (base, slider, spring, distance) = match j.kind {
+                JointData::Fixed { damping_ratio, frequency } => (anchored_base(j, damping_ratio, frequency), None, None, None),
+                JointData::Distance { auto_configure_distance, distance, max_distance_only } => {
+                    (anchored_base(j, 0.0, 0.0), None, None, Some(DistanceState { auto_configure_distance, distance, max_distance_only }))
+                }
+                JointData::Slider { auto_configure_angle, angle, use_motor, motor_speed, max_motor_force, use_limits, lower, upper } => (
+                    anchored_base(j, 0.0, 0.0),
+                    Some(SliderJoint2d { angle, motor_speed, max_motor_torque: max_motor_force, lower, upper, use_motor, use_limits, auto_configure_angle }),
+                    None,
+                    None,
+                ),
+                JointData::Spring { auto_configure_distance, distance, damping_ratio, frequency } => {
+                    (anchored_base(j, 0.0, 0.0), None, Some(SpringState { auto_configure_distance, distance, damping_ratio, frequency }), None)
+                }
+                _ => unreachable!(),
+            };
+            AnchoredState { base, slider, spring, distance, slot: None }
+        });
+        let mut spring = spring;
+        let frame = |g: &Self, id: BodyId| {
+            let bd = g.world.body(id);
+            BodyFrame { position: bd.xf.p, q: bd.xf.q, angle: bd.sweep.a }
+        };
+        let s = inst.lossy_scale(o);
+        let scale_a = V::new(s[0], s[1]);
+        let frame_a = frame(self, a);
+        let conn = match connected {
+            None => Connected::World,
+            Some(cb) => {
+                let sb = inst.lossy_scale(cb);
+                Connected::Body { frame: frame(self, b), lossy_scale: V::new(sb[0], sb[1]) }
+            }
+        };
+        let def: JointKind = match (slider.as_mut(), spring.as_mut(), distance.as_mut()) {
+            (Some(sl), _, _) => sl.create_def(&mut base, scale_a, &frame_a, &conn).into(),
+            (None, Some(sp), _) => {
+                // SpringJoint2D::Create: the anchors, then the distance between them when it autoconfigures.
+                let (anchor_a, anchor_b) = base.configure_anchors(scale_a, &frame_a, &conn);
+                if sp.auto_configure_distance && !base.anchor_configured {
+                    let world = |f: &BodyFrame, p: V| V::new(p.x * f.q.c - p.y * f.q.s + f.position.x, f.q.s * p.x + p.y * f.q.c + f.position.y);
+                    let frame_b = match conn {
+                        Connected::World => BodyFrame::default(),
+                        Connected::Body { frame, .. } => frame,
+                    };
+                    let (wa, wb) = (world(&frame_a, anchor_a), world(&frame_b, anchor_b));
+                    let (dx, dy) = (wb.x - wa.x, wb.y - wa.y);
+                    let d = (dx * dx + dy * dy).sqrt();
+                    sp.distance = if 0.005 > d { 0.005 } else { f32::min(1_000_000.0, d) };
+                }
+                crate::b2::distance_joint::DistanceDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, length: sp.distance, frequency_hz: sp.frequency, damping_ratio: sp.damping_ratio }.into()
+            }
+            (None, None, Some(dj)) => {
+                // DistanceJoint2D::Create: the same anchors and autoconfigured distance; maxDistanceOnly makes it a
+                // b2RopeJoint of that maximum length, otherwise a rigid b2DistanceJoint (frequency 0, damping ratio 1).
+                let (anchor_a, anchor_b) = base.configure_anchors(scale_a, &frame_a, &conn);
+                if dj.auto_configure_distance && !base.anchor_configured {
+                    let world = |f: &BodyFrame, p: V| V::new(p.x * f.q.c - p.y * f.q.s + f.position.x, f.q.s * p.x + p.y * f.q.c + f.position.y);
+                    let frame_b = match conn {
+                        Connected::World => BodyFrame::default(),
+                        Connected::Body { frame, .. } => frame,
+                    };
+                    let (wa, wb) = (world(&frame_a, anchor_a), world(&frame_b, anchor_b));
+                    let (dx, dy) = (wb.x - wa.x, wb.y - wa.y);
+                    let d = (dx * dx + dy * dy).sqrt();
+                    dj.distance = if 0.005 > d { 0.005 } else { f32::min(1_000_000.0, d) };
+                }
+                if dj.max_distance_only {
+                    crate::b2::rope_joint::RopeDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, max_length: dj.distance }.into()
+                } else {
+                    crate::b2::distance_joint::DistanceDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, length: dj.distance, frequency_hz: 0.0, damping_ratio: 1.0 }.into()
+                }
+            }
+            (None, None, None) => base.create_def(scale_a, &frame_a, &conn).into(),
+        };
+        if check_bodies(Some((a, 0u8)), (b, 0u8)).is_ok() {
+            let id = self.world.create_joint(def, a, b, base.enable_collision);
+            self.world.wake_joined(a);
+            self.world.wake_joined(b);
+            inst.joints.insert((o, c), id);
+            // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
+            let slot = *slot.get_or_insert_with(|| {
+                self.anchored_joints.push(AnchoredJoint { break_force: base.break_force, break_torque: base.break_torque, joint: None });
+                self.anchored_joints.len() - 1
+            });
+            self.anchored_joints[slot].joint = Some(id);
+            self.add_break_limits_update(BreakJoint::Anchored(slot), base.break_force, base.break_torque);
+            base.finish_create();
+        }
+        inst.anchored.insert((o, c), AnchoredState { base, slider, spring, distance, slot });
+    }
+
+    /// FixedJoint2D::Cleanup(false) (180c03480) / SliderJoint2D::Cleanup (180c03550): the live joint's reference
+    /// angle is kept for the next Create, then Joint2D::Cleanup destroys the b2 joint.
+    fn anchored_joint2d_cleanup(&mut self, inst: &mut Instance, o: usize, c: usize) {
+        let Some(id) = inst.joints.remove(&(o, c)) else { return };
+        let st = inst.anchored.get_mut(&(o, c)).unwrap();
+        if st.spring.is_some() || st.distance.is_some() {
+            // Joint2D::Cleanup alone: the auto-configuration is redone by the next Create.
+            st.base.anchor_configured = false;
+        } else {
+            st.base.cleanup(false, Some(self.world.joints[id].as_ref().unwrap().reference_angle()));
+        }
+        if let Some(slot) = st.slot {
+            self.anchored_joints[slot].joint = None;
+        }
+        self.world.destroy_joint(id);
     }
 
     /// HingeJoint2D::Cleanup(false) (180bfc5e0) while the world plays: the joint's reference angle and both body
@@ -875,6 +1064,9 @@ impl Game {
         st.body_angle_a = self.world.body(a).sweep.a;
         st.body_angle_b = self.world.body(b).sweep.a;
         st.has_previous_state = true;
+        if let Some(slot) = st.slot {
+            self.anchored_joints[slot].joint = None;
+        }
         // Joint2D::Cleanup (180c03500): the auto-configuration is redone by the next Create.
         st.auto_configuration_complete = false;
         self.world.destroy_joint(id);
@@ -889,6 +1081,13 @@ impl Game {
                 unimplemented!("RecreateJoints: a joint outside the instance");
             };
             let Component::Joint2D(j) = &prefab.objects[jo].components[jc].1 else { unreachable!() };
+            if matches!(j.kind, JointData::Fixed { .. } | JointData::Slider { .. } | JointData::Spring { .. } | JointData::Distance { .. }) {
+                self.anchored_joint2d_cleanup(inst, jo, jc);
+                if inst.objects[jo].active && j.enabled {
+                    self.anchored_joint2d_create(inst, prefab, jo, jc, j);
+                }
+                continue;
+            }
             if !matches!(j.kind, JointData::Hinge { .. }) {
                 unimplemented!("{}: Joint2D ReCreate for {:?}", prefab.objects[jo].name, j.kind);
             }

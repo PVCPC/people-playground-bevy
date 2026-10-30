@@ -54,6 +54,9 @@ pub struct Prefab {
     pub objects: Vec<PrefabObject>,
     /// Component or GameObject -> (object index, component index; usize::MAX for the GameObject itself).
     pub index: HashMap<ObjRef, (usize, usize)>,
+    /// The PhysicsMaterial2D a Collider2D or Rigidbody2D component points at, by (object, component): (friction,
+    /// bounciness). A material that does not resolve reads as null and has no entry.
+    pub materials: HashMap<(usize, usize), (f32, f32)>,
 }
 
 impl AssetDb {
@@ -220,7 +223,7 @@ impl AssetDb {
 
     /// The GameObject tree rooted at `root` (a GameObject).
     pub fn prefab(&mut self, root: ObjRef) -> Result<Prefab, String> {
-        let mut p = Prefab { objects: Vec::new(), index: HashMap::new() };
+        let mut p = Prefab { objects: Vec::new(), index: HashMap::new(), materials: HashMap::new() };
         self.add_object(&mut p, root, None)?;
         Ok(p)
     }
@@ -246,6 +249,15 @@ impl AssetDb {
             if let Component::Transform(t) = &comp {
                 children = t.children.clone();
             }
+            let material = match &comp {
+                Component::Collider2D(c) => c.material,
+                Component::Rigidbody2D(r) => r.material,
+                _ => PPtr::default(),
+            };
+            if let Some(m) = self.resolve(go.file, material) {
+                let m = super::components::PhysicsMaterial2D::read(self.data(m))?;
+                p.materials.insert((me, p.objects[me].components.len()), (m.friction, m.bounciness));
+            }
             p.index.insert(r, (me, p.objects[me].components.len()));
             p.objects[me].components.push((r, comp));
         }
@@ -266,6 +278,20 @@ mod tests {
 
     fn depth(p: &Prefab, o: &PrefabObject) -> usize {
         o.parent.map_or(0, |i| 1 + depth(p, &p.objects[i]))
+    }
+
+    /// Prints every CatalogData item's asset name, one per line after "ITEM " (for the catalog sweep runner).
+    #[test]
+    #[ignore]
+    fn catalog_item_names() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            println!("ITEM {}", db.mono(asset).unwrap().unwrap().1.name);
+        }
     }
 
     /// The game's catalog (CatalogData.Items) resolves, and every spawnable prefab's tree reads completely.

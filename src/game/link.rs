@@ -221,7 +221,6 @@ impl Game {
                         l.arenas.hinge.insert((o, c), next.3);
                         next.3 += 1;
                     }
-                    Component::Joint2D(_) => unimplemented!("{}: a non-hinge Joint2D in a spawned prefab", prefab.objects[o].name),
                     _ => {}
                 }
             }
@@ -283,6 +282,7 @@ impl Game {
                 }
                 let sprite = db.resolve(file, r.sprite).ok_or("a SpriteRenderer without a sprite")?;
                 p.sprite_bounds = Some(sprite_bounds(&Sprite::read(db.data(sprite))?));
+                p.sprite = Some((sprite, r.color, r.sorting_order));
             }
             self.physicals.push(p);
         }
@@ -290,7 +290,7 @@ impl Game {
         for o in 0..n {
             for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
                 let Component::Joint2D(j) = comp else { continue };
-                let JointKind::Hinge { use_motor, motor_speed, max_motor_torque, use_limits, lower, upper } = j.kind else { unreachable!() };
+                let JointKind::Hinge { use_motor, motor_speed, max_motor_torque, use_limits, lower, upper } = j.kind else { continue };
                 let connected = l.object_of(j.connected_body)?.ok_or("an unconnected hinge")?;
                 let h = Hinge {
                     joint: inst.joints.get(&(o, c)).copied(),
@@ -652,7 +652,16 @@ impl Game {
             let flag = |name: &str| field(v, name).and_then(|x| x.bool().ok_or_else(|| name.to_string())).unwrap();
             let start = match class.as_str() {
                 "PersonBehaviour" => PendingStart::Person(linked.person.unwrap()),
-                "HingeJointLimitAutofixBehaviour" => PendingStart::HingeJointLimitAutofix(linked.person.unwrap()),
+                "HingeJointLimitAutofixBehaviour" => match linked.person {
+                    Some(p) => PendingStart::HingeJointLimitAutofix(p),
+                    // Without a limited hinge or slider, or a FixedJoint2D, below it neither a flip nor Start touches anything.
+                    None if !prefab.objects.iter().flat_map(|ob| &ob.components).any(|(_, c)| {
+                        matches!(c, Component::Joint2D(j) if matches!(j.kind, JointKind::Hinge { use_limits: true, .. } | JointKind::Slider { use_limits: true, .. } | JointKind::Fixed { .. }))
+                    }) => continue,
+                    None => PendingStart::HingeJointLimitAutofixItem(linked.physicals.get(&o).copied().ok_or_else(|| {
+                        *linked.nodes.get(&o).unwrap_or_else(|| unimplemented!("HingeJointLimitAutofixBehaviour on an object that is neither physical nor a Transform node"))
+                    })),
+                },
                 "CirculationBehaviour" => PendingStart::Circulation(limb()),
                 "PhysicalBehaviour" => PendingStart::Physical(linked.physicals[&o]),
                 "LimbBehaviour" => PendingStart::Limb(limb()),

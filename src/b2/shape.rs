@@ -17,6 +17,48 @@ pub struct Polygon {
     pub count: usize,
 }
 
+/// b2EdgeShape: the segment v1-v2, with the neighbouring vertices v0 / v3 when it is a chain's child.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Edge {
+    pub radius: f32,
+    pub v1: Vec2,
+    pub v2: Vec2,
+    pub v0: Vec2,
+    pub v3: Vec2,
+    pub has_v0: bool,
+    pub has_v3: bool,
+}
+
+/// b2ChainShape as EdgeCollider2D makes it (CreateChain, never a loop): the vertices and the ghost vertices before
+/// the first and after the last.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chain {
+    pub radius: f32,
+    pub vertices: std::sync::Arc<[Vec2]>,
+    pub prev: Option<Vec2>,
+    pub next: Option<Vec2>,
+}
+
+impl Chain {
+    /// b2ChainShape::GetChildEdge (180bb3df0): Unity drops a neighbour vertex lying ahead of the edge's end it
+    /// joins (its dot with the edge's direction away from that end under -FLT_EPSILON).
+    pub fn child_edge(&self, i: usize) -> Edge {
+        let v = &self.vertices;
+        let mut e = Edge { radius: self.radius, v1: v[i], v2: v[i + 1], ..Edge::default() };
+        (e.v0, e.has_v0) = if i > 0 { (v[i - 1], true) } else { (self.prev.unwrap_or_default(), self.prev.is_some()) };
+        (e.v3, e.has_v3) = if i + 2 < v.len() { (v[i + 2], true) } else { (self.next.unwrap_or_default(), self.next.is_some()) };
+        let d = e.v2 - e.v1;
+        let min = f32::from_bits(0xb400_0000);
+        if e.has_v0 {
+            e.has_v0 = super::math::dot(-d, e.v0 - e.v1) >= min;
+        }
+        if e.has_v3 {
+            e.has_v3 = super::math::dot(e.v3 - e.v2, d) >= min;
+        }
+        e
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Circle {
     pub radius: f32,
@@ -122,6 +164,27 @@ fn unit_box() -> Polygon {
     polygon
 }
 
+/// Unity's collinear pass in Set and PreparePolygonShapes: every vertex but the last against its stored predecessor
+/// and its successor, then the last against the first; stops as soon as fewer than 3 remain.
+fn drop_collinear(vertices: &mut Vec<Vec2>) {
+    let mut prev = vertices[vertices.len() - 1];
+    let mut cur = 0;
+    for _ in 0..vertices.len() - 1 {
+        if collinear(prev, vertices[cur], vertices[cur + 1]) {
+            vertices.remove(cur);
+            if vertices.len() < 3 {
+                return;
+            }
+        } else {
+            prev = vertices[cur];
+            cur += 1;
+        }
+    }
+    if collinear(prev, vertices[cur], vertices[0]) {
+        vertices.pop();
+    }
+}
+
 /// b2AreCollinear (180bb61e0), also inlined into Set's vertex pass.
 fn collinear(a: Vec2, b: Vec2, c: Vec2) -> bool {
     let d1 = b - a;
@@ -149,23 +212,7 @@ impl Polygon {
         let Some(mut vertices) = (points.len() >= 3).then(|| weld_and_hull(points)).flatten() else {
             return Self { radius, ..unit_box() };
         };
-        // Visits every vertex but the last with its stored predecessor, then tests the last against the first.
-        let mut prev = vertices[vertices.len() - 1];
-        let mut cur = 0;
-        for _ in 0..vertices.len() - 1 {
-            if collinear(prev, vertices[cur], vertices[cur + 1]) {
-                vertices.remove(cur);
-                if vertices.len() < 3 {
-                    return Self { radius, ..unit_box() };
-                }
-            } else {
-                prev = vertices[cur];
-                cur += 1;
-            }
-        }
-        if collinear(prev, vertices[cur], vertices[0]) {
-            vertices.pop();
-        }
+        drop_collinear(&mut vertices);
         if vertices.len() < 3 {
             return Self { radius, ..unit_box() };
         }
@@ -268,6 +315,90 @@ pub fn validate_polygon(points: &[Vec2]) -> bool {
         area += d * 0.5;
     }
     area.is_finite() && area > f32::EPSILON
+}
+
+/// PolygonCollider2D::TransformPoints (180c16060): each point plus the offset through the collider matrix (z = 0),
+/// near-zero x and y snapped to 0 and near-duplicates of the previous point dropped; nothing when any point is
+/// non-finite or farther than 1e6.
+fn transform_points(path: &[[f32; 2]], m: &[f32; 16], offset: Vec2, min_dist_sq: f32) -> Vec<[f32; 2]> {
+    let snap = |v: f32| if f32::from_bits(0x35a0_0000) > v.abs() { 0.0 } else { v };
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(path.len());
+    for p in path {
+        let (x, y) = (p[0] + offset.x, p[1] + offset.y);
+        let tx = x * m[0] + y * m[4] + m[8] * 0.0 + m[12];
+        let ty = x * m[1] + y * m[5] + m[9] * 0.0 + m[13];
+        let tz = x * m[2] + y * m[6] + m[10] * 0.0 + m[14];
+        if !(tx.is_finite() && ty.is_finite() && tz.is_finite()) || tx * tx + ty * ty + tz * tz > 1e12 {
+            return Vec::new();
+        }
+        let t = [snap(tx), snap(ty)];
+        if out.last().is_some_and(|l| min_dist_sq >= (l[0] - t[0]) * (l[0] - t[0]) + (l[1] - t[1]) * (l[1] - t[1])) {
+            continue;
+        }
+        out.push(t);
+    }
+    out
+}
+
+/// PolygonCollider2D::PreparePolygonShapes (180c12b90) as PrepareShapes (180c133e0) calls it without tiling
+/// (minimum vertex distance 0.0025): the paths of 3 or more points through TransformPoints, those keeping 3 or
+/// more tesselated by libtess2 (odd winding, polygons of up to 8), each polygon's near-duplicate and collinear
+/// vertices dropped, and the ones passing ValidatePolygonShape made b2PolygonShapes. Nothing without a first path
+/// of 3 or more points.
+pub fn polygon_collider_polygons(paths: &[Vec<[f32; 2]>], m: &[f32; 16], offset: Vec2) -> Vec<Polygon> {
+    use crate::unity::tess::{tesselate, TESS_UNDEF};
+    let min_distance = 0.0025f32;
+    let min_dist_sq = min_distance * min_distance;
+    if paths.first().map_or(true, |p| p.len() < 3) {
+        return Vec::new();
+    }
+    let contours: Vec<_> = paths.iter().filter(|p| p.len() >= 3).map(|p| transform_points(p, m, offset, min_dist_sq)).filter(|c| c.len() >= 3).collect();
+    let Some((vertices, elements)) = tesselate(&contours, MAX_POLYGON_VERTICES) else { return Vec::new() };
+    let mut polygons = Vec::new();
+    for element in elements.chunks(MAX_POLYGON_VERTICES) {
+        let mut points: Vec<Vec2> = Vec::with_capacity(MAX_POLYGON_VERTICES);
+        for &i in element.iter().take_while(|&&i| i != TESS_UNDEF) {
+            let p = Vec2::new(vertices[i as usize][0], vertices[i as usize][1]);
+            if points.last().is_some_and(|l| min_dist_sq >= (l.y - p.y) * (l.y - p.y) + (l.x - p.x) * (l.x - p.x)) {
+                continue;
+            }
+            points.push(p);
+        }
+        if points.len() < 3 {
+            continue;
+        }
+        drop_collinear(&mut points);
+        if validate_polygon(&points) {
+            polygons.push(Polygon::from_points(&points, super::settings::globals().polygon_radius));
+        }
+    }
+    polygons
+}
+
+/// EdgeCollider2D::PrepareShapes (180c22090): the points plus the offset through the collider matrix (z = 0) by
+/// TransformPoints (180c248b0), a point within 0.00709 of the previous one dropped, as a b2ChainShape of radius
+/// b2_polygonRadius + edgeRadius with the adjacent points (when used) through the same matrix. None under 2 points.
+pub fn edge_collider_chain(points: &[[f32; 2]], m: &[f32; 16], offset: Vec2, edge_radius: f32, start: Option<[f32; 2]>, end: Option<[f32; 2]>) -> Option<Chain> {
+    let min_dist_sq = f32::from_bits(0x3852_c386);
+    let apply = |p: [f32; 2]| {
+        let (x, y) = (p[0] + offset.x, p[1] + offset.y);
+        Vec2::new(x * m[0] + y * m[4] + m[8] * 0.0 + m[12], x * m[1] + y * m[5] + m[9] * 0.0 + m[13])
+    };
+    if points.len() < 2 {
+        return None;
+    }
+    let mut vertices: Vec<Vec2> = Vec::with_capacity(points.len());
+    for &p in points {
+        let t = apply(p);
+        if vertices.last().is_some_and(|l| min_dist_sq >= (l.x - t.x) * (l.x - t.x) + (l.y - t.y) * (l.y - t.y)) {
+            continue;
+        }
+        vertices.push(t);
+    }
+    if vertices.len() < 2 || vertices.windows(2).any(|w| min_dist_sq > (w[0].x - w[1].x) * (w[0].x - w[1].x) + (w[0].y - w[1].y) * (w[0].y - w[1].y)) {
+        return None;
+    }
+    Some(Chain { radius: super::settings::globals().polygon_radius + edge_radius, vertices: vertices.into(), prev: start.map(apply), next: end.map(apply) })
 }
 
 /// The polygons a BoxCollider2D contributes (non-tiled): none when the transformed box fails validation.

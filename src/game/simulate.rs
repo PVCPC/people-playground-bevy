@@ -215,6 +215,7 @@ impl Game {
                 // SpringJoint2D keeps Joint2D::Reset's infinite breakTorque.
                 BreakJoint::Spring(l) => (self.limbs[l].gore.breakForce, f32::INFINITY, self.limbs[l].gore.joint),
                 BreakJoint::Fixed(f) => (self.fixed_joints[f].state.break_force, self.fixed_joints[f].state.break_torque, self.fixed_joints[f].joint),
+                BreakJoint::Anchored(a) => (self.anchored_joints[a].break_force, self.anchored_joints[a].break_torque, self.anchored_joints[a].joint),
             };
             // Joint2D::GetReactionForce/Torque: zero without a b2 joint or under 0.0001s. b2RevoluteJoint gives
             // inv_dt times the point impulse and inv_dt times the limit impulse as torque; b2DistanceJoint gives
@@ -229,6 +230,10 @@ impl Game {
                 }
                 Some(JointKind::Distance(d)) => {
                     let f = d.reaction_force(inv_dt);
+                    ([f.x, f.y], 0.0)
+                }
+                Some(JointKind::Rope(r)) => {
+                    let f = r.reaction_force(inv_dt);
                     ([f.x, f.y], 0.0)
                 }
                 Some(JointKind::Prismatic(p)) => {
@@ -252,6 +257,14 @@ impl Game {
                         self.gore_string_on_joint_break(l);
                         // DestroyObjectHighLevel, ahead of the script's own delayed Destroy.
                         self.remove_spring_joint(l);
+                    }
+                    BreakJoint::Anchored(a) => {
+                        // SendMessage("OnJointBreak2D") finds PhysicalBehaviour, LimbBehaviour and
+                        // CirculationBehaviour at most, and each only compares the joint with its own penetration or
+                        // limb joint, never a prefab's. DestroyObjectHighLevel then runs Joint2D::Cleanup.
+                        if let Some(id) = self.anchored_joints[a].joint.take() {
+                            self.world.destroy_joint(id);
+                        }
                     }
                     BreakJoint::Fixed(f) => {
                         // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares

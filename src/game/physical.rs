@@ -175,6 +175,8 @@ script! {
         decal_controllers: Vec<super::misc::DecalController> = Vec::new(),
         /// spriteRenderer's local AABB (center, extents); None when no sprite data was loaded.
         sprite_bounds: Option<([f32; 3], [f32; 3])> = None,
+        /// For drawing: the spriteRenderer's Sprite, color and sorting order.
+        sprite: Option<(crate::assets::db::ObjRef, [f32; 4], i16)> = None,
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).
@@ -344,6 +346,10 @@ impl Game {
     fn physical_calculate_circumference(&mut self, p: usize) {
         let ph = &mut self.physicals[p];
         if ph.LocalColliderGridPoints.as_ref().unwrap().is_empty() {
+            // The AutoSyncTransforms the first non-trigger collider's bounds starts with.
+            if ph.collider_defs.iter().any(|c| !c.is_trigger) {
+                self.sync_pending();
+            }
             let baked = self.physical_bake_collider_grid_points(p);
             self.physicals[p].LocalColliderGridPoints = Some(baked);
         }
@@ -363,8 +369,7 @@ impl Game {
     }
 
     /// Collider2D.bounds (Collider2D::GetBounds, 180c11150): the union of the shapes' AABBs (ComputeAABB with the
-    /// radius) as center and extents, z from the Transform. The AutoSyncTransforms it starts with finds nothing
-    /// to sync: the rewrite moves bodies and transforms together.
+    /// radius) as center and extents, z from the Transform. The caller runs the AutoSyncTransforms it starts with.
     fn collider_bounds(&self, p: usize, collider: i32) -> ([f32; 3], [f32; 3]) {
         let body = self.world.body(self.physicals[p].rigidbody.body);
         let mut aabb: Option<crate::b2::broadphase::Aabb> = None;
@@ -373,14 +378,16 @@ impl Game {
             if fx.collider.id != collider {
                 continue;
             }
-            let a = fx.shape.compute_aabb(&body.xf);
-            aabb = Some(match aabb {
-                None => a,
-                Some(b) => crate::b2::broadphase::Aabb {
-                    lower: crate::b2::math::Vec2::new(b.lower.x.min(a.lower.x), b.lower.y.min(a.lower.y)),
-                    upper: crate::b2::math::Vec2::new(b.upper.x.max(a.upper.x), b.upper.y.max(a.upper.y)),
-                },
-            });
+            for child in 0..fx.shape.child_count() {
+                let a = fx.shape.compute_aabb(&body.xf, child);
+                aabb = Some(match aabb {
+                    None => a,
+                    Some(b) => crate::b2::broadphase::Aabb {
+                        lower: crate::b2::math::Vec2::new(b.lower.x.min(a.lower.x), b.lower.y.min(a.lower.y)),
+                        upper: crate::b2::math::Vec2::new(b.upper.x.max(a.upper.x), b.upper.y.max(a.upper.y)),
+                    },
+                });
+            }
         }
         let Some(a) = aabb else { unimplemented!("Collider2D.bounds of a collider without shapes") };
         let z = self.physicals[p].transform.position[2];

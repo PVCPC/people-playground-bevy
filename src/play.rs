@@ -98,7 +98,7 @@ pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         .insert_resource(rig)
         .insert_resource(Play { game, stopped: None, paused: false })
         .add_systems(Startup, setup)
-        .add_systems(Update, (controls, mouse, frame, limb_sprites, draw).chain())
+        .add_systems(Update, (controls, mouse, frame, limb_sprites, object_sprites, draw).chain())
         .run();
     Ok(())
 }
@@ -216,6 +216,69 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
     })
 }
 
+/// A physical object's own sprite (the limbs use the rig's).
+#[derive(Component)]
+struct ObjectSprite(usize);
+
+/// A sprite from the game's data for each non-limb physical object without one; textures decoded once.
+fn object_sprites(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    play: Res<Play>,
+    mut done: Local<usize>,
+    mut textures: Local<std::collections::HashMap<(usize, i64), Handle<Image>>>,
+) {
+    let g = &play.game;
+    let Some(db) = g.assets.as_deref() else { return };
+    let limbs: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+    for p in *done..g.physicals.len() {
+        let Some((r, color, order)) = g.physicals[p].sprite else { continue };
+        if limbs.contains(&p) {
+            continue;
+        }
+        let s = match crate::assets::components::Sprite::read(db.data(r)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{}: {e}", g.physicals[p].name);
+                continue;
+            }
+        };
+        let Some(t) = db.resolve(r.file, s.texture) else { continue };
+        let handle = match textures.get(&(t.file, t.path_id)) {
+            Some(h) => h.clone(),
+            None => {
+                let tex = crate::assets::components::Texture2D::read(db.data(t));
+                let Ok((tex, rgba)) = tex.and_then(|tex| tex.rgba(&db.data_dir).map(|px| (tex, px))) else { continue };
+                // Unity's rows run bottom first; an Image's top first.
+                let row = tex.width as usize * 4;
+                let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
+                let image = Image::new(
+                    bevy::render::render_resource::Extent3d { width: tex.width as u32, height: tex.height as u32, depth_or_array_layers: 1 },
+                    bevy::render::render_resource::TextureDimension::D2,
+                    flipped,
+                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                );
+                let h = images.add(image);
+                textures.insert((t.file, t.path_id), h.clone());
+                h
+            }
+        };
+        let height = images.get(&handle).map_or(0.0, |i| i.height() as f32);
+        // The packed region (texture_rect) sits at texture_rect_offset inside the sprite's rect.
+        let [x, y, w, h] = s.texture_rect;
+        let mut sprite = Sprite::from_image(handle);
+        sprite.rect = Some(Rect::new(x, height - y - h, x + w, height - y));
+        sprite.custom_size = Some(Vec2::new(w, h) / s.pixels_to_units);
+        sprite.color = Color::srgba(color[0], color[1], color[2], color[3]);
+        let pivot = Vec2::from_array(s.pivot) * Vec2::new(s.rect[2], s.rect[3]) - Vec2::from_array(s.texture_rect_offset);
+        let anchor = Anchor(pivot / Vec2::new(w, h) - Vec2::splat(0.5));
+        // ponytail: sorting order only; sorting layers (TagManager order) when two layers overlap wrongly.
+        commands.spawn((ObjectSprite(p), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+    }
+    *done = g.physicals.len();
+}
+
 /// A sprite for each limb without one: the starting people's, then the ones spawned since.
 fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, play: Res<Play>, mut done: Local<usize>) {
     let g = &play.game;
@@ -234,6 +297,7 @@ fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<Human
 fn draw(
     play: Res<Play>,
     mut sprites: Query<(&LimbSprite, &mut Transform, &mut Visibility)>,
+    mut objects: Query<(&ObjectSprite, &mut Transform, &mut Visibility), Without<LimbSprite>>,
     mut hud: Single<&mut Text, With<Hud>>,
     mut gizmos: Gizmos,
 ) {
@@ -249,8 +313,20 @@ fn draw(
             .with_scale(Vec3::new(sx * p.transform.localScale[0], sy * p.transform.localScale[1], 1.0));
         *visibility = if p.active { Visibility::Inherited } else { Visibility::Hidden };
     }
-    // Everything else (the map, its props) as collider outlines.
-    let limb_bodies: Vec<_> = g.limbs.iter().map(|l| g.physicals[l.PhysicalBehaviour].rigidbody.body).collect();
+    for (&ObjectSprite(p), mut transform, mut visibility) in &mut objects {
+        let p = &g.physicals[p];
+        let [x, y, _] = p.transform.position;
+        let [qx, qy, qz, qw] = p.transform.rotation;
+        let s = p.transform.localScale;
+        let z = transform.translation.z;
+        *transform = Transform::from_xyz(x, y, z).with_rotation(Quat::from_xyzw(qx, qy, qz, qw)).with_scale(Vec3::new(s[0], s[1], 1.0));
+        *visibility = if p.active && !p.isDisintegrated { Visibility::Inherited } else { Visibility::Hidden };
+    }
+    // Everything else (sprite-less map parts and props) as collider outlines.
+    let mut limb_bodies: Vec<_> = g.limbs.iter().map(|l| g.physicals[l.PhysicalBehaviour].rigidbody.body).collect();
+    if g.assets.is_some() {
+        limb_bodies.extend(g.physicals.iter().filter(|p| p.sprite.is_some()).map(|p| p.rigidbody.body));
+    }
     for (id, body) in g.world.bodies.iter().enumerate() {
         let Some(body) = body else { continue };
         if limb_bodies.contains(&id) {
@@ -267,6 +343,9 @@ fn draw(
                 }
                 Shape::Circle(c) => {
                     gizmos.circle_2d(world(c.p), c.radius, color);
+                }
+                Shape::Chain(c) => {
+                    gizmos.linestrip_2d(c.vertices.iter().map(|&v| world(v)), color);
                 }
             }
         }

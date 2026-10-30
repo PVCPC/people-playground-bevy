@@ -124,18 +124,7 @@ pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -
             }
             // A rounded polygon: within its extra radius of the first edge the point is outside.
             let Some(i) = (0..n).find(|&i| sep(i) > 0.0) else { return true };
-            let (a, b) = (poly.vertices[i], poly.vertices[if i + 1 == n { 0 } else { i + 1 }]);
-            // b2NearestPointOnLineSegment (180bb1780)
-            let (ex, ey) = (b.x - a.x, b.y - a.y);
-            let len2 = ex * ex + ey * ey;
-            let near = if f32::from_bits(0x28800000) > len2 {
-                a
-            } else {
-                let t = (ex * (local.x - a.x) + ey * (local.y - a.y)) / len2;
-                let t = if t < 1.0 { t } else { 1.0 };
-                let t = if 0.0 > t { 0.0 } else { t };
-                V::new(a.x + ex * t, a.y + ey * t)
-            };
+            let near = nearest_point_on_segment(local, poly.vertices[i], poly.vertices[if i + 1 == n { 0 } else { i + 1 }]);
             let r = poly.radius - polygon_radius;
             let (nx, ny) = (near.x - local.x, near.y - local.y);
             r * r >= ny * ny + nx * nx
@@ -146,7 +135,31 @@ pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -
             let (dx, dy) = (p.x - cx, p.y - cy);
             circle.radius * circle.radius >= dy * dy + dx * dx
         }
+        // b2ChainShape::TestPoint (180bb5de0): within the radius less b2_polygonRadius of any segment.
+        Shape::Chain(chain) => {
+            let (dx, dy) = (p.x - xf.p.x, p.y - xf.p.y);
+            let local = V::new(c * dx + s * dy, c * dy - s * dx);
+            let r = chain.radius - crate::b2::settings::globals().polygon_radius;
+            chain.vertices.windows(2).any(|w| {
+                let near = nearest_point_on_segment(local, w[0], w[1]);
+                let (nx, ny) = (near.x - local.x, near.y - local.y);
+                r * r >= nx * nx + ny * ny
+            })
+        }
     }
+}
+
+/// b2NearestPointOnLineSegment (180bb1780).
+fn nearest_point_on_segment(p: V, a: V, b: V) -> V {
+    let (ex, ey) = (b.x - a.x, b.y - a.y);
+    let len2 = ex * ex + ey * ey;
+    if f32::from_bits(0x28800000) > len2 {
+        return a;
+    }
+    let t = (ex * (p.x - a.x) + ey * (p.y - a.y)) / len2;
+    let t = if t < 1.0 { t } else { 1.0 };
+    let t = if 0.0 > t { 0.0 } else { t };
+    V::new(a.x + ex * t, a.y + ey * t)
 }
 
 impl Game {
@@ -154,9 +167,10 @@ impl Game {
     /// PhysicsQuery2D::OverlapPointAll (180bf4d70) runs b2World::QueryAABB on the point; ReportFixture (180bf72d0)
     /// skips triggers (queriesHitTriggers is off), other layers, Transforms outside the depth range, a collider
     /// already hit and shapes that don't contain the point; the hits go by ascending Transform z (stable).
-    pub(super) fn overlap_point(&self, point: [f32; 3], mask: u32, min_depth: f32, max_depth: f32) -> Vec<usize> {
+    pub(super) fn overlap_point(&mut self, point: [f32; 3], mask: u32, min_depth: f32, max_depth: f32) -> Vec<usize> {
+        self.sync_pending();
         let p = V::new(point[0], point[1]);
-        let hits = self.overlap_query(self.world.query_point(p), mask, min_depth, max_depth, |shape, xf| test_point(shape, xf, p));
+        let hits = self.overlap_query(self.world.query_point(p), mask, min_depth, max_depth, |shape, _, xf| test_point(shape, xf, p));
         if hits.len() > 16 {
             unimplemented!("OverlapPointNonAlloc: more hits than its buffer");
         }
@@ -164,15 +178,17 @@ impl Game {
     }
 
     /// Physics2D.OverlapPoint(point, mask): the lowest-z collider at the point.
-    pub fn overlap_point_first(&self, point: [f32; 2], mask: u32) -> Option<usize> {
+    pub fn overlap_point_first(&mut self, point: [f32; 2], mask: u32) -> Option<usize> {
+        self.sync_pending();
         let p = V::new(point[0], point[1]);
-        self.overlap_query(self.world.query_point(p), mask, f32::NEG_INFINITY, f32::INFINITY, |shape, xf| test_point(shape, xf, p)).first().copied()
+        self.overlap_query(self.world.query_point(p), mask, f32::NEG_INFINITY, f32::INFINITY, |shape, _, xf| test_point(shape, xf, p)).first().copied()
     }
 
     /// Physics2D.OverlapAreaAll(a, b, mask): OverlapAreaAllToBox_Internal's OverlapBoxAll at the midpoint, size
     /// |a − b|, angle 0, depths unbounded. OverlapBoxQuery2D: SetAsBox(max(size/2, 1e-4)) with b2_polygonRadius,
     /// its AABB at the identity, and TestShapeOverlap (b2TestOverlap) per fixture.
-    fn overlap_area_all(&self, a: [f32; 2], b: [f32; 2], mask: u32) -> Vec<usize> {
+    fn overlap_area_all(&mut self, a: [f32; 2], b: [f32; 2], mask: u32) -> Vec<usize> {
+        self.sync_pending();
         let point = V::new((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5);
         let size = [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()];
         let min = f32::from_bits(0x38d1b717);
@@ -185,17 +201,15 @@ impl Game {
         let r = poly.radius;
         let aabb = crate::b2::broadphase::Aabb { lower: V::new(lower.x - r, lower.y - r), upper: V::new(upper.x + r, upper.y + r) };
         let identity = crate::b2::math::Transform { p: V::ZERO, q: crate::b2::math::Rot::new(0.0) };
-        self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, xf| shape.test_overlap(&identity, other, xf))
+        self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf))
     }
 
     /// The overlap queries' shared filter: sensors skipped (QueriesHitTriggers off), the layer mask, the depth
-    /// range on the Transform's z, each collider once, then a stable sort by z.
-    fn overlap_query(&self, fixtures: Vec<crate::b2::world::FixtureId>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, &crate::b2::math::Transform) -> bool) -> Vec<usize> {
-        if !self.unsynced.is_empty() {
-            unimplemented!("Physics2D auto SyncTransforms before a query");
-        }
+    /// range on the Transform's z, each collider once, then a stable sort by z. The callers run PhysicsQuery2D's
+    /// AutoSyncTransforms (Physics2DSettings.autoSyncTransforms is on) before querying.
+    fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<usize> {
         let mut hits: Vec<(usize, i32)> = Vec::new();
-        for f in fixtures {
+        for (f, child) in fixtures {
             let fx = self.world.fixture(f);
             if fx.is_sensor {
                 continue;
@@ -216,7 +230,7 @@ impl Game {
             if hits.iter().any(|&(_, c)| c == fx.collider.id) {
                 continue;
             }
-            if test(&fx.shape, &self.world.body(fx.body).xf) {
+            if test(&fx.shape, child, &self.world.body(fx.body).xf) {
                 hits.push((ph, fx.collider.id));
             }
         }

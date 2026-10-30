@@ -366,6 +366,8 @@ pub enum PendingStart {
     /// LateUpdate; the rest after the LateUpdate phase.
     Person(usize),
     HingeJointLimitAutofix(usize),
+    /// The same behaviour on an item that is no Person: the host's physical (Ok) or Transform node (Err).
+    HingeJointLimitAutofixItem(Result<usize, usize>),
     Circulation(usize),
     Physical(usize),
     Limb(usize),
@@ -662,6 +664,16 @@ impl Game {
                 }
                 PendingStart::Person(p) => self.person_start(p),
                 PendingStart::HingeJointLimitAutofix(p) => self.hinge_joint_limit_autofix_start(p),
+                // Start: IsFlipped = false, and only a mirrored host (localScale.x not above zero) fixes anything.
+                PendingStart::HingeJointLimitAutofixItem(host) => {
+                    let x = match host {
+                        Ok(p) => self.physicals[p].transform.localScale[0],
+                        Err(n) => self.transform_nodes[n].trs.s[0],
+                    };
+                    if !(x > 0.0) {
+                        unimplemented!("HingeJointLimitAutofixBehaviour.Start on a mirrored item: FixHinges, FixSlider and FixFixed");
+                    }
+                }
                 PendingStart::Circulation(l) => self.circulation_start(l),
                 PendingStart::Physical(p) => self.physical_start(p),
                 PendingStart::Limb(l) => self.limb_start(l),

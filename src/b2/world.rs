@@ -8,10 +8,11 @@ use super::contacts2d::{CollisionId, Contacts2D};
 use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::distance_joint::{DistanceDef, DistanceJoint};
+use super::rope_joint::{RopeDef, RopeJoint};
 use super::weld::{WeldDef, WeldJoint};
 use super::prismatic::{PrismaticDef, PrismaticJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
-use super::shape::{Circle, MassData, Polygon};
+use super::shape::{Chain, Circle, MassData, Polygon};
 use super::solver::*;
 use super::toi::{time_of_impact, Sweep, ToiState};
 
@@ -58,10 +59,27 @@ pub enum BodyType {
     Dynamic,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
     Circle(Circle),
     Polygon(Polygon),
+    Chain(Chain),
+}
+
+/// A broadphase proxy's user data (Unity's b2FixtureProxy): the fixture and the shape child.
+fn proxy_key(f: FixtureId, child: usize) -> usize {
+    f << 32 | child
+}
+
+fn proxy_owner(key: usize) -> (FixtureId, usize) {
+    (key >> 32, key & 0xffff_ffff)
+}
+
+/// GetEffectiveRadius (180bb3f20): the radius less b2_polygonRadius (Physics2DSettings.m_DefaultContactOffset)
+/// when it is larger.
+fn effective_radius(radius: f32) -> f32 {
+    let skin = globals().polygon_radius;
+    if skin >= radius { radius } else { radius - skin }
 }
 
 impl Shape {
@@ -70,6 +88,15 @@ impl Shape {
         match self {
             Shape::Circle(_) => 0,
             Shape::Polygon(_) => 2,
+            Shape::Chain(_) => 3,
+        }
+    }
+
+    /// GetChildCount: a chain has one per segment.
+    pub fn child_count(&self) -> usize {
+        match self {
+            Shape::Chain(c) => c.vertices.len() - 1,
+            _ => 1,
         }
     }
 
@@ -77,11 +104,13 @@ impl Shape {
         match self {
             Shape::Circle(c) => c.radius,
             Shape::Polygon(p) => p.radius,
+            Shape::Chain(c) => c.radius,
         }
     }
 
-    /// b2PolygonShape::ComputeAABB (180bb2bc0) and b2CircleShape::ComputeAABB (180bb2ac0).
-    pub(crate) fn compute_aabb(&self, xf: &Transform) -> Aabb {
+    /// b2PolygonShape::ComputeAABB (180bb2bc0), b2CircleShape::ComputeAABB (180bb2ac0) and b2ChainShape::ComputeAABB
+    /// (180bb2a20) on `child`.
+    pub(crate) fn compute_aabb(&self, xf: &Transform, child: usize) -> Aabb {
         match self {
             Shape::Circle(c) => {
                 let p = xf.apply(c.p);
@@ -97,11 +126,17 @@ impl Shape {
                     if v.y <= lower.y { lower.y = v.y }
                     if upper.y <= v.y { upper.y = v.y }
                 }
-                // Unity's ComputeAABB(includeRadius = true) adds GetEffectiveRadius (180bb3f20): the radius less
-                // b2_polygonRadius (Physics2DSettings.m_DefaultContactOffset) when it is larger.
-                let skin = globals().polygon_radius;
-                let r = if skin >= polygon.radius { polygon.radius } else { polygon.radius - skin };
+                // Unity's ComputeAABB(includeRadius = true) adds GetEffectiveRadius.
+                let r = effective_radius(polygon.radius);
                 Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(upper.x + r, upper.y + r) }
+            }
+            // A b2CapsuleShape of the segment with the effective radius, through b2CapsuleShape::ComputeAABB (180bb2910).
+            Shape::Chain(chain) => {
+                let (a, b) = (xf.apply(chain.vertices[child]), xf.apply(chain.vertices[child + 1]));
+                let r = effective_radius(chain.radius);
+                let lower = Vec2::new(if a.x < b.x { a.x } else { b.x }, if a.y < b.y { a.y } else { b.y });
+                let upper = Vec2::new(if a.x > b.x { a.x } else { b.x }, if a.y > b.y { a.y } else { b.y });
+                Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(r + upper.x, r + upper.y) }
             }
         }
     }
@@ -115,19 +150,23 @@ impl Shape {
                 MassData { mass, center: c.p, inertia: mass * (0.5 * c.radius * c.radius + (c.p.x * c.p.x + c.p.y * c.p.y)), area }
             }
             Shape::Polygon(p) => p.compute_mass(density),
+            // b2ChainShape::ComputeMass (180bb34e0)
+            Shape::Chain(_) => MassData::default(),
         }
     }
 
-    /// b2TestOverlap (180bb1970) on child 0 of each: GJK with radii from an empty cache, under 10·FLT_EPSILON apart.
-    pub fn test_overlap(&self, xf_a: &Transform, other: &Shape, xf_b: &Transform) -> bool {
+    /// b2TestOverlap (180bb1970) on the children: GJK with radii from an empty cache, under 10·FLT_EPSILON apart.
+    pub fn test_overlap(&self, child_a: usize, xf_a: &Transform, other: &Shape, child_b: usize, xf_b: &Transform) -> bool {
         let mut cache = SimplexCache::default();
-        super::distance::distance(&mut cache, &self.proxy(), xf_a, &other.proxy(), xf_b, true).distance < 10.0 * f32::EPSILON
+        super::distance::distance(&mut cache, &self.proxy(child_a), xf_a, &other.proxy(child_b), xf_b, true).distance < 10.0 * f32::EPSILON
     }
 
-    fn proxy(&self) -> DistanceProxy<'_> {
+    /// b2DistanceProxy::Set (180baeb10).
+    fn proxy(&self, child: usize) -> DistanceProxy<'_> {
         match self {
             Shape::Circle(c) => DistanceProxy { vertices: std::slice::from_ref(&c.p), radius: c.radius },
             Shape::Polygon(p) => DistanceProxy { vertices: &p.vertices[..p.count], radius: p.radius },
+            Shape::Chain(c) => DistanceProxy { vertices: &c.vertices[child..child + 2], radius: c.radius },
         }
     }
 }
@@ -334,7 +373,7 @@ impl Default for Filter {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FixtureDef {
     pub shape: Shape,
     pub friction: f32,
@@ -385,13 +424,20 @@ pub struct Contact {
 
 pub type JointId = usize;
 
-/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D, FixedJoint2D and SliderJoint2D.
+/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D, FixedJoint2D, SliderJoint2D and DistanceJoint2D.
 #[derive(Clone, Debug)]
 pub enum JointKind {
     Revolute(RevoluteJoint),
     Distance(DistanceJoint),
     Weld(WeldJoint),
     Prismatic(PrismaticJoint),
+    Rope(RopeJoint),
+}
+
+impl From<RopeDef> for JointKind {
+    fn from(def: RopeDef) -> Self {
+        Self::Rope(RopeJoint::new(def))
+    }
 }
 
 impl From<RevoluteDef> for JointKind {
@@ -492,6 +538,7 @@ impl Joint {
             JointKind::Distance(d) => (d.a, d.b),
             JointKind::Weld(w) => (w.a, w.b),
             JointKind::Prismatic(p) => (p.a, p.b),
+            JointKind::Rope(r) => (r.a, r.b),
         }
     }
 
@@ -501,6 +548,7 @@ impl Joint {
             JointKind::Distance(d) => (&mut d.a, &mut d.b),
             JointKind::Weld(w) => (&mut w.a, &mut w.b),
             JointKind::Prismatic(p) => (&mut p.a, &mut p.b),
+            JointKind::Rope(r) => (&mut r.a, &mut r.b),
         }
     }
 }
@@ -691,25 +739,25 @@ impl World {
         let xf = b.xf;
         for f in b.fixtures.iter().rev().copied().collect::<Vec<_>>() {
             let fixture = self.fixtures[f].as_mut().unwrap();
-            for (aabb, proxy) in &mut fixture.proxies {
+            for (child, (aabb, proxy)) in fixture.proxies.iter_mut().enumerate() {
                 // The combine of two equal boxes is the box; the displacement is zero.
-                *aabb = fixture.shape.compute_aabb(&xf);
+                *aabb = fixture.shape.compute_aabb(&xf, child);
                 self.broad_phase.move_proxy(*proxy, aabb, xf.p - xf.p);
             }
         }
     }
 
-    /// b2World::QueryAABB (180bb9c20) on a point's AABB: each overlapping proxy's fixture, in tree order.
-    pub fn query_point(&self, p: Vec2) -> Vec<FixtureId> {
+    /// b2World::QueryAABB (180bb9c20) on a point's AABB: each overlapping proxy's (fixture, child), in tree order.
+    pub fn query_point(&self, p: Vec2) -> Vec<(FixtureId, usize)> {
         self.query_aabb(&super::broadphase::Aabb { lower: p, upper: p })
     }
 
-    /// b2World::QueryAABB: each overlapping proxy's fixture, in tree order.
-    pub fn query_aabb(&self, aabb: &super::broadphase::Aabb) -> Vec<FixtureId> {
+    /// b2World::QueryAABB: each overlapping proxy's (fixture, child), in tree order.
+    pub fn query_aabb(&self, aabb: &super::broadphase::Aabb) -> Vec<(FixtureId, usize)> {
         let mut out = Vec::new();
         let tree = &self.broad_phase.tree;
         tree.query(aabb, |proxy| {
-            out.push(tree.user_data(proxy));
+            out.push(proxy_owner(tree.user_data(proxy)));
             true
         });
         out
@@ -821,9 +869,12 @@ impl World {
         let at = Circle { p: point, radius: 0.0 };
         let (mut best, mut closest) = (f32::MAX, point);
         for f in self.fixtures.iter().flatten().filter(|f| f.collider.id == collider) {
+            if matches!(f.shape, Shape::Chain(_)) {
+                unimplemented!("Collider2D.ClosestPoint on an EdgeCollider2D");
+            }
             let xf = self.body(f.body).xf;
             let mut cache = SimplexCache::default();
-            let out = distance(&mut cache, &DistanceProxy { vertices: std::slice::from_ref(&at.p), radius: 0.0 }, &Transform::default_identity(), &f.shape.proxy(), &xf, true);
+            let out = distance(&mut cache, &DistanceProxy { vertices: std::slice::from_ref(&at.p), radius: 0.0 }, &Transform::default_identity(), &f.shape.proxy(0), &xf, true);
             if !(out.distance > 0.0) {
                 return point;
             }
@@ -904,14 +955,19 @@ impl World {
         let id = self.fixtures.len();
         let body = self.body(body_id);
         let proxies = if body.flags & BODY_ACTIVE != 0 {
-            let aabb = def.shape.compute_aabb(&body.xf);
-            vec![(aabb, self.broad_phase.create_proxy(&aabb, id))]
+            let xf = body.xf;
+            (0..def.shape.child_count())
+                .map(|child| {
+                    let aabb = def.shape.compute_aabb(&xf, child);
+                    (aabb, self.broad_phase.create_proxy(&aabb, proxy_key(id, child)))
+                })
+                .collect()
         } else {
             Vec::new()
         };
         self.fixtures.push(Some(Fixture {
             body: body_id,
-            shape: def.shape,
+            shape: def.shape.clone(),
             density: def.density,
             friction: def.friction,
             restitution: def.restitution,
@@ -1064,13 +1120,13 @@ impl World {
     /// UpdatePairs (180bb7af0) with b2ContactManager::AddPair inlined.
     fn find_new_contacts(&mut self) {
         let mut pairs = Vec::new();
-        self.broad_phase.update_pairs(|a, b| pairs.push((a, b)));
-        for (fa, fb) in pairs {
-            self.add_pair(fa, fb);
+        self.broad_phase.update_pairs(|a, b| pairs.push((proxy_owner(a), proxy_owner(b))));
+        for ((fa, ia), (fb, ib)) in pairs {
+            self.add_pair(fa, ia, fb, ib);
         }
     }
 
-    fn add_pair(&mut self, fa: FixtureId, fb: FixtureId) {
+    fn add_pair(&mut self, fa: FixtureId, ia: usize, fb: FixtureId, ib: usize) {
         let (body_a, body_b) = (self.fixture(fa).body, self.fixture(fb).body);
         if body_a == body_b {
             return;
@@ -1078,7 +1134,7 @@ impl World {
         for &(other, c) in self.body(body_b).contacts.iter().rev() {
             if other == body_a {
                 let c = self.contact(c);
-                if (c.fixture_a == fa && c.fixture_b == fb) || (c.fixture_a == fb && c.fixture_b == fa) {
+                if (c.fixture_a == fa && c.fixture_b == fb && c.child_a == ia && c.child_b == ib) || (c.fixture_a == fb && c.fixture_b == fa && c.child_a == ib && c.child_b == ia) {
                     return;
                 }
             }
@@ -1089,20 +1145,25 @@ impl World {
         if !self.fixtures_should_collide(fa, fb) {
             return;
         }
-        let c = self.create_contact(fa, fb);
+        // b2Contact::Create's register table has no chain-chain (or chain-edge) entry: no contact.
+        if matches!(self.fixture(fa).shape, Shape::Chain(_)) && matches!(self.fixture(fb).shape, Shape::Chain(_)) {
+            return;
+        }
+        let c = self.create_contact(fa, ia, fb, ib);
         self.on_contact_create(c);
     }
 
-    /// b2Contact::Create (180bbcce0) and the b2Contact constructor (180bbc9f0); polygon-circle puts the polygon first.
-    fn create_contact(&mut self, fa: FixtureId, fb: FixtureId) -> ContactId {
-        let (fa, fb) = if self.fixture(fa).shape.type_index() < self.fixture(fb).shape.type_index() { (fb, fa) } else { (fa, fb) };
+    /// b2Contact::Create (180bbcce0) and the b2Contact constructor (180bbc9f0); polygon-circle puts the polygon first,
+    /// a chain goes before either.
+    fn create_contact(&mut self, fa: FixtureId, ia: usize, fb: FixtureId, ib: usize) -> ContactId {
+        let (fa, ia, fb, ib) = if self.fixture(fa).shape.type_index() < self.fixture(fb).shape.type_index() { (fb, ib, fa, ia) } else { (fa, ia, fb, ib) };
         let (a, b) = (self.fixture(fa), self.fixture(fb));
         let contact = Contact {
             flags: CONTACT_ENABLED,
             fixture_a: fa,
             fixture_b: fb,
-            child_a: 0,
-            child_b: 0,
+            child_a: ia,
+            child_b: ib,
             island_index_a: usize::MAX,
             island_index_b: usize::MAX,
             manifold: Manifold::default(),
@@ -1132,7 +1193,7 @@ impl World {
     /// A contact restored from a game dump: created like a new pair, then the caller sets its state.
     /// Restoring the native list tail first rebuilds the list and every body's edge list in native order.
     pub(crate) fn restore_contact(&mut self, fa: FixtureId, fb: FixtureId) -> ContactId {
-        let id = self.create_contact(fa, fb);
+        let id = self.create_contact(fa, 0, fb, 0);
         self.on_contact_create(id);
         id
     }
@@ -1167,7 +1228,8 @@ impl World {
         }
         let mut ids = Vec::new();
         for &(f, aabb, fat) in proxies {
-            let id = self.broad_phase.restore_proxy(&fat, f);
+            let child = self.fixtures[f].as_ref().unwrap().proxies.len();
+            let id = self.broad_phase.restore_proxy(&fat, proxy_key(f, child));
             self.fixtures[f].as_mut().unwrap().proxies.push((aabb, id));
             ids.push(id);
         }
@@ -1189,7 +1251,8 @@ impl World {
             f.proxies.clear();
         }
         for &(id, f, aabb) in proxies {
-            self.broad_phase.tree.nodes[id as usize].user_data = f;
+            let child = self.fixtures[f].as_ref().unwrap().proxies.len();
+            self.broad_phase.tree.nodes[id as usize].user_data = proxy_key(f, child);
             self.fixtures[f].as_mut().unwrap().proxies.push((aabb, id));
         }
     }
@@ -1305,18 +1368,19 @@ impl World {
         let (body_a, body_b) = (fa.body, fb.body);
         let (xf_a, xf_b) = (self.body(body_a).xf, self.body(body_b).xf);
         let sensor = fa.is_sensor || fb.is_sensor;
-        let (shape_a, shape_b) = (fa.shape, fb.shape);
+        let (shape_a, shape_b) = (fa.shape.clone(), fb.shape.clone());
+        let (ia, ib) = (c.child_a, c.child_b);
         let c = self.contact_mut(id);
         if c.flags & CONTACT_KEEP_DISABLED == 0 {
             c.flags |= CONTACT_ENABLED;
         }
         let touching = if sensor {
             c.manifold.point_count = 0;
-            test_overlap(&shape_a, &xf_a, &shape_b, &xf_b)
+            shape_a.test_overlap(ia, &xf_a, &shape_b, ib, &xf_b)
         } else {
             c.radius_a = shape_a.radius();
             c.radius_b = shape_b.radius();
-            evaluate(&mut c.manifold, &shape_a, &xf_a, &shape_b, &xf_b);
+            evaluate(&mut c.manifold, &shape_a, ia, &xf_a, &shape_b, &xf_b);
             for point in &mut c.manifold.points[..c.manifold.point_count] {
                 point.normal_impulse = 0.0;
                 point.tangent_impulse = 0.0;
@@ -1481,6 +1545,7 @@ impl World {
                 JointKind::Distance(d) => d.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Weld(w) => w.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Prismatic(p) => p.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+                JointKind::Rope(r) => r.init_velocity_constraints(a, b, step, &positions, &mut velocities),
             }
         }
         for _ in 0..step.velocity_iterations {
@@ -1490,6 +1555,7 @@ impl World {
                     JointKind::Distance(d) => d.solve_velocity_constraints(&mut velocities),
                     JointKind::Weld(w) => w.solve_velocity_constraints(&mut velocities),
                     JointKind::Prismatic(p) => p.solve_velocity_constraints(step, &mut velocities),
+                    JointKind::Rope(r) => r.solve_velocity_constraints(step, &mut velocities),
                 }
             }
             solver.solve_velocity_constraints(&mut velocities);
@@ -1528,6 +1594,7 @@ impl World {
                     JointKind::Distance(d) => d.solve_position_constraints(&mut positions),
                     JointKind::Weld(w) => w.solve_position_constraints(&mut positions),
                     JointKind::Prismatic(p) => p.solve_position_constraints(&mut positions),
+                    JointKind::Rope(r) => r.solve_position_constraints(&mut positions),
                 };
             }
             if contacts_solved && joints_solved {
@@ -1658,8 +1725,8 @@ impl World {
                     }
                     let c = self.contact(id);
                     let (fa, fb) = (self.fixture(c.fixture_a), self.fixture(c.fixture_b));
-                    let proxy_a = DistanceProxy { radius: c.radius_a, ..fa.shape.proxy() };
-                    let proxy_b = DistanceProxy { radius: c.radius_b, ..fb.shape.proxy() };
+                    let proxy_a = DistanceProxy { radius: c.radius_a, ..fa.shape.proxy(c.child_a) };
+                    let proxy_b = DistanceProxy { radius: c.radius_b, ..fb.shape.proxy(c.child_b) };
                     let output = time_of_impact(&proxy_a, &self.body(ia).sweep, &proxy_b, &self.body(ib).sweep, 1.0);
                     let mut alpha = 1.0;
                     if output.state == ToiState::Touching {
@@ -1840,8 +1907,8 @@ impl World {
         let displacement = xf2.p - xf1.p;
         for f in b.fixtures.iter().rev().copied().collect::<Vec<_>>() {
             let fixture = self.fixtures[f].as_mut().unwrap();
-            for (aabb, proxy) in &mut fixture.proxies {
-                *aabb = Aabb::combine(&fixture.shape.compute_aabb(&xf1), &fixture.shape.compute_aabb(&xf2));
+            for (child, (aabb, proxy)) in fixture.proxies.iter_mut().enumerate() {
+                *aabb = Aabb::combine(&fixture.shape.compute_aabb(&xf1, child), &fixture.shape.compute_aabb(&xf2, child));
                 self.broad_phase.move_proxy(*proxy, aabb, displacement);
             }
         }
@@ -1856,9 +1923,19 @@ fn should_collide(a: &Filter, b: &Filter) -> bool {
     a.mask_bits & b.category_bits != 0 && a.category_bits & b.mask_bits != 0
 }
 
-/// The b2*Contact::Evaluate natives: polygons with a rounded radius take the radial path.
-fn evaluate(manifold: &mut Manifold, a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
+/// The b2*Contact::Evaluate natives: polygons with a rounded radius take the radial path; a chain's child
+/// (`child_a`) collides as its edge, or against a polygon with either radius above b2_polygonRadius as a rounded
+/// two-sided segment (b2ChainAndPolygonContact::Evaluate, 180bbd400).
+fn evaluate(manifold: &mut Manifold, a: &Shape, child_a: usize, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
     match (a, b) {
+        (Shape::Chain(a), Shape::Polygon(b)) if globals().polygon_radius >= a.radius && globals().polygon_radius >= b.radius => collide_edge_and_polygon(manifold, &a.child_edge(child_a), xf_a, b, xf_b),
+        (Shape::Chain(a), Shape::Polygon(b)) => {
+            let segment = Polygon::segment(a.vertices[child_a], a.vertices[child_a + 1], a.radius);
+            collide_radial_polygons(manifold, &segment, xf_a, b, xf_b)
+        }
+        // b2ChainAndCircleContact::Evaluate (180bbd360)
+        (Shape::Chain(a), Shape::Circle(b)) => collide_edge_and_circle(manifold, &a.child_edge(child_a), xf_a, b, xf_b),
+        (_, Shape::Chain(_)) => unreachable!("create_contact puts the chain first"),
         (Shape::Polygon(a), Shape::Polygon(b)) if a.radius <= globals().polygon_radius && b.radius <= globals().polygon_radius => collide_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Polygon(b)) => collide_radial_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Circle(b)) => collide_polygon_and_circle(manifold, a, xf_a, b, xf_b),
@@ -1867,11 +1944,6 @@ fn evaluate(manifold: &mut Manifold, a: &Shape, xf_a: &Transform, b: &Shape, xf_
     }
 }
 
-/// ponytail: Box2D 2.3's b2TestOverlap; Unity's 180bb1970 not yet compared.
-fn test_overlap(a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) -> bool {
-    let mut cache = SimplexCache::default();
-    distance(&mut cache, &a.proxy(), xf_a, &b.proxy(), xf_b, true).distance < 10.0 * f32::EPSILON
-}
 
 #[cfg(test)]
 mod tests {

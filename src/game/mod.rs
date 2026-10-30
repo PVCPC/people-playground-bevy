@@ -743,12 +743,23 @@ impl Hinge {
     }
 }
 
-/// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, a limb's gore-string SpringJoint2D, or a FixedJoint2D.
+/// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, a limb's gore-string SpringJoint2D, a FixedJoint2D, or
+/// a Fixed/Slider/SpringJoint2D cloned from a prefab (`Anchored`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BreakJoint {
     Hinge(usize),
     Spring(usize),
     Fixed(usize),
+    Anchored(usize),
+}
+
+/// What PhysicsScene2D's break-limit walk reads from a prefab-cloned Fixed/Slider/SpringJoint2D.
+#[derive(Clone, Copy, Debug)]
+pub struct AnchoredJoint {
+    pub break_force: f32,
+    pub break_torque: f32,
+    /// m_Joint (+0x58)
+    pub joint: Option<crate::b2::world::JointId>,
 }
 
 /// A Transform as the scripts read it: world position and rotation, local scale, and the hierarchy's stored
@@ -818,6 +829,8 @@ pub struct Game {
     pub positionIterations: i32,
     /// PhysicsScene2D.m_JointBreakLimits: hinges with a finite break force or torque, in list order.
     pub joint_break_limits: Vec<BreakJoint>,
+    /// The Fixed/Slider/SpringJoint2D components cloned from prefabs, by creation order (BreakJoint::Anchored).
+    pub anchored_joints: Vec<AnchoredJoint>,
     /// FixedJoint2D components (the shattered pieces' welds), by creation order.
     pub fixed_joints: Vec<simulate::FixedJoint>,
     /// PhysicalBehaviour.Penetration objects, by creation order (Physical.penetrations/victimPenetrations index it).
