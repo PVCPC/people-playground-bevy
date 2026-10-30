@@ -164,11 +164,13 @@ impl Game {
         if hits.len() > 16 {
             unimplemented!("OverlapPointNonAlloc: more hits than its buffer");
         }
-        hits
+        // Every caller takes the collider's PhysicalBehaviour (TryGetComponent, the victim's GameObject or
+        // PhysicalObjectsInWorldByTransform): a bare collider only fills its buffer slot.
+        hits.into_iter().filter_map(|h| h.0).collect()
     }
 
     /// Physics2D.OverlapPoint(point, mask): the lowest-z collider at the point.
-    pub fn overlap_point_first(&mut self, point: [f32; 2], mask: u32) -> Option<usize> {
+    pub fn overlap_point_first(&mut self, point: [f32; 2], mask: u32) -> Option<(Option<usize>, i32)> {
         self.sync_pending();
         let p = V::new(point[0], point[1]);
         self.overlap_query(self.world.query_point(p), mask, f32::NEG_INFINITY, f32::INFINITY, |shape, _, xf| test_point(shape, xf, p)).first().copied()
@@ -191,14 +193,16 @@ impl Game {
         let r = poly.radius;
         let aabb = crate::b2::broadphase::Aabb { lower: V::new(lower.x - r, lower.y - r), upper: V::new(upper.x + r, upper.y + r) };
         let identity = crate::b2::math::Transform { p: V::ZERO, q: crate::b2::math::Rot::new(0.0) };
-        self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf))
+        // The selection keeps the colliders whose Transform is in PhysicalObjectsInWorldByTransform.
+        self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf)).into_iter().filter_map(|h| h.0).collect()
     }
 
     /// The overlap queries' shared filter: sensors skipped (QueriesHitTriggers off), the layer mask, the depth
     /// range on the Transform's z, each collider once, then a stable sort by z. The callers run PhysicsQuery2D's
     /// AutoSyncTransforms (Physics2DSettings.autoSyncTransforms is on) before querying.
-    fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<usize> {
-        let mut hits: Vec<(usize, i32)> = Vec::new();
+    /// The hits as (the collider's physical, or None for a GameObject without one; the Collider2D id).
+    fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<(Option<usize>, i32)> {
+        let mut hits: Vec<(Option<usize>, i32, f32)> = Vec::new();
         for (f, child) in fixtures {
             let fx = self.world.fixture(f);
             if fx.is_sensor {
@@ -210,22 +214,51 @@ impl Game {
             if mask & (1 << layer) == 0 {
                 continue;
             }
-            let Some(ph) = self.physical_of_collider(fx.collider.id) else {
-                unimplemented!("OverlapPoint: a selectable collider without a PhysicalBehaviour");
+            let ph = self.physical_of_collider(fx.collider.id);
+            let z = match ph {
+                Some(ph) => self.physicals[ph].transform.position[2],
+                None => self.bare_position(fx.collider.id)[2],
             };
-            let z = self.physicals[ph].transform.position[2];
             if z < min_depth || max_depth < z {
                 continue;
             }
-            if hits.iter().any(|&(_, c)| c == fx.collider.id) {
+            if hits.iter().any(|&(_, c, _)| c == fx.collider.id) {
                 continue;
             }
             if test(&fx.shape, child, &self.world.body(fx.body).xf) {
-                hits.push((ph, fx.collider.id));
+                hits.push((ph, fx.collider.id, z));
             }
         }
-        hits.sort_by(|a, b| self.physicals[a.0].transform.position[2].partial_cmp(&self.physicals[b.0].transform.position[2]).unwrap());
-        hits.into_iter().map(|(ph, _)| ph).collect()
+        hits.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+        hits.into_iter().map(|(ph, c, _)| (ph, c)).collect()
+    }
+
+    /// Transform.position of a bare collider's GameObject: its local position through its chain, then the anchor's.
+    pub(super) fn bare_position(&self, collider: i32) -> [f32; 3] {
+        use crate::unity::transform::global_position;
+        let Some(b) = self.bare_colliders.get(&collider) else { panic!("collider {collider} is neither a physical's nor bare") };
+        if b.moves {
+            unimplemented!("Transform of a collider under a Rigidbody2D without a PhysicalBehaviour");
+        }
+        let mut v = b.chain[0].t;
+        v[3] = 0.0;
+        for n in &b.chain[1..] {
+            v = global_position(n, v);
+        }
+        match b.anchor {
+            super::BareAnchor::Physical(p) => {
+                for n in self.local_chain(p).iter().rev() {
+                    v = global_position(n, v);
+                }
+            }
+            super::BareAnchor::Node(mut i) => loop {
+                v = global_position(&self.node_trs(i), v);
+                let Some(up) = self.transform_nodes[i].parent else { break };
+                i = up;
+            },
+            super::BareAnchor::Root => {}
+        }
+        [v[0], v[1], v[2]]
     }
 
 

@@ -260,6 +260,7 @@ impl Game {
             p.Burnrate = f(r.req("Burnrate")?);
             p.BurningTemperatureThreshold = f(r.req("BurningTemperatureThreshold")?);
             p.HeatTransferSpeedMultiplier = f(r.req("HeatTransferSpeedMultiplier")?);
+            p.Buoyancy = f(r.req("Buoyancy")?);
             p.ImpactIntensityMutliplier = f(r.req("ImpactIntensityMutliplier")?);
             p.HitVolumeMultiplier = f(r.req("HitVolumeMultiplier")?);
             p.SparksOnSlide = r.req("SparksOnSlide")? == "1";
@@ -839,6 +840,7 @@ impl Game {
                 self.limb_fixed_update(l);
             }
         }
+        self.water_manager_fixed_update();
         for p in 0..self.people.len() {
             self.person_fixed_update(p);
         }

@@ -132,8 +132,11 @@ impl Game {
         }
         // Physics2D.gravity = Gravity * Vector2.up.
         self.world.gravity = crate::b2::math::Vec2::new(0.0 * m.gravity, 1.0 * m.gravity);
-        // WaterBehaviour.waters is empty: a WaterBehaviour does not link (awake_behaviours).
         self.AmbientTemperature = m.ambient_temperature;
+        // ApplySettings: waters.ForEach(UpdateTemperatureState).
+        for i in 0..self.water_list.len() {
+            self.water_update_temperature_state(self.water_list[i]);
+        }
     }
 
     /// PlayAudioAtRandom.Update

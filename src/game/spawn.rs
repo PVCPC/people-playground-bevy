@@ -663,10 +663,11 @@ impl Game {
         if self.world.body(body).fixtures.is_empty() {
             return;
         }
-        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
-        if 1 < attached.len() {
-            unimplemented!("Rigidbody2D::GetAttachedColliders: several colliders on one body come in Collider2D pointer order");
-        }
+        // GetAttachedColliders (180c1f350) sorts the Collider2D pointers. The order cannot show: each refilter only
+        // flags contacts, touches proxies (UpdatePairs sorts and dedups the pairs), wakes the body and remixes
+        // materials, so any order gives the same world.
+        let mut attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        attached.sort_unstable();
         for &(o, c) in &attached {
             let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
             if col.enabled && !col.used_by_effector {

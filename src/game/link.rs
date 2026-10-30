@@ -8,6 +8,7 @@ use super::limb::{GoreString, Limb};
 use super::misc::{AutofixJoint, AutofixJoints, GForce, Grip, Node, Skin};
 use super::person::{LimbPose, Person, RagdollPose};
 use super::physical::{Physical, PhysicalProperties, SharpAxis};
+use super::water::Water;
 use super::spawn::{anchored_initial_state, joint_connected_object, load_values, Instance};
 use super::*;
 use crate::assets::classes::PPtr;
@@ -42,6 +43,8 @@ pub struct Linked {
     /// Game::hinges index by (object, component).
     pub hinges: HashMap<(usize, usize), usize>,
     pub map_lights: HashMap<usize, usize>,
+    /// Game::waters index by object.
+    pub waters: HashMap<usize, usize>,
     /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
     pub parent_audio: Option<usize>,
 }
@@ -258,6 +261,30 @@ impl Game {
             let p = *l.arenas.physical.get(&t).ok_or_else(|| format!("{}: a body under a Rigidbody2D without a PhysicalBehaviour", prefab.objects[t].name))?;
             self.node_bodies.insert(l.arenas.node[&t], p);
         }
+        // Colliders without a PhysicalBehaviour on their GameObject: the Transforms down from the nearest physical
+        // or node.
+        for o in (0..n).filter(|&o| !l.arenas.physical.contains_key(&o)) {
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                if !matches!(comp, Component::Collider2D(_)) {
+                    continue;
+                }
+                let (mut chain, mut moves, mut up) = (Vec::new(), false, Some(o));
+                let anchor = loop {
+                    let Some(t) = up else { break BareAnchor::Root };
+                    if let Some(&p) = l.arenas.physical.get(&t) {
+                        break BareAnchor::Physical(p);
+                    }
+                    if let Some(&i) = l.arenas.node.get(&t) {
+                        break BareAnchor::Node(i);
+                    }
+                    moves |= prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(rb) if rb.body_type != 2));
+                    chain.push(inst.objects[t].trs);
+                    up = inst.objects[t].parent;
+                };
+                let scripts = prefab.objects[o].components.iter().any(|(_, x)| matches!(x, Component::Script { .. }));
+                self.bare_colliders.insert(inst.objects[o].components[c], BareCollider { anchor, chain, moves, scripts });
+            }
+        }
         for class in ["CirculationBehaviour", "ConnectedNodeBehaviour", "SkinMaterialHandler"] {
             for o in 0..n {
                 if (script(prefab, o, class).is_some()) != l.arenas.limb.contains_key(&o) {
@@ -462,6 +489,30 @@ impl Game {
             map_lights.insert(o, self.map_lights.len());
             self.map_lights.push(m);
         }
+        let mut waters = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "WaterBehaviour") else { continue };
+            let component = |name: &str| -> Result<(usize, usize), String> {
+                let pp = field(v, name)?.pptr().ok_or_else(|| name.to_string())?;
+                prefab.index.get(&ObjRef { file, path_id: pp.path_id }).copied().filter(|_| !pp.is_null() && pp.file == 0).ok_or_else(|| format!("WaterBehaviour.{name} outside the prefab or null"))
+            };
+            let mut w = Water::default();
+            load_values(w.fields(), v)?;
+            (w.id, w.object, w.component, w.enabled, w.active) = (inst.objects[o].components[c], o, c, enabled, inst.objects[o].active);
+            w.chain = inst.chain(o);
+            let (to, tc) = component("Trigger")?;
+            w.trigger = inst.objects[to].components[tc];
+            w.trigger_fixtures = inst.fixtures.get(&(to, tc)).cloned().unwrap_or_default();
+            w.ice_object = component("Ice")?.0;
+            w.ice = *l.arenas.physical.get(&w.ice_object).ok_or("WaterBehaviour.Ice without a PhysicalBehaviour")?;
+            w.boiling_sound = l.object(field(v, "BoilingWaterSound")?)?.ok_or("WaterBehaviour.BoilingWaterSound is null")?;
+            for x in array(v, "ObjectsToBeActiveIfWater")? {
+                w.objects_to_be_active.push(l.object(x)?.ok_or("a null ObjectsToBeActiveIfWater entry")?);
+            }
+            w.waterSizzles = db.resources_in("Audio/water_sizzle", 83)?.len();
+            waters.insert(o, self.waters.len());
+            self.waters.push(w);
+        }
         let gforces = (0..n).filter(|&o| script(prefab, o, "GForceMeasureBehaviour").is_some()).count();
         if gforces != 0 && gforces != l.arenas.limb.len() {
             unimplemented!("a prefab with GForceMeasureBehaviour on some limbs only");
@@ -532,7 +583,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -675,6 +726,9 @@ impl Game {
                     for (&d, &p) in &linked.physicals {
                         self.physicals[p].active = inst.objects[d].active;
                     }
+                    for (&d, &w) in &linked.waters {
+                        self.waters[w].active = inst.objects[d].active;
+                    }
                 }
                 "PersonBehaviour" => {
                     if let Some(s) = self.person_awake(linked.person.unwrap()) {
@@ -684,7 +738,7 @@ impl Game {
                 }
                 "SkinMaterialHandler" => self.skin_awake(limb()),
                 "PhysicalBehaviour" => self.physical_awake(linked.physicals[&o]),
-                "WaterBehaviour" => unimplemented!("WaterBehaviour"),
+                "WaterBehaviour" => self.water_awake(linked.waters[&o]),
                 "LimbBehaviour" => self.limb_awake(limb()),
                 "CirculationBehaviour" => self.circulation_awake(limb()),
                 _ => {}
@@ -771,6 +825,7 @@ impl Game {
                 "GoreStringBehaviour" => PendingStart::GoreString(limb(), flag("CreateJointOnStart")),
                 "ShatteredObjectGenerator" if flag("GenerateOnStart") => unimplemented!("ShatteredObjectGenerator.Start with GenerateOnStart"),
                 "MapLightBehaviour" => PendingStart::MapLight(linked.map_lights[&o]),
+                "WaterBehaviour" => PendingStart::Water(linked.waters[&o]),
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {
@@ -821,6 +876,7 @@ impl Game {
         p.Burnrate = float(&v, "Burnrate")?;
         p.BurningTemperatureThreshold = float(&v, "BurningTemperatureThreshold")?;
         p.HeatTransferSpeedMultiplier = float(&v, "HeatTransferSpeedMultiplier")?;
+        p.Buoyancy = float(&v, "Buoyancy")?;
         p.ImpactIntensityMutliplier = float(&v, "ImpactIntensityMutliplier")?;
         p.HitVolumeMultiplier = float(&v, "HitVolumeMultiplier")?;
         p.SparksOnSlide = b("SparksOnSlide")?;

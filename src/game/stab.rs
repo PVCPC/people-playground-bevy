@@ -205,7 +205,7 @@ impl Game {
     // ---- Stabbing a victim ----------------------------------------------------------------------------------------
 
     /// The transform.root of a physical: a transform node, or the object itself when it has no parent.
-    fn root_of(&self, p: usize) -> (bool, usize) {
+    pub(super) fn root_of(&self, p: usize) -> (bool, usize) {
         match self.physicals[p].parent {
             None => (false, p),
             Some(mut n) => {

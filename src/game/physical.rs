@@ -28,6 +28,7 @@ pub struct PhysicalProperties {
     pub Burnrate: f32,
     pub BurningTemperatureThreshold: f32,
     pub HeatTransferSpeedMultiplier: f32,
+    pub Buoyancy: f32,
     pub ImpactIntensityMutliplier: f32,
     pub HitVolumeMultiplier: f32,
     pub SparksOnSlide: bool,

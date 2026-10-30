@@ -150,6 +150,24 @@ impl AssetDb {
         Ok(None)
     }
 
+    /// Resources.LoadAll(folder) of the objects of `class_id`: the ResourceManager's m_Container entries under the
+    /// folder (Unity lowercases both sides).
+    pub fn resources_in(&self, folder: &str, class_id: i32) -> Result<Vec<ObjRef>, String> {
+        let file = self.file_index("globalgamemanagers").ok_or("no globalgamemanagers")?;
+        let manager = self.files[file].objects.iter().find(|o| o.class_id == 147).ok_or("no ResourceManager")?;
+        let r = &mut Reader::new(self.data(ObjRef { file, path_id: manager.path_id }));
+        let prefix = format!("{}/", folder.to_lowercase());
+        let mut out = Vec::new();
+        for _ in 0..r.i32()? {
+            let name = r.string()?;
+            let target = PPtr::read(r)?;
+            if name.starts_with(&prefix) {
+                out.extend(self.resolve(file, target).filter(|&t| self.class(t) == class_id));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn data(&self, r: ObjRef) -> &[u8] {
         let f = &self.files[r.file];
         f.data(f.object(r.path_id).expect("object"))
@@ -355,6 +373,33 @@ mod tests {
                     let parent = p.objects[o].parent.map_or("-".into(), |u| format!("{}{}", p.objects[u].name, if has(u, "PhysicalBehaviour") { "[PB]" } else { "" }));
                     println!("BARE {} | {} layer {} active {} rb {rb} | parent {parent} | {:?}", p.objects[0].name, p.objects[o].name, p.objects[o].layer, p.objects[o].active, std::mem::discriminant(&col.shape));
                 }
+            }
+        }
+    }
+
+    /// Rigidbody2Ds on objects without a PhysicalBehaviour, with their scripts and the joints connected to them.
+    #[test]
+    #[ignore]
+    fn catalog_bare_bodies() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            let has = |o: usize, class: &str| p.objects[o].components.iter().any(|(_, c)| matches!(c, Component::Script { class: k, .. } if k == class));
+            for o in 0..p.objects.len() {
+                let Some(rb) = p.objects[o].components.iter().find_map(|(_, c)| if let Component::Rigidbody2D(rb) = c { Some(rb) } else { None }) else { continue };
+                if has(o, "PhysicalBehaviour") {
+                    continue;
+                }
+                let scripts: Vec<&str> = p.objects[o].components.iter().filter_map(|(_, c)| if let Component::Script { class, .. } = c { Some(class.as_str()) } else { None }).collect();
+                let comps = p.objects[o].components.len();
+                let parent = p.objects[o].parent.map_or("-".into(), |u| format!("{}{}", p.objects[u].name, if has(u, "PhysicalBehaviour") { "[PB]" } else { "" }));
+                println!("BODY {} | {} type {} active {} comps {comps} children {} | parent {parent} | {scripts:?}", p.objects[0].name, p.objects[o].name, rb.body_type, p.objects[o].active, p.objects[o].children.len());
             }
         }
     }

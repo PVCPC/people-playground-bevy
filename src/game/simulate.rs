@@ -201,6 +201,10 @@ impl Game {
             let prefab = inst.prefab.clone();
             self.sync_transforms(&mut inst, &prefab);
             self.refresh_autofix_joints(&inst);
+            // A WaterBehaviour's later GameObject.SetActive calls need the clone.
+            if prefab.objects.iter().any(|o| o.components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "WaterBehaviour"))) {
+                self.retained.push(inst);
+            }
         }
     }
 
@@ -371,7 +375,15 @@ impl Game {
     fn send_callback_reports(&mut self, reports: &[Report]) {
         for r in reports {
             let Some(col) = &r.collision else {
-                // No rewritten script has OnTrigger*2D.
+                // OnTriggerEnter2D/OnTriggerExit2D(other) of the WaterBehaviour on the trigger's GameObject; no other
+                // rewritten script has OnTrigger*2D.
+                if matches!(r.message, Message::TriggerEnter | Message::TriggerExit) {
+                    for (own, other) in [(r.collider_a, r.collider_b), (r.collider_b, r.collider_a)] {
+                        if let Some(w) = self.waters.iter().position(|w| w.trigger == own.id) {
+                            self.water_on_trigger(w, other.id);
+                        }
+                    }
+                }
                 continue;
             };
             for (collider, rigidbody) in [(r.collider_a, r.rigidbody_a), (r.collider_b, r.rigidbody_b)] {

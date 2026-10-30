@@ -19,6 +19,7 @@ pub mod simulate;
 pub mod stab;
 pub mod temperature;
 pub mod tool;
+pub mod water;
 
 use crate::b2::{
     math::Vec2 as V,
@@ -599,6 +600,22 @@ impl Rigidbody {
         let r = [b.sweep.c.x - b.sweep.c.x, b.sweep.c.y - b.sweep.c.y];
         b.angular_velocity += b.inv_i * (r[0] * impulse[1] - r[1] * impulse[0]);
     }
+    /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Force: a dynamic Rigidbody2D that has a body.
+    pub fn add_force_at_position(&self, w: &mut World, force: [f32; 2], point: [f32; 2]) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        w.body_mut(self.body).apply_force(V::new(force[0], force[1]), V::new(point[0], point[1]));
+    }
+    /// Rigidbody2D::GetPointVelocity (180c1fa10), after the AutoSyncTransforms the caller runs: zero without a body
+    /// or for a static Rigidbody2D.
+    pub fn point_velocity(&self, w: &World, point: [f32; 2]) -> [f32; 2] {
+        if self.detached.is_some() || self.bodyType == 2 {
+            return [0.0, 0.0];
+        }
+        let v = w.body(self.body).velocity_at(V::new(point[0], point[1]));
+        [v.x, v.y]
+    }
     /// Rigidbody2D::SetCollisionDetectionMode (CollisionDetectionMode2D: 0 discrete, 1 continuous)
     pub fn set_collision_detection_mode(&mut self, w: &mut World, mode: i32) {
         self.collisionDetectionMode = mode;
@@ -743,6 +760,26 @@ impl Hinge {
     }
 }
 
+/// What a bare collider's Transform hangs from.
+#[derive(Clone, Copy, Debug)]
+pub enum BareAnchor {
+    Physical(usize),
+    Node(usize),
+    Root,
+}
+
+/// A Collider2D's GameObject without a PhysicalBehaviour: its local TRS and those of its ancestors up to the nearest
+/// physical or transform node (object first). None of them is ever moved by the rewritten scripts.
+#[derive(Clone, Debug)]
+pub struct BareCollider {
+    pub anchor: BareAnchor,
+    pub chain: Vec<crate::unity::transform::Trs>,
+    /// A Rigidbody2D in the chain moves the Transforms with its body.
+    pub moves: bool,
+    /// The GameObject has MonoBehaviours (SendMessage receivers).
+    pub scripts: bool,
+}
+
 /// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, a limb's gore-string SpringJoint2D, a FixedJoint2D, or
 /// a Fixed/Slider/SpringJoint2D cloned from a prefab (`Anchored`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -819,6 +856,10 @@ pub struct Game {
     /// The map's scripts that draw UnityEngine.Random (scene order).
     pub ambient_audio: Vec<PlayAudioAtRandom>,
     pub map_lights: Vec<MapLight>,
+    /// WaterBehaviour.waters (in Awake order, which is the arena order) with their state.
+    pub waters: Vec<water::Water>,
+    /// WaterBehaviour.waters: indices into `waters`, in Awake order.
+    pub water_list: Vec<usize>,
     /// Global.main.DynamicSqrdVelocityThreshold
     pub DynamicSqrdVelocityThreshold: f32,
     /// Global.main.CameraControlBehaviour.BoundingBox
@@ -849,11 +890,15 @@ pub struct Game {
     pub transform_nodes: Vec<crate::unity::transform::Node>,
     /// The `transform_nodes` that are a physical's own Transform, by node: their TRS is the physical's pose.
     pub node_bodies: std::collections::HashMap<usize, usize>,
+    /// Colliders on GameObjects without a PhysicalBehaviour, by Collider2D id: their Transforms for the queries.
+    pub bare_colliders: std::collections::HashMap<i32, BareCollider>,
     /// The DecalDescriptor assets in use (DecalController.descriptor indexes it).
     pub decal_descriptors: Vec<misc::DecalDescriptor>,
     /// Instances whose Transform changes (an Awake's or the catalog's scale) wait for Physics2D's next
     /// SyncTransforms (`sync_pending`); after it nothing moves their Transforms but the bodies.
     pub unsynced: Vec<spawn::Instance>,
+    /// Synced instances that hold a WaterBehaviour (its SetActive calls change their objects).
+    pub retained: Vec<spawn::Instance>,
     /// The game's data, for what scripts instantiate at run time (the catalog); None when loaded from a recording.
     pub assets: Option<Box<crate::assets::db::AssetDb>>,
     /// CatalogBehaviour.SelectedItem: the SpawnableAsset's name (the catalog UI is not rewritten).

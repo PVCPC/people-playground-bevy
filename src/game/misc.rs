@@ -406,6 +406,7 @@ pub enum PendingStart {
     /// GoreStringBehaviour with its serialized CreateJointOnStart.
     GoreString(usize, bool),
     MapLight(usize),
+    Water(usize),
     /// BoundingBoxBehaviour with its serialized box.
     BoundingBox(super::Bounds),
     MapConfig(super::map::MapConfigStart),
@@ -787,7 +788,13 @@ impl Game {
                     }
                 }
                 PendingStart::Circulation(l) => self.circulation_start(l),
-                PendingStart::Physical(p) => self.physical_start(p),
+                // Water.Start can have deactivated the object (its Ice) before this Start was due.
+                PendingStart::Physical(p) => {
+                    if self.physicals[p].active {
+                        self.physical_start(p)
+                    }
+                }
+                PendingStart::Water(w) => self.water_start(w),
                 PendingStart::Limb(l) => self.limb_start(l),
                 PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),
                 PendingStart::Grip(g) => self.grip_start(g),
@@ -810,12 +817,6 @@ impl Game {
                 }
             }
         }
-    }
-
-    /// WaterBehaviour.IsPointUnderWater: the WaterBehaviour.waters list is empty, as no water object exists (spawning
-    /// one is not rewritten).
-    pub fn is_point_under_water(&self, _point: [f32; 2]) -> bool {
-        false
     }
 
     /// PhysicalBehaviour.CreateImpactEffect of a Human (ShotImpact: BloodPuff poolable, tagged Poolable).
@@ -1001,11 +1002,23 @@ impl Game {
             let position = [p.PositionX, p.PositionY];
             // initialParent outlives the splat: a bleeding particle destroys its splat with it, and a
             // BloodExplosion's DeleteAfterTime (5 s) comes after its drops (2 s at most) are gone.
-            let Some(hit) = self.overlap_point_first(position, mask) else { continue };
-            let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| l.PhysicalBehaviour == hit && l.Person == person));
+            let Some((hit, collider)) = self.overlap_point_first(position, mask) else { continue };
+            // collider.transform.root: a bare collider's root is its anchor physical's.
+            let owner = hit.or_else(|| match self.bare_colliders[&collider].anchor {
+                super::BareAnchor::Physical(p) => Some(p),
+                _ => None,
+            });
+            let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| Some(l.PhysicalBehaviour) == owner && l.Person == person));
             if colour[3] > 0.05 && !same_root {
-                let ty = self.decal_descriptor(&self.splats[s].Decal.clone());
-                self.physical_decal(hit, ty, position, size, colour);
+                // SendMessage("Decal") to the collider's GameObject.
+                match hit {
+                    Some(hit) => {
+                        let ty = self.decal_descriptor(&self.splats[s].Decal.clone());
+                        self.physical_decal(hit, ty, position, size, colour);
+                    }
+                    None if self.bare_colliders[&collider].scripts => unimplemented!("SendMessage Decal to the scripts of a collider without a PhysicalBehaviour"),
+                    None => {}
+                }
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
                 if self.splats[s].TriggerOnCollide {
                     unimplemented!("FancyBloodSplatController.OnCollide");
