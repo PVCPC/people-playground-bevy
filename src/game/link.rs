@@ -2019,6 +2019,11 @@ impl Game {
             self.refresh_transforms(&inst, &linked);
         }
         self.spawnable_asset_components(&prefab, &linked, asset, 4);
+        // SpawnedGameObjects.Add (not simulation state); UndoControllerBehaviour.RegisterAction(new ObjectCreationAction(gameObject)),
+        // whose DeregisterBehaviour (added above) drops it again when the object is destroyed.
+        let root = inst.objects[0].components[0];
+        self.deregister_behaviours.insert(root);
+        self.undo_register_action(super::undo::ObjectCreationAction { displayName: asset.to_string(), RelevantObjects: vec![root] });
         Ok((inst, linked))
     }
 
@@ -2035,6 +2040,12 @@ impl Game {
             (None, None) => unimplemented!("a catalog item whose root is neither physical nor a parent of physicals"),
         }
         // gameObject.name = e.name
+        let root = match (linked.physicals.get(&0), linked.nodes.get(&0)) {
+            (Some(&p), _) => self.physicals[p].transform_id,
+            (_, Some(&n)) => self.transform_nodes[n].id,
+            _ => unreachable!(),
+        };
+        self.object_names.insert(root, asset.to_string());
         if let Some(&p) = linked.physicals.get(&0) {
             self.physicals[p].name = asset.to_string();
         }

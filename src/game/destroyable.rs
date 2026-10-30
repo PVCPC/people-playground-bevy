@@ -226,6 +226,11 @@ impl Game {
         self.object_destroys.iter().copied().filter(|&(at, _)| at <= now).collect()
     }
 
+    /// The limb whose GameObject has the Transform `key`.
+    fn limb_of_object(&self, key: i32) -> usize {
+        self.limbs.iter().position(|l| self.physicals[l.PhysicalBehaviour].transform_id == key).expect("the object's LimbBehaviour")
+    }
+
     /// DestroyObjectHighLevel of the object holding component `id`: its hierarchy deactivates (OnDisable, the
     /// Physics2D cleanup), then each script gets OnDestroy, the object's components first, then its descendants.
     // ponytail: OnDestroy order across a hierarchy is parent-first pre-order; no rewritten OnDestroy reads another's state.
@@ -269,14 +274,46 @@ impl Game {
                         "NoCollide" => g.no_collide_destroy(cid),
                         "NoCollideGm" => g.no_collide_gm_destroy(cid, inst),
                         "TyreDeflationBehaviour" => g.tyre_destroy(cid),
-                        // Global.RemoveAudioSource; DeregisterBehaviour drops the object's undo entry (UI).
-                        "ExplosionSoundBehviour" | "AudioSourceTimeScaleBehaviour" | "DeregisterBehaviour" | "ExistInDetailView" => {}
+                        // Global.RemoveAudioSource
+                        "ExplosionSoundBehviour" | "AudioSourceTimeScaleBehaviour" | "ExistInDetailView" => {}
+                        // DeregisterBehaviour.OnDestroy: FindRelevantAction / DeregisterAction of this object.
+                        "DeregisterBehaviour" => g.undo_deregister_related(key),
                         // DetectorBehaviour.OnDestroy removes its ContinuousActivationBehaviour listener, which sends nothing received.
                         "DetectorBehaviour" => {}
                         // BulbBehaviour.OnDestroy: Object.Destroy(OtherPart), a child (destroyed with the hierarchy already) until Break detaches it.
                         "BulbBehaviour" => {}
+                        // FirearmAttachmentPointBehaviour.OnDestroy: Object.Destroy(FirearmAttachment); Start rejects a prefab with one.
+                        "FirearmAttachmentPointBehaviour" => {}
                         // GetComponentsInChildren on the destroyed (inactive) GameObject finds no collider.
                         "NoChildrenCollide" => {}
+                        // PersonBehaviour.OnDestroy: AliveBehaviour.AliveByTransform.Remove, a lookup nothing rewritten reads.
+                        "PersonBehaviour" => {
+                            let i = g.people.iter().position(|p| p.id == cid).expect("the PersonBehaviour");
+                            g.people[i].destroy_at = None;
+                            g.people[i].destroyed = true;
+                        }
+                        // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove (Destroy(myStatus) is UI, DestroyWith only
+                        // filled by attachments). Its joints and bleeding particles go with the GameObject.
+                        "LimbBehaviour" => {
+                            let l = g.limb_of_object(key);
+                            g.limbs[l].enabled = false;
+                            g.limb_destroy_joints(l);
+                        }
+                        // ConnectedNodeBehaviour.OnDestroy: DisconnectFromEverything, then NodeController.Nodes.Remove.
+                        "ConnectedNodeBehaviour" => {
+                            let l = g.limb_of_object(key);
+                            g.node_disconnect_from_everything(l);
+                        }
+                        // GoreStringBehaviour.OnDestroy: DestroyJoint.
+                        "GoreStringBehaviour" => {
+                            let l = g.limb_of_object(key);
+                            if g.limbs[l].goreString {
+                                g.gore_string_destroy_joint(l);
+                            }
+                        }
+                        // SkinMaterialHandler.OnDestroy: Destroy(material), rendering. GripBehaviour.OnDestroy: modding listener.
+                        // DisintegrationCounterBehaviour.OnDestroy: its OnDisintegration handlers go with the objects.
+                        "SkinMaterialHandler" | "GripBehaviour" | "DisintegrationCounterBehaviour" => {}
                         "FirearmBehaviour" => {
                             let f = g.firearms.iter().position(|x| x.id == cid).expect("the FirearmBehaviour");
                             g.emitter_dispose(super::ballistics::Shooter::Firearm(f));
@@ -300,6 +337,10 @@ impl Game {
                 // An ActOnDestroy added at run time is the object's last component.
                 if g.act_on_destroy.contains_key(&key) {
                     g.act_on_destroy_run(key);
+                }
+                // The DeregisterBehaviour CatalogBehaviour.Spawn added to its root.
+                if g.deregister_behaviours.remove(&key) {
+                    g.undo_deregister_related(key);
                 }
             }
             inst.objects.iter().all(|x| g.destroyed_components.contains(&x.components[0]))

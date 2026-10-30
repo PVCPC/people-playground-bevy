@@ -249,7 +249,7 @@ pub fn eval(controls: &Controls, id: &str, inputs: &Inputs) -> crate::game::tool
 
 /// The actions the rewrite has nothing behind yet: pressing one says so.
 const NOT_REWRITTEN: &[&str] = &[
-    "delete", "flip", "toggleLimbStatus", "toolInvisibility", "snapToCenter", "undo", "copy", "paste", "activateIndirect", "igniteSelection",
+    "flip", "toggleLimbStatus", "toolInvisibility", "snapToCenter", "copy", "paste", "activateIndirect", "igniteSelection",
     "freezeSelection", "resizeSelection", "arrangeSelection", "toggleThermalVision", "eyedrop", "arrangeDown", "arrangeUp", "arrangeFront",
     "arrangeBack", "incrementGrid", "decrementGrid", "incrementAngleSnap", "decrementAngleSnap",
 ];
@@ -347,12 +347,21 @@ fn apply(
     time: Res<Time<Real>>,
     mut exit: MessageWriter<AppExit>,
     mut commands: Commands,
-    play: Option<Res<Play>>,
+    mut play: Option<ResMut<Play>>,
     sprites: Query<Entity, Or<(With<play::LimbSprite>, With<play::ObjectSprite>, With<play::RendererSprite>)>>,
 ) {
     let now = time.elapsed_secs_f64();
     for act in std::mem::take(&mut queue.0) {
         match &act {
+            // ClearDebrisBehaviour.Clear / ClearLivingBehaviour.Clear.
+            Act::ClearMess | Act::ClearLiving if ui.mode == Mode::Game => {
+                if let Some(p) = play.as_deref_mut() {
+                    match act {
+                        Act::ClearMess => p.game.clear_debris(),
+                        _ => p.game.clear_living(),
+                    }
+                }
+            }
             Act::Set(i, v) => {
                 settings.set(*i, *v);
                 files.settings = true;
@@ -631,7 +640,7 @@ fn camera(
 }
 
 /// One frame of the game, under Global's time scale: paused or slowed by the toolbar, 0 in the pause menu.
-fn game_frame(time: Res<Time<Real>>, ui: Res<Ui>, settings: Res<Settings>, mut play: ResMut<Play>) {
+fn game_frame(time: Res<Time<Real>>, mut ui: ResMut<Ui>, settings: Res<Settings>, mut play: ResMut<Play>) {
     if ui.mode == Mode::Loading || play.stopped.is_some() {
         return;
     }
@@ -643,6 +652,10 @@ fn game_frame(time: Res<Time<Real>>, ui: Res<Ui>, settings: Res<Settings>, mut p
             play.stopped = Some(m);
             return;
         }
+    }
+    // NotificationControllerBehaviour.Show: the last text stays up for a moment (the rich text's tags are not drawn).
+    if let Some(n) = play.game.notifications.drain(..).last() {
+        ui.toast = Some((n.replace("<b>", "").replace("</b>", ""), time.elapsed_secs_f64() + 2.5));
     }
     let target = time_scale_target(ui.paused || ui.mode != Mode::Game, ui.slowmo, settings.get("SlowMotionSpeed"));
     let t = &mut play.game.time.timeScale;
@@ -682,8 +695,8 @@ fn world_input(
     let over = over_ui(&hover, &nodes);
     let now = ui.mode == Mode::Game && !ui.typing && ui.rebinding.is_none();
     let start = now && ui.context.is_none();
-    // The only controls the simulation reads; the others (delete, the other tools) are not rewritten there.
-    for id in ["drag", "context", "fast", "snap", "left", "right", "activateDirect", "spawnLeft", "spawnRight"] {
+    // The only controls the simulation reads; the others (flip, copy, the other tools) are not rewritten there.
+    for id in ["drag", "context", "fast", "snap", "left", "right", "activateDirect", "spawnLeft", "spawnRight", "delete", "undo"] {
         let own = owned.entry(id).or_default();
         let from_mouse = matches!(keys::src(&controls.bind(id).0), Some(Src::Mouse(_)));
         let allowed = if *own { now } else { start && !(from_mouse && over) };

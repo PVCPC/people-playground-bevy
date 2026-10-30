@@ -328,6 +328,9 @@ pub enum Act {
     Item(String),
     Powers(bool),
     Environment,
+    /// The map options' "Clear Mess" and "Clear Living" (the game runs them).
+    ClearMess,
+    ClearLiving,
     Set(usize, f32),
     Rebind(usize),
     Unbind(usize),
@@ -499,7 +502,7 @@ impl Ui {
             Act::Powers(p) => self.powers = *p,
             Act::Environment => self.env_open = !self.env_open,
             // Settings and control edits are applied where the stores live.
-            Act::Set(..) | Act::Rebind(_) | Act::Unbind(_) | Act::ResetControls => {}
+            Act::Set(..) | Act::Rebind(_) | Act::Unbind(_) | Act::ResetControls | Act::ClearMess | Act::ClearLiving => {}
         }
         Effect::None
     }

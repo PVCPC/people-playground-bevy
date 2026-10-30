@@ -767,6 +767,10 @@ impl Game {
         let t = self.tool.as_mut().unwrap();
         t.shouldSendContinuousUseMessage = false;
         let (Some(sel), Some(_)) = (t.ActiveSingleSelected, t.selectedRigidbody) else { return };
+        // (bool)ActiveSingleSelected: a destroyed object reads null.
+        if self.physicals[sel].destroyed {
+            return;
+        }
         if self.input.down("snap") {
             self.tool.as_mut().unwrap().initialSnappingFinished = false;
         }
@@ -801,8 +805,81 @@ impl Game {
         // The UseContinuous broadcast is ContinuousActivationBehaviour's (continuous.rs).
         self.tool.as_mut().unwrap().shouldSendContinuousUseMessage = self.input.held("activateDirect");
         if self.input.held("delete") {
-            unimplemented!("SelectionController.UserDeleteSelection");
+            self.user_delete_selection();
         }
+    }
+
+    /// SelectionController.UserDeleteSelection: each live, Deletable object of the selection gets OnUserDelete on its
+    /// root GameObject, then Object.Destroy(root); the names (once each) are announced.
+    pub fn user_delete_selection(&mut self) {
+        let selected = self.tool.as_ref().unwrap().rawSelection.clone();
+        if selected.is_empty() {
+            return;
+        }
+        // HashSet<string> enumerates in insertion order while nothing is removed.
+        let mut names: Vec<String> = Vec::new();
+        for p in selected {
+            if self.physicals[p].destroyed || !self.physicals[p].Deletable {
+                continue;
+            }
+            let root = self.root_id(p);
+            self.send_on_user_delete(root);
+            self.destroy_object(root);
+            let name = self.object_name(p, root);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in names {
+            self.notify(format!("<b>{}</b> removed", name.to_uppercase()));
+        }
+    }
+
+    /// transform.root.gameObject.name of a physical object whose root Transform is `root`.
+    fn object_name(&mut self, p: usize, root: i32) -> String {
+        if let Some(n) = self.object_names.get(&root) {
+            return n.clone();
+        }
+        if self.physicals[p].transform_id == root {
+            return self.physicals[p].name.clone();
+        }
+        self.with_component_instance(root, |_, inst, o| inst.prefab.objects[o].name.clone())
+    }
+
+    /// SendMessage("OnUserDelete", DontRequireReceiver) on a GameObject (by its Transform id): its own components only.
+    /// Messages.IOnUserDelete is declared by ActOnUserDelete (on no catalog item) and by the Hover wires, pins and
+    /// links, which the rewrite refuses at spawn.
+    fn send_on_user_delete(&mut self, root: i32) {
+        let receivers = self.with_component_instance(root, |_, inst, o| {
+            let active = inst.objects[o].active;
+            inst.prefab.objects[o].components.iter().filter(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "ActOnUserDelete")).count() * active as usize
+        });
+        if receivers > 0 {
+            unimplemented!("ActOnUserDelete.OnUserDelete");
+        }
+    }
+
+    /// DragTool.Update (no dialog, UI block, trigger editor or pause menu is ever open): copy, paste and flip.
+    pub fn drag_tool_update(&mut self) {
+        let Some(t) = self.tool.as_ref() else { return };
+        if !t.isActive {
+            return;
+        }
+        // ClipboardControllerBehaviour.ObjectStateInClipboard stays null: copy is the only thing that fills it.
+        if self.input.down("copy") && !t.rawSelection.is_empty() {
+            unimplemented!("DragTool.Update: copy (new Clipboard: ObjectStateConverter.Convert, ContraptionOutlineSerialiser.GenerateOutline)");
+        }
+        if self.input.down("flip") {
+            self.flip_selection();
+        }
+    }
+
+    /// SelectionController.FlipSelection
+    fn flip_selection(&mut self) {
+        if self.tool.as_ref().unwrap().rawSelection.is_empty() {
+            return;
+        }
+        unimplemented!("SelectionController.FlipSelection: Transform.localScale of a live hierarchy, OnPreFlip / OnFlip");
     }
 
     /// DragTool.MoveToMouse: Rigidbody2D.AddForce (180c1bf80, ForceMode2D.Force) wakes the body and adds the force.
@@ -818,7 +895,7 @@ impl Game {
     /// DragTool.OnFixedHold (never paused; nothing is Undraggable).
     fn drag_on_fixed_hold(&mut self) {
         let t = self.tool.as_ref().unwrap();
-        if t.ActiveSingleSelected.is_none() || t.selectedRigidbody.is_none() {
+        if t.ActiveSingleSelected.is_none_or(|p| self.physicals[p].destroyed) || t.selectedRigidbody.is_none() {
             return;
         }
         let d = sub3(self.MousePosition, t.position);
@@ -952,5 +1029,115 @@ impl Game {
             unimplemented!("ToolController body turned: Transform rotation write-back");
         }
         let _ = half;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::play::{new_game, step};
+
+    fn ctl(g: &mut Game, key: &str, down: bool, held: bool, up: bool) {
+        g.input.controls.insert(key.into(), Control { down, held, up });
+    }
+
+    fn frames(g: &mut Game, n: usize) {
+        for _ in 0..n {
+            step(g, 1.0 / 60.0).unwrap();
+            for c in g.input.controls.values_mut() {
+                c.down = false;
+                c.up = false;
+            }
+        }
+    }
+
+    /// A Default map game with `item` spawned (the way a "spawnRight" release does) and settled. Returns None
+    /// without the installed game.
+    fn spawned(item: &str) -> Option<(Game, usize)> {
+        let game = crate::game_assets::find_game(None).ok()?;
+        let mut g = new_game(&game, "Default", Some(item), None).unwrap();
+        frames(&mut g, 30);
+        let first = g.physicals.len();
+        let c = g.BoundingBox.center;
+        let ground = g.raycast_first(crate::b2::math::Vec2::new(c[0], c[1]), [0.0, -1.0], 1.0e4)?.point.y;
+        g.input.mouse = [c[0], ground + 0.6, 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        ctl(&mut g, "spawnRight", false, false, false);
+        assert!(g.physicals.len() > first, "{item}: nothing spawned");
+        // It lands and comes to rest, so the mouse stays on it.
+        frames(&mut g, 300);
+        Some((g, first))
+    }
+
+    /// Picks the object up with the mouse on a point of its collider, then holds "delete" for `n` frames. Returns the
+    /// physical the click selected (the one on top where an item has several).
+    fn grab_and_delete(g: &mut Game, p: usize, n: usize) -> usize {
+        // A point the object's collider contains: its Transform, its centre of mass or a collider's box centre.
+        let mask = g.tool.as_ref().unwrap().SelectionLayer;
+        let body = g.physicals[p].rigidbody.body;
+        let mut points = vec![g.physicals[p].transform.position, {
+            let c = g.world.body(body).sweep.c;
+            [c.x, c.y, 0.0]
+        }];
+        for f in g.world.body(body).fixtures.clone() {
+            let fx = g.world.fixture(f);
+            let b = fx.shape.compute_aabb(&g.world.body(fx.body).xf, 0);
+            points.push([(b.lower.x + b.upper.x) * 0.5, (b.lower.y + b.upper.y) * 0.5, 0.0]);
+        }
+        let c = points.into_iter().find(|&q| !g.overlap_point(q, mask, -0.9, 0.9).is_empty()).expect("a point inside the object");
+        g.input.mouse = c;
+        // Global.MousePosition follows Input.mousePosition at the end of the Update scripts.
+        frames(g, 1);
+        ctl(g, "drag", true, true, false);
+        frames(g, 2);
+        ctl(g, "drag", false, true, false);
+        let sel = g.tool.as_ref().unwrap().ActiveSingleSelected.expect("the object was not picked up");
+        ctl(g, "delete", true, true, false);
+        frames(g, n);
+        ctl(g, "delete", false, false, true);
+        sel
+    }
+
+    #[test]
+    fn delete_destroys_the_selected_object_through_object_destroy() {
+        for item in ["Human", "Flask", "Pistol", "Generator", "Fan", "Handgrenade", "Piston"] {
+            let Some((mut g, first)) = spawned(item) else { return };
+            assert!(g.undo.history.len() == 1, "{item}");
+            let p = grab_and_delete(&mut g, first, 3);
+            let (id, root) = (g.physicals[p].id, g.root_id(p));
+            // Object.Destroy ran: the component reads null, OnDestroy dropped the undo entry and the object left the loops.
+            assert!(g.physicals[p].destroyed && !g.physicals[p].enabled, "{item}: still alive");
+            // The whole root GameObject went: every physical object of the item, and a person with its limbs and joints.
+            assert!(g.physicals[first..].iter().all(|q| q.destroyed), "{item}: a part survived");
+            assert!(g.people.iter().all(|q| q.destroyed) && g.hinges.iter().all(|h| h.joint.is_none()), "{item}: person");
+            assert!(g.destroyed_components.contains(&id) && g.destroyed_components.contains(&root), "{item}");
+            assert!(g.undo.history.is_empty() && g.undo.currentHistoryPosition == -1, "{item}: DeregisterBehaviour.OnDestroy");
+            assert!(g.notifications.contains(&format!("<b>{}</b> removed", item.to_uppercase())), "{item}: {:?}", g.notifications);
+            // The held object is gone: the drag joint went with its body and the next frames run on.
+            frames(&mut g, 30);
+        }
+    }
+
+    #[test]
+    fn clear_living_and_clear_mess() {
+        let Some((mut g, first)) = spawned("Human") else { return };
+        g.clear_debris();
+        g.clear_living();
+        frames(&mut g, 3);
+        assert!(g.physicals[first..].iter().all(|q| q.destroyed) && g.people.iter().all(|p| p.destroyed));
+        assert!(g.undo.history.is_empty());
+        assert_eq!(g.notifications, ["Cleared debris", "Cleared living"]);
+        frames(&mut g, 30);
+    }
+
+    #[test]
+    fn undo_destroys_the_last_spawn() {
+        let Some((mut g, first)) = spawned("Flask") else { return };
+        ctl(&mut g, "undo", false, false, true);
+        frames(&mut g, 2);
+        assert!(g.physicals[first].destroyed);
+        assert!(g.notifications.contains(&"<b>FLASK</b> removed".to_string()));
+        assert!(g.undo.history.is_empty());
     }
 }

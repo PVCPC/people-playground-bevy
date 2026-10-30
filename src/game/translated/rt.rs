@@ -344,6 +344,22 @@ impl Game {
         })
     }
 
+    /// Transform.parent
+    pub fn tr_parent(&mut self, xf: Xf) -> Option<Xf> {
+        let Xf::Physical(p) = xf else { unimplemented!("Transform.parent of a Transform without a PhysicalBehaviour ({xf:?})") };
+        let parent = self.with_component_instance(self.physicals[p].transform_id, |_, inst, o| inst.objects[o].parent.map(|q| inst.objects[q].components[0]))?;
+        Some(self.tr_go_transform(Go::Local(parent)))
+    }
+
+    /// `transform.parent = v` (SetParent(v, true)).
+    pub fn tr_set_parent(&mut self, xf: Xf, v: Option<Xf>) {
+        let Xf::Physical(p) = xf else { unimplemented!("Transform.parent = of a Transform without a PhysicalBehaviour ({xf:?})") };
+        if v.is_some() {
+            unimplemented!("Transform.parent = a Transform");
+        }
+        self.set_parent_null_of(self.physicals[p].transform_id, |_, _, _| {});
+    }
+
     /// Transform.root: the topmost Transform above it (SetParent included).
     pub fn tr_root(&mut self, xf: Xf) -> Xf {
         let Xf::Physical(p) = xf else { unimplemented!("Transform.root of a Transform without a PhysicalBehaviour ({xf:?})") };

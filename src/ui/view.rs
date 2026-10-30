@@ -531,8 +531,8 @@ fn map_options(m: &mut Kids, ui: &Ui, settings: &Settings) {
     }
     label(m, "Clear", 15.0, DIM);
     missing(m, "Clear Everything", "Remove everything from the chamber", percent(100));
-    missing(m, "Clear Mess", "Remove debris and decals", percent(100));
-    missing(m, "Clear Living", "Remove all living things", percent(100));
+    button(m, "Clear Mess", Some(Act::ClearMess), Sel::None, "Remove debris and decals", percent(100));
+    button(m, "Clear Living", Some(Act::ClearLiving), Sel::None, "Remove all living things", percent(100));
 }
 
 fn catalog(root: &mut Kids, ui: &Ui) {

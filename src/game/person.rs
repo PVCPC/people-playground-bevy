@@ -304,25 +304,29 @@ impl Game {
             // GripBehaviour.OnDestroy: ModdingApi listener removal only.
         }
         for &l in &limbs {
-            // The limb's joints are destroyed with it: the SpringJoint2D (and the queued Destroy(Joint) with it) ...
-            self.remove_spring_joint(l);
-            // ... and the HingeJoint2D (Joint2D::Cleanup finds its b2 joint gone for a disintegrated limb).
-            if let Some(h) = self.limbs[l].Joint {
-                if let Some(j) = self.hinges[h].joint.take() {
-                    self.world.destroy_joint(j);
-                }
-                self.hinges[h].destroyed = true;
-                self.joint_break_limits.retain(|&k| k != super::BreakJoint::Hinge(h));
-            }
-            // The bleeding particles are children of the limb (and the extraDecals splat of the particle).
-            for i in self.circulations[l].BleedingParticles.clone() {
-                self.bleeding[i].destroyed = true;
-                if let Some(s) = self.bleeding[i].BloodSplatController {
-                    self.splats[s].destroyed = true;
-                }
-            }
+            self.limb_destroy_joints(l);
         }
         self.people[person].destroyed = true;
+    }
+
+    /// The limb's components that go with its GameObject: the SpringJoint2D (and the queued Destroy(Joint) with it), the
+    /// HingeJoint2D (Joint2D::Cleanup finds its b2 joint gone) and the bleeding particles under it.
+    pub(super) fn limb_destroy_joints(&mut self, l: usize) {
+        self.remove_spring_joint(l);
+        if let Some(h) = self.limbs[l].Joint {
+            if let Some(j) = self.hinges[h].joint.take() {
+                self.world.destroy_joint(j);
+            }
+            self.hinges[h].destroyed = true;
+            self.joint_break_limits.retain(|&k| k != super::BreakJoint::Hinge(h));
+        }
+        // The bleeding particles are children of the limb (and the extraDecals splat of the particle).
+        for i in self.circulations[l].BleedingParticles.clone() {
+            self.bleeding[i].destroyed = true;
+            if let Some(s) = self.bleeding[i].BloodSplatController {
+                self.splats[s].destroyed = true;
+            }
+        }
     }
 
     pub fn add_pain(&mut self, person: usize, intensity: f32) {

@@ -981,6 +981,7 @@ impl Game {
         self.run_pending_starts();
         self.camera_shake_update();
         // UndoControllerBehaviour.Update, then the map's ambience emitter.
+        self.undo_controller_update();
         for a in 0..self.ambient_audio.len() {
             self.play_audio_at_random_update(a);
         }
@@ -988,6 +989,8 @@ impl Game {
         // level1's order-0 behaviours update in load order (UndoControllerBehaviour, WORLD's PlayAudioAtRandom,
         // ToolControllerBehaviour, then ResizeHandles), before the map's and the spawned ones.
         self.resize_handles_update();
+        // DragTool.Update (added to the ToolController in ToolControllerBehaviour.Start, after the scene's behaviours).
+        self.drag_tool_update();
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated && self.physicals[p].in_world {
                 self.physical_update(p);

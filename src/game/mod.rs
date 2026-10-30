@@ -47,6 +47,8 @@ pub mod simulate;
 pub mod stab;
 pub mod temperature;
 pub mod tool;
+pub mod undo;
+pub mod clear;
 pub mod water;
 
 use crate::b2::{
@@ -1378,6 +1380,14 @@ pub struct Game {
     pub assets: Option<Box<crate::assets::db::AssetDb>>,
     /// CatalogBehaviour.SelectedItem: the SpawnableAsset's name (the catalog UI is not rewritten).
     pub catalog_selected: Option<String>,
+    /// UndoControllerBehaviour's history and position.
+    pub undo: undo::UndoController,
+    /// NotificationControllerBehaviour.Show's texts since the UI last took them.
+    pub notifications: Vec<String>,
+    /// gameObject.name of the catalog's clones (by the id of the root Transform).
+    pub object_names: HashMap<i32, String>,
+    /// The roots (by Transform id) that CatalogBehaviour.Spawn gave a DeregisterBehaviour.
+    pub deregister_behaviours: std::collections::HashSet<i32>,
     /// The `transform_nodes` roots carrying an AudioSourceTimeScaleBehaviour (the catalog adds one).
     pub audio_time_scale_roots: Vec<usize>,
     /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.
