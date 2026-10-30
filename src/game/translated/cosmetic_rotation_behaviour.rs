@@ -43,13 +43,13 @@ impl Game {
         self.tr.cosmetic_rotation_behaviour[this].rot = ((((self.tr.cosmetic_rotation_behaviour[this].rot as f64) + ((self.tr.cosmetic_rotation_behaviour[this].vel as f64) * (self.time.deltaTime as f64)))) as f32);
         match self.tr.cosmetic_rotation_behaviour[this].Axis {
             0 => {
-                rt::presentation_rotation(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics));
+                rt::presentation_pose(rt::nn(Some(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics))));
             }
             1 => {
-                rt::presentation_rotation(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics));
+                rt::presentation_pose(rt::nn(Some(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics))));
             }
             _ => {
-                rt::presentation_rotation(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics));
+                rt::presentation_pose(rt::nn(Some(rt::Xf::this(self.tr.cosmetic_rotation_behaviour[this].this_physical, self.tr.cosmetic_rotation_behaviour[this].this_physics))));
             }
         }
     }

@@ -3,7 +3,12 @@
 
 pub mod rt;
 pub mod cosmetic_rotation_behaviour;
+pub mod disable_when_wet;
 pub mod fan_behaviour;
+pub mod fire_sound_emitter;
+pub mod guide_temperature_behaviour;
+pub mod jack_o_latern_behaviour;
+pub mod target_line_renderer;
 
 use crate::game::{Game, Phase};
 
@@ -11,16 +16,26 @@ use crate::game::{Game, Phase};
 #[derive(Clone, Debug)]
 pub struct Translated {
     pub cosmetic_rotation_behaviour: Vec<cosmetic_rotation_behaviour::CosmeticRotationBehaviour>,
+    pub disable_when_wet: Vec<disable_when_wet::DisableWhenWet>,
     pub fan_behaviour: Vec<fan_behaviour::FanBehaviour>,
     pub fan_behaviour__buffer: Vec<i32>,
+    pub fire_sound_emitter: Vec<fire_sound_emitter::FireSoundEmitter>,
+    pub guide_temperature_behaviour: Vec<guide_temperature_behaviour::GuideTemperatureBehaviour>,
+    pub jack_o_latern_behaviour: Vec<jack_o_latern_behaviour::JackOLaternBehaviour>,
+    pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
 }
 
 impl Default for Translated {
     fn default() -> Self {
         Self {
             cosmetic_rotation_behaviour: Vec::new(),
+            disable_when_wet: Vec::new(),
             fan_behaviour: Vec::new(),
             fan_behaviour__buffer: vec![0; 128],
+            fire_sound_emitter: Vec::new(),
+            guide_temperature_behaviour: Vec::new(),
+            jack_o_latern_behaviour: Vec::new(),
+            target_line_renderer: Vec::new(),
         }
     }
 }
@@ -29,16 +44,26 @@ impl Default for Translated {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TBehaviour {
     CosmeticRotationBehaviour(usize),
+    DisableWhenWet(usize),
     FanBehaviour(usize),
+    FireSoundEmitter(usize),
+    GuideTemperatureBehaviour(usize),
+    JackOLaternBehaviour(usize),
+    TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "FanBehaviour"];
+pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DisableWhenWet", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => "CosmeticRotationBehaviour",
+            TBehaviour::DisableWhenWet(_) => "DisableWhenWet",
             TBehaviour::FanBehaviour(_) => "FanBehaviour",
+            TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
+            TBehaviour::GuideTemperatureBehaviour(_) => "GuideTemperatureBehaviour",
+            TBehaviour::JackOLaternBehaviour(_) => "JackOLaternBehaviour",
+            TBehaviour::TargetLineRenderer(_) => "TargetLineRenderer",
         }
     }
 
@@ -46,7 +71,12 @@ impl TBehaviour {
     pub fn managed(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => true,
+            TBehaviour::DisableWhenWet(_) => true,
             TBehaviour::FanBehaviour(_) => true,
+            TBehaviour::FireSoundEmitter(_) => true,
+            TBehaviour::GuideTemperatureBehaviour(_) => true,
+            TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::TargetLineRenderer(_) => true,
         }
     }
 
@@ -54,7 +84,12 @@ impl TBehaviour {
     pub fn has_start(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::FanBehaviour(_) => true,
+            TBehaviour::FireSoundEmitter(_) => false,
+            TBehaviour::GuideTemperatureBehaviour(_) => false,
+            TBehaviour::JackOLaternBehaviour(_) => true,
+            TBehaviour::TargetLineRenderer(_) => false,
         }
     }
 
@@ -62,7 +97,12 @@ impl TBehaviour {
     pub fn has_use(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::FanBehaviour(_) => true,
+            TBehaviour::FireSoundEmitter(_) => false,
+            TBehaviour::GuideTemperatureBehaviour(_) => false,
+            TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::TargetLineRenderer(_) => false,
         }
     }
 
@@ -81,10 +121,12 @@ pub enum LinkKind {
     Present,
     /// An array's length.
     Len,
-    /// A GameObject asset.
+    /// A GameObject: in the prefab, or an asset.
     Prefab,
     /// A LayerMask's bits.
     Mask,
+    /// A Transform in the prefab.
+    Transform,
 }
 
 /// The value the linker found for a field.
@@ -94,14 +136,20 @@ pub enum LinkVal {
     Script(Option<TBehaviour>),
     Present(bool),
     Len(usize),
-    Prefab(Option<crate::assets::db::ObjRef>),
+    Prefab(Option<rt::Go>),
     Mask(u32),
+    Transform(Option<rt::Xf>),
 }
 
 pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
     match class {
         "CosmeticRotationBehaviour" => &[],
+        "DisableWhenWet" => &[("PhysicalBehaviour", LinkKind::Physical), ("ToDisable", LinkKind::Prefab)],
         "FanBehaviour" => &[("HelicopterAudioSource", LinkKind::Present), ("FirstBladeRenderer", LinkKind::Present), ("SecondBladeRenderer", LinkKind::Present), ("Blades", LinkKind::Script("CosmeticRotationBehaviour")), ("Audio", LinkKind::Present), ("Switch", LinkKind::Present), ("StartupSound", LinkKind::Present), ("ShutoffSound", LinkKind::Present), ("Mask", LinkKind::Mask)],
+        "FireSoundEmitter" => &[],
+        "GuideTemperatureBehaviour" => &[],
+        "JackOLaternBehaviour" => &[("GlowingSprites", LinkKind::Present), ("ObjectSprite", LinkKind::Present), ("LightSprite", LinkKind::Present)],
+        "TargetLineRenderer" => &[("LineRenderer", LinkKind::Present), ("Target", LinkKind::Transform)],
         _ => &[],
     }
 }
@@ -117,6 +165,13 @@ impl Game {
                 self.tr.cosmetic_rotation_behaviour.push(x);
                 TBehaviour::CosmeticRotationBehaviour(self.tr.cosmetic_rotation_behaviour.len() - 1)
             }
+            "DisableWhenWet" => {
+                let mut x = disable_when_wet::DisableWhenWet::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.disable_when_wet.push(x);
+                TBehaviour::DisableWhenWet(self.tr.disable_when_wet.len() - 1)
+            }
             "FanBehaviour" => {
                 let mut x = fan_behaviour::FanBehaviour::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -124,12 +179,42 @@ impl Game {
                 self.tr.fan_behaviour.push(x);
                 TBehaviour::FanBehaviour(self.tr.fan_behaviour.len() - 1)
             }
+            "FireSoundEmitter" => {
+                let mut x = fire_sound_emitter::FireSoundEmitter::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.fire_sound_emitter.push(x);
+                TBehaviour::FireSoundEmitter(self.tr.fire_sound_emitter.len() - 1)
+            }
+            "GuideTemperatureBehaviour" => {
+                let mut x = guide_temperature_behaviour::GuideTemperatureBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.guide_temperature_behaviour.push(x);
+                TBehaviour::GuideTemperatureBehaviour(self.tr.guide_temperature_behaviour.len() - 1)
+            }
+            "JackOLaternBehaviour" => {
+                let mut x = jack_o_latern_behaviour::JackOLaternBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.jack_o_latern_behaviour.push(x);
+                TBehaviour::JackOLaternBehaviour(self.tr.jack_o_latern_behaviour.len() - 1)
+            }
+            "TargetLineRenderer" => {
+                let mut x = target_line_renderer::TargetLineRenderer::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.target_line_renderer.push(x);
+                TBehaviour::TargetLineRenderer(self.tr.target_line_renderer.len() - 1)
+            }
             _ => return Err(format!("{class} is not translated")),
         })
     }
 
     pub fn tr_link(&mut self, b: TBehaviour, field: &str, v: LinkVal) {
         match (b, field, v) {
+            (TBehaviour::DisableWhenWet(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.disable_when_wet[i].PhysicalBehaviour = v,
+            (TBehaviour::DisableWhenWet(i), "ToDisable", LinkVal::Prefab(v)) => self.tr.disable_when_wet[i].ToDisable = v,
             (TBehaviour::FanBehaviour(i), "HelicopterAudioSource", LinkVal::Present(v)) => self.tr.fan_behaviour[i].HelicopterAudioSource = v,
             (TBehaviour::FanBehaviour(i), "FirstBladeRenderer", LinkVal::Present(v)) => self.tr.fan_behaviour[i].FirstBladeRenderer = v,
             (TBehaviour::FanBehaviour(i), "SecondBladeRenderer", LinkVal::Present(v)) => self.tr.fan_behaviour[i].SecondBladeRenderer = v,
@@ -139,6 +224,11 @@ impl Game {
             (TBehaviour::FanBehaviour(i), "StartupSound", LinkVal::Present(v)) => self.tr.fan_behaviour[i].StartupSound = v,
             (TBehaviour::FanBehaviour(i), "ShutoffSound", LinkVal::Present(v)) => self.tr.fan_behaviour[i].ShutoffSound = v,
             (TBehaviour::FanBehaviour(i), "Mask", LinkVal::Mask(v)) => self.tr.fan_behaviour[i].Mask = v,
+            (TBehaviour::JackOLaternBehaviour(i), "GlowingSprites", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].GlowingSprites = v,
+            (TBehaviour::JackOLaternBehaviour(i), "ObjectSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].ObjectSprite = v,
+            (TBehaviour::JackOLaternBehaviour(i), "LightSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].LightSprite = v,
+            (TBehaviour::TargetLineRenderer(i), "LineRenderer", LinkVal::Present(v)) => self.tr.target_line_renderer[i].LineRenderer = v,
+            (TBehaviour::TargetLineRenderer(i), "Target", LinkVal::Transform(v)) => self.tr.target_line_renderer[i].Target = v,
             (b, f, v) => panic!("{b:?}.{f} linked with {v:?}"),
         }
     }
@@ -147,13 +237,20 @@ impl Game {
     pub fn tr_enabled(&self, b: TBehaviour) -> bool {
         match b {
             TBehaviour::CosmeticRotationBehaviour(i) => self.tr.cosmetic_rotation_behaviour[i].enabled,
+            TBehaviour::DisableWhenWet(i) => self.tr.disable_when_wet[i].enabled,
             TBehaviour::FanBehaviour(i) => self.tr.fan_behaviour[i].enabled,
+            TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
+            TBehaviour::GuideTemperatureBehaviour(i) => self.tr.guide_temperature_behaviour[i].enabled,
+            TBehaviour::JackOLaternBehaviour(i) => self.tr.jack_o_latern_behaviour[i].enabled,
+            TBehaviour::TargetLineRenderer(i) => self.tr.target_line_renderer[i].enabled,
         }
     }
 
     pub fn tr_awake(&mut self, b: TBehaviour) {
         match b {
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_awake(i),
+            TBehaviour::GuideTemperatureBehaviour(i) => self.guide_temperature_behaviour_awake(i),
+            TBehaviour::TargetLineRenderer(i) => self.target_line_renderer_awake(i),
             _ => {}
         }
     }
@@ -167,6 +264,7 @@ impl Game {
     pub fn tr_start(&mut self, b: TBehaviour) {
         match b {
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_start(i),
+            TBehaviour::JackOLaternBehaviour(i) => self.jack_o_latern_behaviour_start(i),
             _ => {}
         }
     }
@@ -194,8 +292,12 @@ impl Game {
     pub fn tr_phase(&mut self, phase: Phase, b: TBehaviour) {
         match (phase, b) {
             (Phase::Update, TBehaviour::CosmeticRotationBehaviour(i)) => self.cosmetic_rotation_behaviour_update(i),
+            (Phase::Update, TBehaviour::DisableWhenWet(i)) => self.disable_when_wet_update(i),
             (Phase::Fixed, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_update(i),
+            (Phase::Fixed, TBehaviour::FireSoundEmitter(i)) => self.fire_sound_emitter_fixed_update(i),
+            (Phase::Fixed, TBehaviour::GuideTemperatureBehaviour(i)) => self.guide_temperature_behaviour_fixed_update(i),
+            (Phase::Update, TBehaviour::TargetLineRenderer(i)) => self.target_line_renderer_update(i),
             _ => {}
         }
     }

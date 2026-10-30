@@ -18,6 +18,24 @@ pub enum Xf {
     Collider(i32),
 }
 
+/// A GameObject as the translated scripts hold one.
+#[derive(Clone, Copy, Debug)]
+pub enum Go {
+    /// An object of a clone, by the instance id of one of its components.
+    Local(i32),
+    /// A prefab asset.
+    Asset(crate::assets::db::ObjRef),
+}
+
+impl Go {
+    fn local(self) -> i32 {
+        match self {
+            Go::Local(id) => id,
+            Go::Asset(r) => unimplemented!("a prefab asset ({r:?}) used as a scene GameObject"),
+        }
+    }
+}
+
 impl Xf {
     /// `base.transform` of a translated component.
     pub fn this(physical: Option<usize>, physics: bool) -> Xf {
@@ -40,10 +58,10 @@ pub fn pres(present: bool) {
     }
 }
 
-/// `transform.localRotation = ...` that only shows: the object must not move anything physical.
-pub fn presentation_rotation(xf: Xf) {
+/// `transform.localRotation = ...` or `localPosition = ...` that only shows: the object must not move anything physical.
+pub fn presentation_pose(xf: Xf) {
     if !matches!(xf, Xf::Bare { physics: false }) {
-        unimplemented!("Transform.localRotation of an object with physics ({xf:?})");
+        unimplemented!("Transform.localRotation/localPosition of an object with physics ({xf:?})");
     }
 }
 
@@ -119,8 +137,9 @@ impl Game {
         }
     }
 
-    /// `a == b` for Transforms.
-    pub fn tr_xf_eq(&self, a: Xf, b: Xf) -> bool {
+    /// `a == b` for Transforms (null equals only null).
+    pub fn tr_xf_eq(&self, a: Option<Xf>, b: Option<Xf>) -> bool {
+        let (Some(a), Some(b)) = (a, b) else { return a.is_none() && b.is_none() };
         let owner = |x: Xf| match x {
             Xf::Physical(p) => Some(Some(p)),
             Xf::Collider(c) => self.physical_of_collider(c).map(Some),
@@ -177,6 +196,38 @@ impl Game {
             w = crate::unity::transform::global_vector(node, w);
         }
         [w[0], w[1], w[2]]
+    }
+
+    /// GameObject.activeInHierarchy
+    pub fn tr_active_in_hierarchy(&mut self, go: Go) -> bool {
+        self.with_component_instance(go.local(), |_, inst, o| inst.objects[o].active)
+    }
+
+    /// GameObject.activeSelf
+    pub fn tr_active_self(&mut self, go: Go) -> bool {
+        self.with_component_instance(go.local(), |_, inst, o| inst.objects[o].self_active)
+    }
+
+    /// GameObject.SetActive (nothing when activeSelf already is `v`), with the scripts' OnEnable/OnDisable.
+    pub fn tr_set_active(&mut self, go: Go, v: bool) {
+        self.with_component_instance(go.local(), |g, inst, o| {
+            if inst.objects[o].self_active != v {
+                g.set_active_scripts(inst, o, v);
+            }
+        });
+    }
+
+    /// GameObject.transform
+    pub fn tr_go_transform(&mut self, go: Go) -> Xf {
+        let id = go.local();
+        if let Some(p) = self.physicals.iter().position(|p| p.transform_id == id) {
+            return Xf::Physical(p);
+        }
+        self.with_component_instance(id, |_, inst, o| {
+            let prefab = inst.prefab.clone();
+            let physics = std::iter::once(o).chain(inst.descendants(o)).any(|d| prefab.objects[d].components.iter().any(|(_, x)| matches!(x, crate::assets::db::Component::Collider2D(_) | crate::assets::db::Component::Rigidbody2D(_))));
+            Xf::Bare { physics }
+        })
     }
 
     /// PhysicalObjectsInWorldByTransform.TryGetValue

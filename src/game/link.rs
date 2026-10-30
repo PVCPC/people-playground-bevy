@@ -1576,14 +1576,14 @@ impl Game {
         }
         // The translated classes (tools/translator): each component with its plain fields, then its links.
         let mut translated = HashMap::new();
+        let physics = |o: usize| std::iter::once(o).chain(inst.descendants(o)).any(|d| prefab.objects[d].components.iter().any(|(_, x)| matches!(x, Component::Collider2D(_) | Component::Rigidbody2D(_))));
         for o in 0..n {
             for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
                 let Component::Script { class, enabled, fields: v, .. } = comp else { continue };
                 if !super::translated::CLASSES.contains(&class.as_str()) {
                     continue;
                 }
-                let physics = std::iter::once(o).chain(inst.descendants(o)).any(|d| prefab.objects[d].components.iter().any(|(_, x)| matches!(x, Component::Collider2D(_) | Component::Rigidbody2D(_))));
-                let b = self.tr_new(class, v, inst.objects[o].components[c], *enabled, l.arenas.physical.get(&o).copied(), physics)?;
+                let b = self.tr_new(class, v, inst.objects[o].components[c], *enabled, l.arenas.physical.get(&o).copied(), physics(o))?;
                 translated.insert((o, c), b);
             }
         }
@@ -1614,9 +1614,12 @@ impl Game {
                     K::Len => V::Len(x.array().ok_or(name)?.len()),
                     K::Prefab => V::Prefab(match x.pptr().ok_or(name)? {
                         p if p.is_null() => None,
-                        p => Some(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?),
+                        // An object of this prefab: by its Transform's instance id.
+                        p if p.file == 0 => Some(super::translated::rt::Go::Local(inst.objects[l.object_of(p)?.unwrap()].components[0])),
+                        p => Some(super::translated::rt::Go::Asset(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?)),
                     }),
                     K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
+                    K::Transform => V::Transform(l.object(x)?.map(|t| super::translated::rt::Xf::this(l.arenas.physical.get(&t).copied(), physics(t)))),
                 };
                 self.tr_link(b, name, val);
             }
