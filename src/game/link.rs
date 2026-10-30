@@ -450,8 +450,9 @@ impl Game {
     /// The Starts are queued: Unity runs them in the spawn frame, PersonBehaviour's before its LateUpdate and the
     /// rest after the LateUpdate phase (`update_scripts`). The b2 bodies see PersonBehaviour.Awake's rescale at the
     /// next SyncTransforms.
-    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Result<(Instance, Linked), String> {
-        let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, original_ids);
+    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4]) -> Result<(Instance, Linked), String> {
+        let original_ids = db.resource_load_order()?;
+        let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, &original_ids);
         let first = self.physicals.len();
         let linked = self.link_instance(db, prefab, &inst)?;
         // GetHashCode (Random.InitState in PhysicalBehaviour.Start) is Mono's object hash, (address >> 3) *

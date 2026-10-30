@@ -97,6 +97,37 @@ impl AssetDb {
         self.files[r.file].object(r.path_id).map_or(-1, |o| o.class_id)
     }
 
+    /// The order of the persistent instance ids Unity gives the Resources objects (every Instantiate-able prefab
+    /// and its dependencies), as ids 2, 4, ... in that order. They are allocated while globalgamemanagers'
+    /// ResourceManager is read at startup: each PPtr it transfers (m_Container's targets, then each
+    /// m_DependentAssets entry's object and dependencies) takes the next id on its first appearance
+    /// (Remapper::GetOrGenerateInstanceID). The managers read before it (MonoManager's scripts, GraphicsSettings'
+    /// shaders, ...) already gave a few of these targets lower ids, but none of them is a GameObject or a
+    /// component, so the order among a prefab's own objects (all `instantiate_native` needs) is exact.
+    pub fn resource_load_order(&self) -> Result<HashMap<ObjRef, i32>, String> {
+        let file = self.file_index("globalgamemanagers").ok_or("no globalgamemanagers")?;
+        let manager = self.files[file].objects.iter().find(|o| o.class_id == 147).ok_or("no ResourceManager")?;
+        let r = &mut Reader::new(self.data(ObjRef { file, path_id: manager.path_id }));
+        let mut order = HashMap::new();
+        let mut take = |p: PPtr| {
+            if let Some(o) = self.resolve(file, p) {
+                let next = 2 * order.len() as i32 + 2;
+                order.entry(o).or_insert(next);
+            }
+        };
+        for _ in 0..r.i32()? {
+            r.string()?;
+            take(PPtr::read(r)?);
+        }
+        for _ in 0..r.i32()? {
+            take(PPtr::read(r)?);
+            for _ in 0..r.i32()? {
+                take(PPtr::read(r)?);
+            }
+        }
+        Ok(order)
+    }
+
     /// Resources.Load(path) of an object of `class_id`: the ResourceManager's m_Container entry with that path
     /// (Unity lowercases both sides) and class.
     pub fn resource(&self, path: &str, class_id: i32) -> Result<Option<ObjRef>, String> {

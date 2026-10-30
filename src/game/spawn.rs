@@ -210,18 +210,10 @@ pub fn load_values(fields: Vec<(&'static str, &mut dyn Field)>, data: &crate::as
 }
 
 impl Game {
-    /// Object.Instantiate(prefab, position, rotation): the clone ids go down from `next_instance_id` by 2 in
-    /// prefab pre-order, each GameObject before its components. `original_ids` are the prefab objects' own
-    /// instance ids (GameObject or component ObjRef -> id), whose order is the remap's and so the queue's.
-    pub fn instantiate(&mut self, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Instance {
-        let (inst, behaviours) = self.instantiate_native(prefab, position, rotation, original_ids);
-        if !behaviours.is_empty() {
-            unimplemented!("AwakeFromLoadQueue 0x14: MonoBehaviour Awake/OnEnable in SortBehaviourItemByExecutionOrderAndReverseInstanceID order");
-        }
-        inst
-    }
-
     /// Instantiate up to the last AwakeFromLoadQueue: the clones and queues 0..0x13 (every native component).
+    /// The clone ids go down from `next_instance_id` by 2 in prefab pre-order, each GameObject before its
+    /// components. `original_ids` are the prefab objects' own instance ids (GameObject or component ObjRef -> id,
+    /// `AssetDb::resource_load_order`), whose order is the remap's and so the queues'.
     /// Returns the MonoBehaviours of queue 0x14, (object, component), in the order AwakeFromLoadQueue::AwakeFromLoad
     /// (1809112c0) wakes them: sorted by SortBehaviourItemByExecutionOrderAndReverseInstanceID (180915860),
     /// script execution order first, then the higher clone id.
@@ -769,6 +761,52 @@ pub(crate) mod tests {
         assert_eq!(runtime.len(), 7);
     }
 
+    /// The Person's objects in the order of their original instance ids: the recorder's `orig` lines and
+    /// `resource_load_order` agree.
+    #[test]
+    fn resource_load_order_matches_recording() {
+        let Some((_, _, prefab, db, _)) = spawn_recorded("dump31spawnrand") else { return };
+        let dump = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("reference-probe/game/dump31spawnrand.txt");
+        let mut snaps = dump::snapshots(&dump).unwrap();
+        snaps.next().unwrap();
+        let recorded = recorded_original_ids(&snaps.header, &prefab);
+        let order = db.resource_load_order().unwrap();
+        let mut objects: Vec<ObjRef> = recorded.keys().copied().collect();
+        objects.sort_by_key(|o| recorded[o]);
+        let mut by_order = objects.clone();
+        by_order.sort_by_key(|o| order[o]);
+        assert_eq!(objects, by_order);
+    }
+
+    /// The recorder's `orig` lines (original instance ids), matched to the prefab in pre-order (component names
+    /// repeat per object).
+    fn recorded_original_ids(header: &[String], prefab: &Prefab) -> HashMap<ObjRef, i32> {
+        let mut original_ids = HashMap::new();
+        let (mut gos, mut comps): (Vec<(&str, i32)>, Vec<(&str, &str, i32)>) = (Vec::new(), Vec::new());
+        for l in header.iter().filter_map(|l| l.strip_prefix("orig ")) {
+            let (rest, id) = l.rsplit_once(' ').unwrap();
+            let id: i32 = id.parse().unwrap();
+            if let Some(n) = rest.strip_prefix("GO ") {
+                gos.push((n, id));
+            } else {
+                let (go, ty) = rest.strip_prefix("C ").unwrap().rsplit_once(' ').unwrap();
+                comps.push((go, ty, id));
+            }
+        }
+        assert_eq!(gos.len() + comps.len(), 240, "orig lines");
+        let mut ci = 0;
+        for (i, o) in prefab.objects.iter().enumerate() {
+            assert_eq!(gos[i].0, o.name);
+            original_ids.insert(o.game_object, gos[i].1);
+            for (r, _) in &o.components {
+                assert_eq!(comps[ci].0, o.name);
+                original_ids.insert(*r, comps[ci].2);
+                ci += 1;
+            }
+        }
+        original_ids
+    }
+
     /// The Person prefab spawned as a recording spawned it: the recorder's spawn point and original ids, the
     /// clone ids from its Human, PersonBehaviour.Awake's recorded root scale, then the recorder's
     /// Physics2D.SyncTransforms. Also returns the asset database and the first snapshot.
@@ -797,31 +835,7 @@ pub(crate) mod tests {
             [w[0], w[1], w[2]]
         };
         let spawn = hex3("lpos");
-        // The recorder's original ids, matched to the prefab in pre-order (component names repeat per object).
-        let mut original_ids = HashMap::new();
-        let header = &snaps.header;
-        let (mut gos, mut comps): (Vec<(&str, i32)>, Vec<(&str, &str, i32)>) = (Vec::new(), Vec::new());
-        for l in header.iter().filter_map(|l| l.strip_prefix("orig ")) {
-            let (rest, id) = l.rsplit_once(' ').unwrap();
-            let id: i32 = id.parse().unwrap();
-            if let Some(n) = rest.strip_prefix("GO ") {
-                gos.push((n, id));
-            } else {
-                let (go, ty) = rest.strip_prefix("C ").unwrap().rsplit_once(' ').unwrap();
-                comps.push((go, ty, id));
-            }
-        }
-        assert_eq!(gos.len() + comps.len(), 240, "orig lines");
-        let mut ci = 0;
-        for (i, o) in prefab.objects.iter().enumerate() {
-            assert_eq!(gos[i].0, o.name);
-            original_ids.insert(o.game_object, gos[i].1);
-            for (r, _) in &o.components {
-                assert_eq!(comps[ci].0, o.name);
-                original_ids.insert(*r, comps[ci].2);
-                ci += 1;
-            }
-        }
+        let original_ids = db.resource_load_order().unwrap();
         let human_go = root.id + 2;
         let mut g = Game::default();
         g.world = World::new(V::new(-0.0, -9.81));
