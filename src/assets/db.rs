@@ -97,6 +97,25 @@ impl AssetDb {
         self.files[r.file].object(r.path_id).map_or(-1, |o| o.class_id)
     }
 
+    /// Resources.Load(path) of an object of `class_id`: the ResourceManager's m_Container entry with that path
+    /// (Unity lowercases both sides) and class.
+    pub fn resource(&self, path: &str, class_id: i32) -> Result<Option<ObjRef>, String> {
+        let file = self.file_index("globalgamemanagers").ok_or("no globalgamemanagers")?;
+        let manager = self.files[file].objects.iter().find(|o| o.class_id == 147).ok_or("no ResourceManager")?;
+        let r = &mut Reader::new(self.data(ObjRef { file, path_id: manager.path_id }));
+        let want = path.to_lowercase();
+        for _ in 0..r.i32()? {
+            let name = r.string()?;
+            let target = PPtr::read(r)?;
+            if name == want {
+                if let Some(t) = self.resolve(file, target).filter(|&t| self.class(t) == class_id) {
+                    return Ok(Some(t));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub fn data(&self, r: ObjRef) -> &[u8] {
         let f = &self.files[r.file];
         f.data(f.object(r.path_id).expect("object"))

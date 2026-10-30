@@ -575,8 +575,7 @@ mod tests {
 
     /// The Awake and Start passes of a spawned Person take the instance ids the recording lists, in order: the type at
     /// the first id of each phase and the final next id (dump33human: the Person's clone ends at -62472; the recorded
-    /// ids-after33 lists every UnityEngine.Object by id). PhysicalBehaviour.Start is not run (its ids are checked by
-    /// `physical::tests::start_matches_game`); the allocator jumps over its 169 ids.
+    /// ids-after33 lists every UnityEngine.Object by id).
     #[test]
     fn awake_start_ids_match_game() {
         use super::super::dump;
@@ -635,7 +634,20 @@ mod tests {
             }
         });
         assert_eq!(g.next_instance_id, -63408);
-        g.next_instance_id = -63746;
+        // PhysicalBehaviour.Start (80), with the snapshot's Start-made state undone; the first also adds the root's
+        // AudioSourceTimeScaleBehaviour.
+        for &l in &limbs {
+            let p = g.limbs[l].PhysicalBehaviour;
+            let ph = &mut g.physicals[p];
+            (ph.audioSource, ph.audio_time_scale) = (false, false);
+            (ph.ids.audioSource, ph.ids.slidingAudioSource, ph.ids.selectionOutlineObject, ph.ids.outlineSpriteRenderer) = (0, 0, 0, 0);
+        }
+        phase(&mut g, "physical start", "AudioSourceTimeScaleBehaviour", &|g| {
+            for &l in &limbs {
+                g.physical_start(g.limbs[l].PhysicalBehaviour);
+            }
+        });
+        assert_eq!(g.next_instance_id, -63746);
         g.gforces.clear();
         g.hinge_joint_limit_autofix_start(0);
         phase(&mut g, "limb start", "GForceMeasureBehaviour", &|g| {

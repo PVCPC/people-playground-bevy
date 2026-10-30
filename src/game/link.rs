@@ -396,7 +396,7 @@ impl Game {
             let mut drips = None;
             for c in db.game_object(go)?.components {
                 let c = db.resolve(go.file, c).ok_or("a BleedingParticlePrefab component outside the data")?;
-                if db.files[c.file].object(c.path_id).map(|o| o.class_id) != Some(114) {
+                if db.class(c) != 114 {
                     continue;
                 }
                 if let Some((script, _, bv)) = db.mono(c)? {
@@ -608,13 +608,7 @@ mod tests {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
-        // PhysicalBehaviour.SetupSpawnPrefab (Instantiate of the Resources prefab) is not rewritten: off for the Start pass.
-        let spawn_particles: Vec<bool> = g.physicals.iter().map(|p| p.SpawnSpawnParticles).collect();
-        g.physicals.iter_mut().for_each(|p| p.SpawnSpawnParticles = false);
         g.start_behaviours(&prefab, &linked, &order);
-        for (p, on) in g.physicals.iter_mut().zip(spawn_particles) {
-            p.SpawnSpawnParticles = on;
-        }
         // The first frame's render: OnWillRenderObject fills the blood colour caches.
         for l in 0..g.limbs.len() {
             g.skin_will_render(l);

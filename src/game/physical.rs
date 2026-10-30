@@ -178,6 +178,10 @@ script! {
     }
 }
 
+/// Instance ids of a Prefabs/SpawnParticles clone: GameObject, Transform, ParticleSystem, ParticleSystemRenderer,
+/// DeleteAfterTime.
+const SPAWN_PARTICLES_OBJECTS: usize = 5;
+
 impl Game {
     /// Global.PhysicalObjectsInWorldByTransform looked up by a collider (the collider's transform).
     pub fn physical_of_collider(&self, collider: i32) -> Option<usize> {
@@ -295,8 +299,13 @@ impl Game {
         if self.physicals[p].isDisintegrated {
             unimplemented!("PhysicalBehaviour.Disintegrate");
         }
+        // SetupSpawnPrefab: Instantiate(Resources.Load("Prefabs/SpawnParticles")) under this transform, then
+        // AddComponent<Optout>(). The clone is a particle effect that deletes itself after a second; it draws no
+        // UnityEngine.Random (the grid jitter below matches the game without it).
         if self.physicals[p].SpawnSpawnParticles && !self.physicals[p].isStatic {
-            unimplemented!("PhysicalBehaviour.SetupSpawnPrefab: Instantiate(Resources.Load(\"Prefabs/SpawnParticles\"))");
+            for _ in 0..SPAWN_PARTICLES_OBJECTS + 1 {
+                self.allocate_instance_id();
+            }
         }
         // The context menu buttons are not modelled.
         for i in 0..self.physicals[p].LocalColliderGridPoints.as_ref().map_or(0, |g| g.len()) {
@@ -1221,6 +1230,14 @@ mod tests {
     /// game ran them): the fields reset to the Person prefab's values, then Awake and Start must rebuild what the
     /// recording holds, bit for bit. SpawnSpawnParticles is switched off: Instantiate of the Resources prefab is
     /// not rewritten, and it takes instance ids and nothing else in this check.
+    #[test]
+    fn spawn_particles_objects_match_data() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let prefab = db.prefab(db.resource("Prefabs/SpawnParticles", 1).unwrap().unwrap()).unwrap();
+        assert_eq!(prefab.objects.iter().map(|o| 1 + o.components.len()).sum::<usize>(), super::SPAWN_PARTICLES_OBJECTS);
+    }
+
     #[test]
     fn start_matches_game() {
         let Ok(game) = crate::game_assets::find_game(None) else { return };
