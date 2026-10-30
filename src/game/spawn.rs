@@ -35,6 +35,47 @@ pub struct Instance {
     pub fixtures: HashMap<(usize, usize), Vec<FixtureId>>,
     /// HingeJoint2D joints by (object, component).
     pub joints: HashMap<(usize, usize), JointId>,
+    /// The HingeJoint2Ds' native state by (object, component).
+    pub hinges: HashMap<(usize, usize), HingeState>,
+    /// The Collider2Ds' native state by (object, component).
+    pub colliders: HashMap<(usize, usize), ColliderState>,
+    /// Each object's TransformChangeDispatch interest in the Physics2D systems (the CHANGE_* bits).
+    pub interest: Vec<u8>,
+    /// Each object's changed bits for those systems, cleared by SyncTransforms.
+    pub changed: Vec<u8>,
+}
+
+/// The Physics2D TransformChangeDispatch systems InitializePhysicsManager2D (180bf14a0) registers: the
+/// Rigidbody2D T (global T), R (global R), S (global S) and Anim (physics animation) systems and the Collider2D
+/// TRS system (global T, R and S).
+pub const CHANGE_RB_T: u8 = 1;
+pub const CHANGE_RB_R: u8 = 2;
+pub const CHANGE_RB_S: u8 = 4;
+pub const CHANGE_RB_ANIM: u8 = 8;
+pub const CHANGE_COLLIDER: u8 = 16;
+/// The systems interested in each kind of change (TransformInternal::g_ChangeMaskCache).
+const GLOBAL_T: u8 = CHANGE_RB_T | CHANGE_COLLIDER;
+const GLOBAL_R: u8 = CHANGE_RB_R | CHANGE_COLLIDER;
+const GLOBAL_S: u8 = CHANGE_RB_S | CHANGE_COLLIDER;
+
+/// HingeJoint2D's runtime fields.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HingeState {
+    /// AnchoredJoint2D.m_ConnectedAnchor: serialized, then rewritten by auto-configuration.
+    pub connected_anchor: [f32; 2],
+    /// Joint2D.m_AutoConfigurationComplete: set by FinalizeCreateJoint while the world plays.
+    pub auto_configuration_complete: bool,
+    pub has_previous_state: bool,
+    pub reference_angle: f32,
+    pub body_angle_a: f32,
+    pub body_angle_b: f32,
+}
+
+/// Collider2D's runtime transform fields, set by CreateFixtures.
+#[derive(Clone, Copy, Debug)]
+pub struct ColliderState {
+    pub relative_transform: [f32; 16],
+    pub rigidbody_scale: [f32; 3],
 }
 
 /// AwakeFromLoadQueue::DetermineQueueIndex (180911850) for the component kinds a prefab here holds: the custom
@@ -87,7 +128,38 @@ impl Instance {
     pub fn lossy_scale(&self, o: usize) -> [f32; 3] {
         lossy_scale(&self.chain(o), self.rotation(o))
     }
+
+    /// Transform::SetLocalScale (1807f4b10): SetLocalS (1800ca2d0) marks the object local and global S and every
+    /// descendant global T, R and S, for the systems interested in each.
+    pub fn set_local_scale(&mut self, o: usize, s: [f32; 3]) {
+        let old = std::mem::replace(&mut self.objects[o].trs.s, [s[0], s[1], s[2], 0.0]);
+        if (0..3).all(|i| old[i] == s[i]) {
+            return;
+        }
+        self.changed[o] |= self.interest[o] & GLOBAL_S;
+        for d in self.descendants(o) {
+            self.changed[d] |= self.interest[d] & (GLOBAL_T | GLOBAL_R | GLOBAL_S);
+        }
+    }
+
+    /// The object's descendants in hierarchy (pre-) order.
+    fn descendants(&self, o: usize) -> Vec<usize> {
+        (o + 1..self.objects.len()).take_while(|&d| self.is_descendant(d, o)).collect()
+    }
+
+    fn is_descendant(&self, d: usize, o: usize) -> bool {
+        let mut p = self.objects[d].parent;
+        while let Some(i) = p {
+            if i == o {
+                return true;
+            }
+            p = self.objects[i].parent;
+        }
+        false
+    }
 }
+
+const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
 
 fn neg(x: f32) -> f32 {
     f32::from_bits(x.to_bits() ^ 0x8000_0000)
@@ -101,6 +173,16 @@ fn z_rot_angle(q: [f32; 4]) -> f32 {
         (z, w) = (neg(z), neg(w));
     }
     crate::unity::atan2f(z, w)
+}
+
+/// The body angle Rigidbody2D::Create and SyncTransforms take from a rotation: the quaternion's sign flipped
+/// when w < 0, then twice the half angle.
+fn body_angle(mut q: [f32; 4]) -> f32 {
+    if q[3] < 0.0 {
+        (q[2], q[3]) = (neg(q[2]), neg(q[3]));
+    }
+    let a = crate::unity::atan2f(q[2], q[3]);
+    a + a
 }
 
 /// result = R · M in Collider2D::CalculateColliderTransformation's add order.
@@ -140,7 +222,9 @@ impl Game {
     }
 
     /// Instantiate up to the last AwakeFromLoadQueue: the clones and queues 0..0x13 (every native component).
-    /// Returns the MonoBehaviours of queue 0x14 in remap order, (object, component).
+    /// Returns the MonoBehaviours of queue 0x14, (object, component), in the order AwakeFromLoadQueue::AwakeFromLoad
+    /// (1809112c0) wakes them: sorted by SortBehaviourItemByExecutionOrderAndReverseInstanceID (180915860),
+    /// script execution order first, then the higher clone id.
     pub fn instantiate_native(&mut self, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> (Instance, Vec<(usize, usize)>) {
         let mut inst = Instance::default();
         for (i, o) in prefab.objects.iter().enumerate() {
@@ -157,6 +241,10 @@ impl Game {
             let active = o.active && o.parent.map_or(true, |p| inst.objects[p].active);
             inst.objects.push(Clone { game_object, components, trs, parent: o.parent, active });
         }
+        // A clone copies its original's interests (CopyTransformSubhierarchy); a prefab asset has no Physics2D
+        // interest, so the clones start with none and nothing changed.
+        inst.interest = vec![0; inst.objects.len()];
+        inst.changed = vec![0; inst.objects.len()];
         // The remap: every original (GameObject and component) with its clone, sorted by original id.
         let mut items: Vec<(i32, usize, Option<usize>)> = Vec::new();
         for (i, o) in prefab.objects.iter().enumerate() {
@@ -182,7 +270,11 @@ impl Game {
                 }
             }
         }
-        let behaviours = queues[0x14].iter().map(|&(o, c)| (o, c.unwrap())).collect();
+        let mut behaviours: Vec<(usize, usize)> = queues[0x14].iter().map(|&(o, c)| (o, c.unwrap())).collect();
+        behaviours.sort_by_key(|&(o, c)| {
+            let Component::Script { execution_order, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            (*execution_order, std::cmp::Reverse(inst.objects[o].components[c]))
+        });
         (inst, behaviours)
     }
 
@@ -227,26 +319,146 @@ impl Game {
         };
         if inst.objects[o].active {
             let p = inst.position(o);
-            let mut q = inst.rotation(o);
-            if q[3] < 0.0 {
-                (q[2], q[3]) = (neg(q[2]), neg(q[3]));
-            }
             def.position = V::new(p[0], p[1]);
-            let a = crate::unity::atan2f(q[2], q[3]);
-            def.angle = a + a;
+            def.angle = body_angle(inst.rotation(o));
         }
         let body = self.world.create_body(&def);
         self.world.reset_mass_data(body);
         inst.bodies.insert(o, body);
+        // PhysicsManager2D::RegisterTransformChangeInterestForRigidbody (180bf71b0).
+        inst.interest[o] |= CHANGE_RB_T | CHANGE_RB_R | CHANGE_RB_S | CHANGE_RB_ANIM;
         if rb.interpolate != 0 && rb.interpolate != 1 {
             unimplemented!("Rigidbody2D extrapolation");
         }
     }
 
-    /// Collider2D::AwakeFromLoad (180c0c370) in instantiate mode: CreateFixtures on an active object.
+    /// PhysicsManager2D::SyncTransforms (180bf91d0), the start of every Simulate, for the instance's hierarchy.
+    /// The Rigidbody2D systems' changes first, objects in hierarchy order: a moved or turned body is set to its
+    /// Transform's pose and its contacts recalculated, then its joints recreated. Then the collider system's: an
+    /// enabled collider whose body scale or body-relative matrix moved past Vector3f::epsilon is recreated.
+    /// Unity gathers the changes as one job per range of hierarchies, so the order across several changed
+    /// hierarchies is the jobs' finishing order; within one it is the hierarchy's.
+    /// The instance's bodies were never interpolated nor given MovePosition/MoveRotation, so the
+    /// RigidbodyMovementState2D updates leave the b2 state alone.
+    pub fn sync_transforms(&mut self, inst: &mut Instance, prefab: &Prefab) {
+        const RB: u8 = CHANGE_RB_T | CHANGE_RB_R | CHANGE_RB_S | CHANGE_RB_ANIM;
+        for o in 0..inst.objects.len() {
+            let bits = inst.changed[o] & RB;
+            inst.changed[o] &= !RB;
+            if bits == 0 {
+                continue;
+            }
+            let Some(&body) = inst.bodies.get(&o) else { continue };
+            let anim = bits & CHANGE_RB_ANIM != 0 && self.world.body(body).kind != BodyType::Static;
+            let (t, r) = (bits & CHANGE_RB_T != 0, bits & CHANGE_RB_R != 0);
+            if t || r {
+                let (pos, rot) = (inst.position(o), inst.rotation(o));
+                let b = self.world.body(body);
+                let p = if t { V::new(pos[0], pos[1]) } else { b.xf.p };
+                let angle = if r { body_angle(rot) } else { b.sweep.a };
+                self.world.set_transform(body, p, angle);
+                self.rigidbody2d_recalculate_contacts(inst, prefab, body);
+                if anim {
+                    continue;
+                }
+            } else if anim || bits & CHANGE_RB_S == 0 {
+                continue;
+            }
+            self.rigidbody2d_recreate_joints(inst, prefab, o);
+        }
+        for o in 0..inst.objects.len() {
+            if inst.changed[o] & CHANGE_COLLIDER == 0 {
+                continue;
+            }
+            inst.changed[o] &= !CHANGE_COLLIDER;
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                let Component::Collider2D(col) = comp else { continue };
+                if !col.enabled {
+                    continue;
+                }
+                let (body_object, m) = self.collider_transformation(inst, prefab, o);
+                let scale = match body_object {
+                    Some(b) => {
+                        let s = inst.objects[b].trs.s;
+                        [s[0], s[1], s[2]]
+                    }
+                    None => [1.0; 3],
+                };
+                let st = inst.colliders[&(o, c)];
+                let d = [scale[0] - st.rigidbody_scale[0], scale[1] - st.rigidbody_scale[1], scale[2] - st.rigidbody_scale[2]];
+                const EPSILON: f32 = f32::from_bits(0x3727_c5ac);
+                // CompareApproximately(Matrix4x4f) (18073cbb0): every element within epsilon.
+                let same = (0..16).all(|i| EPSILON >= (st.relative_transform[i] - m[i]).abs());
+                if EPSILON * EPSILON < d[0] * d[0] + d[1] * d[1] + d[2] * d[2] || !same {
+                    self.collider2d_recreate(inst, prefab, o, c);
+                }
+            }
+        }
+    }
+
+    /// Rigidbody2D::RecalculateContacts (180c22660): Collider2D::RecalculateContacts on each enabled attached
+    /// collider with shapes (not used by an effector), then the body is woken.
+    fn rigidbody2d_recalculate_contacts(&mut self, inst: &Instance, prefab: &Prefab, body: BodyId) {
+        if self.world.body(body).fixtures.is_empty() {
+            return;
+        }
+        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        if 1 < attached.len() {
+            unimplemented!("Rigidbody2D::GetAttachedColliders: several colliders on one body come in Collider2D pointer order");
+        }
+        for &(o, c) in &attached {
+            let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
+            if col.enabled && !col.used_by_effector {
+                self.world.refilter_collider(inst.objects[o].components[c]);
+                if self.world.body(body).kind == BodyType::Static {
+                    unimplemented!("Collider2D::WakeAllBodyContacts on a static Rigidbody2D");
+                }
+            }
+        }
+        self.world.wake_body(body);
+    }
+
+    /// Collider2D::RecreateCollider(null) (180c14750) outside a composite: the body's contacts wake their bodies,
+    /// Cleanup(kColliderRecreate) (180c0d940) keeps the collider's collisions and destroys its fixtures (last
+    /// first) and resets the body mass, then CreateFixtures, and the attached Rigidbody2D is woken.
+    fn collider2d_recreate(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
+        let id = inst.objects[o].components[c];
+        let fixtures = inst.fixtures.remove(&(o, c)).unwrap_or_default();
+        if let Some(&first) = fixtures.first() {
+            let body = self.world.fixture(first).body;
+            self.world.wake_contact_bodies(body);
+            self.world.contacts2d.flag_for_recreate(id);
+            for &f in fixtures.iter().rev() {
+                self.world.destroy_fixture(body, f);
+            }
+            self.world.reset_mass_data(body);
+        }
+        if let Some(st) = inst.colliders.get_mut(&(o, c)) {
+            st.relative_transform = IDENTITY;
+        }
+        self.collider2d_create_fixtures(inst, prefab, o, c);
+        let created = inst.fixtures.get(&(o, c)).filter(|f| !f.is_empty()).map(|f| f[0]);
+        match created {
+            None => self.world.contacts2d.destroy_contacts(id),
+            Some(first) => {
+                let body = self.world.fixture(first).body;
+                if inst.bodies.values().any(|&b| b == body) {
+                    self.world.wake_body(body);
+                }
+            }
+        }
+    }
+
+    /// Collider2D::AwakeFromLoad (180c0c370) in instantiate mode: CreateFixtures on an active object, and
+    /// Collider2D::AddToManager (180c0bcc0) on an enabled one, which registers the GameObject's interest in the
+    /// collider TRS system.
     fn collider2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
         if inst.objects[o].active {
             self.collider2d_create_fixtures(inst, prefab, o, c);
+            let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
+            if col.enabled {
+                inst.interest[o] |= CHANGE_COLLIDER;
+            }
         }
     }
 
@@ -298,6 +510,14 @@ impl Game {
             unimplemented!("CompositeCollider2D");
         }
         let (body_object, m) = self.collider_transformation(inst, prefab, o);
+        let rigidbody_scale = match body_object {
+            Some(b) => {
+                let s = inst.objects[b].trs.s;
+                [s[0], s[1], s[2]]
+            }
+            None => [1.0; 3],
+        };
+        inst.colliders.insert((o, c), ColliderState { relative_transform: m, rigidbody_scale });
         let matrix = ColliderMatrix([m[0], m[1], m[4], m[5], m[8], m[9], m[12], m[13]]);
         let shapes: Vec<Shape> = match &col.shape {
             ColliderShape::Box { tiling, auto_tiling, size, edge_radius } => {
@@ -363,7 +583,7 @@ impl Game {
     }
 
     /// HingeJoint2D::Create (180bfcdc0), AnchoredJoint2D::ConfigureAnchors (180beaf30) and
-    /// Joint2D::FinalizeCreateJoint (180c048c0) for a clone (no previous state, anchors not yet configured).
+    /// Joint2D::FinalizeCreateJoint (180c048c0).
     fn hinge_joint2d_create(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) {
         let JointData::Hinge { use_motor, motor_speed, max_motor_torque, use_limits, lower, upper } = j.kind else { unreachable!() };
         let connected = (!j.connected_body.is_null()).then(|| {
@@ -389,28 +609,57 @@ impl Game {
             None => Some(self.world.ground_body()),
         };
         let (Some(a), Some(b)) = (body_a, body_b) else { unimplemented!("Joint2D on an object without a created Rigidbody2D") };
-        let reference_angle = self.world.body(b).sweep.a - self.world.body(a).sweep.a;
+        let mut st = *inst.hinges.entry((o, c)).or_insert(HingeState { connected_anchor: j.connected_anchor, ..Default::default() });
+        let (angle_a, angle_b) = (self.world.body(a).sweep.a, self.world.body(b).sweep.a);
+        let reference_angle = if !st.has_previous_state {
+            angle_b - angle_a
+        } else {
+            // A body angle that wrapped by a turn since Cleanup moves the reference angle with it (within 2°).
+            // The second test of each pair reads body angle A, as the native does.
+            const PI: f32 = f32::from_bits(0x4049_0fdb);
+            const TAU: f32 = f32::from_bits(0x40c9_0fdb);
+            const TOLERANCE: f32 = f32::from_bits(0x3d0e_fa36);
+            let near = |x: f32, y: f32| TOLERANCE >= (x - y).abs();
+            let (prev_a, prev_b) = (st.body_angle_a, st.body_angle_b);
+            if prev_a > PI && near(angle_a, prev_a - TAU) {
+                st.reference_angle = st.reference_angle + TAU;
+            } else if -PI > prev_a && near(angle_a, prev_a + TAU) {
+                st.reference_angle = st.reference_angle - TAU;
+            }
+            if prev_b > PI && near(angle_b, prev_b - TAU) {
+                st.reference_angle = st.reference_angle - TAU;
+            } else if -PI > prev_a && near(angle_b, prev_b + TAU) {
+                st.reference_angle = st.reference_angle + TAU;
+            }
+            st.reference_angle
+        };
         let s = inst.lossy_scale(o);
         let anchor_a = V::new(s[0] * j.anchor[0], s[1] * j.anchor[1]);
-        let anchor_b = if !j.auto_configure_connected_anchor {
-            let sb = match connected {
-                Some(b) => inst.lossy_scale(b),
-                None => [1.0, 1.0, 1.0],
-            };
-            V::new(sb[0] * j.connected_anchor[0], sb[1] * j.connected_anchor[1])
+        let sb = match connected {
+            Some(b) => inst.lossy_scale(b),
+            None => [1.0, 1.0, 1.0],
+        };
+        let anchor_b = if !j.auto_configure_connected_anchor || st.auto_configuration_complete {
+            V::new(sb[0] * st.connected_anchor[0], sb[1] * st.connected_anchor[1])
         } else {
             let xa = self.world.body(a).xf;
             let wx = (anchor_a.x * xa.q.c - anchor_a.y * xa.q.s) + xa.p.x;
             let wy = xa.q.s * anchor_a.x + anchor_a.y * xa.q.c + xa.p.y;
             match connected {
-                None => V::new(wx, wy),
+                None => {
+                    st.connected_anchor = [wx, wy];
+                    V::new(wx, wy)
+                }
                 Some(_) => {
                     let xb = self.world.body(b).xf;
                     let (dx, dy) = (wx - xb.p.x, wy - xb.p.y);
-                    V::new(xb.q.c * dx + xb.q.s * dy, xb.q.c * dy - xb.q.s * dx)
+                    let local = V::new(xb.q.c * dx + xb.q.s * dy, xb.q.c * dy - xb.q.s * dx);
+                    st.connected_anchor = [local.x / sb[0], local.y / sb[1]];
+                    local
                 }
             }
         };
+        inst.hinges.insert((o, c), st);
         let def = RevoluteDef {
             local_anchor_a: anchor_a,
             local_anchor_b: anchor_b,
@@ -431,6 +680,43 @@ impl Game {
         inst.joints.insert((o, c), id);
         if j.break_force.is_finite() || j.break_torque.is_finite() {
             unimplemented!("HingeJoint2D break limits on a spawned joint");
+        }
+        // The world is playing.
+        inst.hinges.get_mut(&(o, c)).unwrap().auto_configuration_complete = true;
+    }
+
+    /// HingeJoint2D::Cleanup(false) (180bfc5e0) while the world plays: the joint's reference angle and both body
+    /// angles are kept for the next Create, then Joint2D::Cleanup destroys the b2 joint.
+    fn hinge_joint2d_cleanup(&mut self, inst: &mut Instance, o: usize, c: usize) {
+        let Some(id) = inst.joints.remove(&(o, c)) else { return };
+        let joint = self.world.joints[id].as_ref().unwrap();
+        let (a, b, reference_angle) = (joint.body_a, joint.body_b, joint.revolute().def.reference_angle);
+        let st = inst.hinges.get_mut(&(o, c)).unwrap();
+        st.reference_angle = reference_angle;
+        st.body_angle_a = self.world.body(a).sweep.a;
+        st.body_angle_b = self.world.body(b).sweep.a;
+        st.has_previous_state = true;
+        // Joint2D::Cleanup (180c03500): the auto-configuration is redone by the next Create.
+        st.auto_configuration_complete = false;
+        self.world.destroy_joint(id);
+    }
+
+    /// Rigidbody2D::RecreateJoints (180c22780): Joint2D::ReCreate (180c05570) on each joint of the body, its joint
+    /// list from the head: Cleanup, then Create on an active GameObject with the joint enabled.
+    fn rigidbody2d_recreate_joints(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize) {
+        let body = inst.bodies[&o];
+        for (_, id) in self.world.body(body).joints.clone().into_iter().rev() {
+            let Some(&(jo, jc)) = inst.joints.iter().find(|(_, j)| **j == id).map(|(k, _)| k) else {
+                unimplemented!("RecreateJoints: a joint outside the instance");
+            };
+            let Component::Joint2D(j) = &prefab.objects[jo].components[jc].1 else { unreachable!() };
+            if !matches!(j.kind, JointData::Hinge { .. }) {
+                unimplemented!("{}: Joint2D ReCreate for {:?}", prefab.objects[jo].name, j.kind);
+            }
+            self.hinge_joint2d_cleanup(inst, jo, jc);
+            if inst.objects[jo].active && j.enabled {
+                self.hinge_joint2d_create(inst, prefab, jo, jc, j);
+            }
         }
     }
 }
@@ -484,7 +770,8 @@ mod tests {
     }
 
     /// The Person prefab instantiated natively against dump26stabhead2's first snapshot: every limb body's words,
-    /// its fixture proxies and its hinge's b2 definition.
+    /// its fixture proxies and its hinge's b2 definition, after PersonBehaviour.Awake's rescale and the recorder's
+    /// Physics2D.SyncTransforms.
     #[test]
     fn person_spawn_matches_game() {
         let Ok(game) = crate::game_assets::find_game(None) else { return };
@@ -504,17 +791,13 @@ mod tests {
                 }
             }
         }
-        let mut prefab = db.prefab(person.unwrap()).unwrap();
-        // PersonBehaviour.Awake (queue 0x14, not part of this native check) rescales the root at random: the
-        // recorded root scale stands in for it here, and the recorded spawn point for the recorder's.
+        let prefab = db.prefab(person.unwrap()).unwrap();
+        // The recorder's spawn point, and the root scale PersonBehaviour.Awake drew.
         let root = first.of("TransformChain").find(|r| r.name == "Human").unwrap();
         let hex3 = |k: &str| -> [f32; 3] {
             let w: Vec<f32> = root.get(k).unwrap().split(',').map(|w| f32::from_bits(u32::from_str_radix(w, 16).unwrap())).collect();
             [w[0], w[1], w[2]]
         };
-        if let Some((_, Component::Transform(t))) = prefab.objects[0].components.first_mut() {
-            t.local_scale = hex3("lscale");
-        }
         let spawn = hex3("lpos");
         // The recorder's original ids, matched to the prefab in pre-order (component names repeat per object).
         let mut original_ids = HashMap::new();
@@ -545,7 +828,10 @@ mod tests {
         let mut g = Game::default();
         g.world = World::new(V::new(-0.0, -9.81));
         g.next_instance_id = human_go;
-        let (inst, _) = g.instantiate_native(&prefab, spawn, [0.0, 0.0, 0.0, 1.0], &original_ids);
+        let (mut inst, _) = g.instantiate_native(&prefab, spawn, [0.0, 0.0, 0.0, 1.0], &original_ids);
+        // PersonBehaviour.Awake's transform.localScale, then the recorder's Physics2D.SyncTransforms.
+        inst.set_local_scale(0, hex3("lscale"));
+        g.sync_transforms(&mut inst, &prefab);
         let mut out = Vec::new();
         // Body creation order: the game's list (head newest) restricted to the person.
         let name_of = |b: BodyId| {
@@ -574,6 +860,15 @@ mod tests {
                 if gw != ow {
                     out.push(format!("{name} body.w{k}: game {gw:08x} ours {ow:08x}"));
                 }
+            }
+            // The body's joint list from the head: RecreateJoints reorders it.
+            let joint_names: Vec<String> = g.world.body(b).joints.iter().rev().map(|&(_, j)| {
+                let (&(jo, jc), _) = inst.joints.iter().find(|(_, x)| **x == j).unwrap();
+                format!("{}#{}", prefab.objects[jo].name, inst.objects[jo].components[jc])
+            }).collect();
+            let theirs: Vec<&str> = e.get("joints").unwrap().split(';').filter(|n| !n.is_empty()).collect();
+            if theirs != joint_names {
+                out.push(format!("{name} joints: game {theirs:?} ours {joint_names:?}"));
             }
             // Fixture proxies: the AABB and fat AABB of each fixture's single proxy.
             for (&(fo, fc), fixtures) in &inst.fixtures {

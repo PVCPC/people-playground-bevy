@@ -121,6 +121,12 @@ pub fn header(path: &Path) -> Result<Vec<String>, String> {
     Ok(s.header)
 }
 
+/// The recorder's `random_state=<s0> <s1> <s2> <s3>` header line: UnityEngine.Random.state just before the Person's Instantiate.
+pub fn spawn_random_state(header: &[String]) -> Option<[u32; 4]> {
+    let w: Vec<u32> = header.iter().find_map(|l| l.strip_prefix("random_state="))?.split(' ').map(|w| u32::from_str_radix(w, 16).unwrap()).collect();
+    Some([w[0], w[1], w[2], w[3]])
+}
+
 impl<R: BufRead> Iterator for Snapshots<R> {
     type Item = Snapshot;
     fn next(&mut self) -> Option<Snapshot> {

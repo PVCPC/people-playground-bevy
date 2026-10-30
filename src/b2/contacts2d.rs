@@ -158,6 +158,18 @@ impl Contacts2D {
         }
     }
 
+    /// Collider2D::Cleanup(kColliderRecreate)'s pass over m_CollisionIndex (180c0d940): each collision with the
+    /// collider is kept through the recreate as a Stay.
+    pub fn flag_for_recreate(&mut self, collider: i32) {
+        for &c in &self.collisions {
+            let r = self.records[c].as_mut().unwrap();
+            if r.collider_a.id == collider || r.collider_b.id == collider {
+                r.flag_for_recreate = true;
+                r.state = ContactState::Stay;
+            }
+        }
+    }
+
     /// A record restored from a game dump, appended in array order.
     pub fn restore(&mut self, r: Collision2D) -> CollisionId {
         let key = (r.collider_a.id, r.collider_b.id);

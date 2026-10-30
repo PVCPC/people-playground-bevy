@@ -324,17 +324,33 @@ impl Game {
     }
 
     /// PhysicalBehaviour.SetProperties: rigidbody.sharedMaterial = Properties.PhysicMaterial when it has none.
-    // ponytail: the native Rigidbody2D::SetSharedMaterial is not disassembled; the body's fixtures take the
-    // material's friction and bounciness (checked against the recorded fixtures) and no contacts may exist yet.
+    /// Rigidbody2D::SetMaterial (180c23840) stores the material and runs Collider2D::UpdateColliderMaterialState
+    /// (180c16380) on each attached collider: GetColliderMaterialState (180c11360) gives the collider's own material,
+    /// else the body's (the prefab colliders have none, see spawn), the fixtures take its friction and bounciness and
+    /// the collider refilters. The colliders are the body's fixtures' user data, sorted and made unique; the sort is
+    /// by native address, taken here as fixture creation order.
     fn physical_set_properties(&mut self, p: usize) {
         let props = &self.properties[self.physicals[p].Properties];
         let (Some(friction), false) = (props.friction, self.physicals[p].rigidbody_has_material) else { return };
         let bounciness = props.bounciness;
+        self.physicals[p].rigidbody_has_material = true;
         let body = self.physicals[p].rigidbody.body;
-        assert!(self.world.body(body).contacts.is_empty(), "Rigidbody2D.sharedMaterial with live contacts");
-        for f in self.world.body(body).fixtures.clone() {
-            let fixture = self.world.fixtures[f].as_mut().unwrap();
-            (fixture.friction, fixture.restitution) = (friction, bounciness);
+        let fixtures = self.world.body(body).fixtures.clone();
+        let mut colliders: Vec<i32> = Vec::new();
+        for &f in &fixtures {
+            let id = self.world.fixtures[f].as_ref().unwrap().collider.id;
+            if !colliders.contains(&id) {
+                colliders.push(id);
+            }
+        }
+        for collider in colliders {
+            for &f in &fixtures {
+                let fixture = self.world.fixtures[f].as_mut().unwrap();
+                if fixture.collider.id == collider {
+                    (fixture.friction, fixture.restitution) = (friction, bounciness);
+                }
+            }
+            self.world.refilter_collider(collider);
         }
     }
 }

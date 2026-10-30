@@ -465,6 +465,37 @@ pub fn normalized(v: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
 
+    /// PersonBehaviour.Awake's Random draws from the state recorded before the Instantiate: seed = value * 1000,
+    /// one Range(0, n) per PoseState (CreateLinkedPoseDictionary's PickRandom over that state's poses), then
+    /// RandomisedSize's Range(1.59, 2) -> the root's local scale (z 0: a Vector2 assigned to localScale).
+    #[test]
+    fn awake_random_matches_game() {
+        use super::super::dump;
+        use crate::game_assets::HumanRig;
+        use std::path::Path;
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(rig) = HumanRig::load(&root.join("local-cache"), &game) else { return };
+        let path = root.join("reference-probe/game/dump31spawnrand.txt");
+        let Ok(header) = dump::header(&path) else { return };
+        let Some(state) = dump::spawn_random_state(&header) else { return };
+        let mut snaps = dump::snapshots(&path).unwrap();
+        let first = snaps.next().unwrap();
+        let fs = snaps.find(|s| s.pt == "FS" && s.of("b2World").next().is_some()).unwrap();
+        let g = Game::from_snapshot(&fs, &rig).unwrap();
+        let p = &g.people[0];
+        let mut random = crate::unity::Random { state };
+        assert_eq!(random.value() * 1000.0, p.seed, "seed");
+        for s in 0..pose_state::COUNT {
+            let of_state: Vec<usize> = (0..p.Poses.len()).filter(|&i| p.Poses[i].State == s as i32).collect();
+            assert_eq!(of_state[random.range_int(0, of_state.len() as i32) as usize], p.LinkedPoses[s], "LinkedPoses[{s}] of {}", of_state.len());
+        }
+        let scale = 1.0 * random.range(1.59, 2.0) / 2.0 / 0.82397;
+        let human = first.of("TransformChain").find(|r| r.name == "Human").unwrap();
+        let want: Vec<f32> = human.get("lscale").unwrap().split(',').map(|w| f32::from_bits(u32::from_str_radix(w, 16).unwrap())).collect();
+        assert_eq!([scale.to_bits(), scale.to_bits(), 0], [want[0].to_bits(), want[1].to_bits(), want[2].to_bits()], "lscale {want:?} ours {scale}");
+    }
+
     /// The last disintegration queues the root GameObject's Destroy once, at min(fixed time, frame time).
     #[test]
     fn last_disintegration_queues_destroy() {

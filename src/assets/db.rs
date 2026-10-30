@@ -30,7 +30,8 @@ pub enum Component {
     Collider2D(Collider2D),
     Joint2D(Joint2D),
     SpriteRenderer(SpriteRenderer),
-    Script { class: String, enabled: bool, fields: Value },
+    /// A MonoBehaviour: its script class, MonoScript.m_ExecutionOrder, Behaviour.m_Enabled and fields.
+    Script { class: String, execution_order: i32, enabled: bool, fields: Value },
     /// A component class the rewrite does not read yet (audio, particles, UI...).
     Other(i32),
 }
@@ -160,7 +161,7 @@ impl AssetDb {
             c if Collider2D::CLASSES.contains(&c) => Component::Collider2D(Collider2D::read(c, d)?),
             c if Joint2D::CLASSES.contains(&c) => Component::Joint2D(Joint2D::read(c, d)?),
             114 => match self.mono(r)? {
-                Some((script, mb, fields)) => Component::Script { class: script.class_name, enabled: mb.enabled, fields },
+                Some((script, mb, fields)) => Component::Script { class: script.class_name, execution_order: script.execution_order, enabled: mb.enabled, fields },
                 None => Component::Other(114),
             },
             c => Component::Other(c),

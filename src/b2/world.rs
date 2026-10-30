@@ -679,15 +679,26 @@ impl World {
         list.swap_remove(at);
     }
 
-    /// b2Body::SetTransform: teleport, keeping velocities. ponytail: Unity's Rigidbody2D.position setter is not compared.
+    /// b2Body::SetTransform (180bba3c0): teleport, keeping velocities; each fixture (list from the head) is
+    /// synchronized with the new transform as both ends of the sweep.
     pub fn set_transform(&mut self, id: BodyId, position: Vec2, angle: f32) {
         let b = self.body_mut(id);
         b.xf = Transform { p: position, q: Rot::new(angle) };
-        b.sweep.c = b.xf.apply(b.sweep.local_center);
-        b.sweep.c0 = b.sweep.c;
+        let (lc, q) = (b.sweep.local_center, b.xf.q);
+        let c = Vec2::new((lc.x * q.c - q.s * lc.y) + position.x, q.s * lc.x + lc.y * q.c + position.y);
+        b.sweep.c = c;
+        b.sweep.c0 = c;
         b.sweep.a = angle;
         b.sweep.a0 = angle;
-        self.synchronize_fixtures(id);
+        let xf = b.xf;
+        for f in b.fixtures.iter().rev().copied().collect::<Vec<_>>() {
+            let fixture = self.fixtures[f].as_mut().unwrap();
+            for (aabb, proxy) in &mut fixture.proxies {
+                // The combine of two equal boxes is the box; the displacement is zero.
+                *aabb = fixture.shape.compute_aabb(&xf);
+                self.broad_phase.move_proxy(*proxy, aabb, xf.p - xf.p);
+            }
+        }
     }
 
     /// b2World::QueryAABB (180bb9c20) on a point's AABB: each overlapping proxy's fixture, in tree order.
@@ -773,6 +784,19 @@ impl World {
         }
     }
 
+    /// Collider2D::RecreateCollider's first pass (180c14750): both bodies of each of the body's contacts without
+    /// the 0x40 flag are woken.
+    pub fn wake_contact_bodies(&mut self, id: BodyId) {
+        for (_, c) in self.body(id).contacts.clone().into_iter().rev() {
+            let contact = self.contact(c);
+            if contact.flags & CONTACT_KEEP_DISABLED == 0 {
+                let (a, b) = (self.fixture(contact.fixture_a).body, self.fixture(contact.fixture_b).body);
+                self.body_mut(a).wake();
+                self.body_mut(b).wake();
+            }
+        }
+    }
+
     /// b2World::DestroyJoint (180bb9680).
     pub fn destroy_joint(&mut self, id: JointId) {
         let j = self.joints[id].take().unwrap();
@@ -830,7 +854,7 @@ impl World {
 
     /// Collider2D's refilter (180c14640): b2Fixture::Refilter (180bb9cd0) on each fixture, then the first fixture's
     /// body is woken and its contacts re-mix friction and restitution.
-    fn refilter_collider(&mut self, collider: i32) {
+    pub fn refilter_collider(&mut self, collider: i32) {
         let fixtures: Vec<FixtureId> = (0..self.fixtures.len()).filter(|&i| self.fixtures[i].as_ref().is_some_and(|f| f.collider.id == collider)).collect();
         for &f in &fixtures {
             let body = self.fixture(f).body;
