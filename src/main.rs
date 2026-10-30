@@ -8,6 +8,7 @@ mod integration;
 mod living;
 mod motor;
 mod physics;
+mod play;
 mod replay;
 mod unity;
 
@@ -88,6 +89,7 @@ fn run() -> Result<(), String> {
     let mut replay = None;
     let mut script = None;
     let mut looped = None;
+    let mut play = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -131,6 +133,13 @@ fn run() -> Result<(), String> {
             "--loop-test" => {
                 looped = Some(PathBuf::from(arguments.next().ok_or("--loop-test needs a PPG_DUMP recording")?));
             }
+            "--play-test" => {
+                play = Some(PathBuf::from(arguments.next().ok_or("--play-test needs a PPG_DUMP recording")?));
+                headless = true;
+            }
+            "--play" => {
+                play = Some(PathBuf::from(arguments.next().ok_or("--play needs a PPG_DUMP recording")?));
+            }
             "--script-test" => {
                 script = Some(PathBuf::from(arguments.next().ok_or("--script-test needs a PPG_DUMP recording")?));
             }
@@ -146,6 +155,12 @@ fn run() -> Result<(), String> {
     let cache = cache.canonicalize().map_err(|e| e.to_string())?;
     if let Some(recording) = replay {
         return replay::compare_motors(&rig, &recording);
+    }
+    if let Some(recording) = play {
+        if headless {
+            return play::test(&recording, &rig);
+        }
+        return play::run(&recording, rig, cache);
     }
     if let Some(dump) = script {
         return game::dump::script_test(&dump, &rig);
