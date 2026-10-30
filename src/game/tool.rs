@@ -110,7 +110,7 @@ fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// b2PolygonShape::TestPoint (180bb6060) and b2CircleShape::TestPoint (180bb5f20).
-fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -> bool {
+pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -> bool {
     let (s, c) = (xf.q.s, xf.q.c);
     match shape {
         Shape::Polygon(poly) => {

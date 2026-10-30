@@ -130,6 +130,29 @@ impl Game {
                     found[0] = true;
                     let f = v.get("DynamicSqrdVelocityThreshold").and_then(Value::f32).ok_or("Global.DynamicSqrdVelocityThreshold")?;
                     g.DynamicSqrdVelocityThreshold = f;
+                    let scrape = v.get("MetalScrapePrefab").and_then(Value::pptr).and_then(|p| db.resolve(s.game_object.file, p)).ok_or("Global.MetalScrapePrefab")?;
+                    let prefab = db.prefab(scrape)?;
+                    // Only ActivateIfFancyEffects has a message (Optout is a marker): its Awake draws Random.value
+                    // on each active object, and a childless object's SetActive skips no later Awake.
+                    let mut draws = 0;
+                    for (o, obj) in prefab.objects.iter().enumerate() {
+                        let mut active = obj.active;
+                        let mut up = obj.parent;
+                        while let Some(q) = up {
+                            active &= prefab.objects[q].active;
+                            up = prefab.objects[q].parent;
+                        }
+                        for (_, c) in &obj.components {
+                            let crate::assets::db::Component::Script { class, .. } = c else { continue };
+                            match class.as_str() {
+                                "Optout" => {}
+                                "ActivateIfFancyEffects" if !active => {}
+                                "ActivateIfFancyEffects" if obj.children.is_empty() => draws += 1,
+                                _ => unimplemented!("a {class} on Global.MetalScrapePrefab ({o}: {})", obj.name),
+                            }
+                        }
+                    }
+                    g.metal_scrape = Some((prefab.objects.iter().map(|o| 1 + o.components.len()).sum(), draws));
                 }
                 // VideoSettingsInitBehaviour.Start: Sync.
                 "VideoSettingsInitBehaviour" if s.runs => {

@@ -89,7 +89,7 @@ impl Shape {
     }
 
     /// b2PolygonShape::ComputeAABB (180bb2bc0) and b2CircleShape::ComputeAABB (180bb2ac0).
-    fn compute_aabb(&self, xf: &Transform) -> Aabb {
+    pub(crate) fn compute_aabb(&self, xf: &Transform) -> Aabb {
         match self {
             Shape::Circle(c) => {
                 let p = xf.apply(c.p);
@@ -725,8 +725,9 @@ impl World {
         self.joints[id].as_mut().unwrap().revolute_mut()
     }
 
-    /// The scene's ground body. Unity creates it with the scene; it never has fixtures, so making it on first use only
-    /// changes its id.
+    /// The scene's static ground body: the body of colliders without a Rigidbody2D and the anchor of a joint without
+    /// connectedBody. Unity creates it with the physics scene, before any other body (`load_scene_natives` does); made
+    /// on first use otherwise.
     pub fn ground_body(&mut self) -> BodyId {
         if let Some(id) = self.ground {
             return id;

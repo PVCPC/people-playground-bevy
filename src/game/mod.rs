@@ -843,6 +843,9 @@ pub struct Game {
     pub objects: HashMap<String, i32>,
     /// The id Object.Instantiate gives its next clone (ids go down by 2).
     pub next_instance_id: i32,
+    /// A clone of Global.MetalScrapePrefab: the instance ids it takes (objects and components) and the
+    /// Random.value draws its ActivateIfFancyEffects Awakes make; None when the scene was not loaded from data.
+    pub metal_scrape: Option<(usize, usize)>,
     /// Physics2DSettings.m_DefaultMaterial's (friction, bounciness); None without one.
     pub default_material2d: Option<(f32, f32)>,
 }

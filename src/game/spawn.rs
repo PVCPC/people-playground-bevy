@@ -6,9 +6,9 @@
 
 use super::*;
 use crate::assets::components::{ColliderShape, Joint2D as Joint2DData, JointKind as JointData, Rigidbody2D as RigidbodyData};
-use crate::assets::db::{Component, ObjRef, Prefab};
+use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
 use crate::b2::revolute::RevoluteDef;
-use crate::b2::shape::{box_collider_polygon, ColliderMatrix};
+use crate::b2::shape::{box_collider_polygon, Circle, ColliderMatrix};
 use crate::b2::weld::check_bodies;
 use crate::b2::world::{BodyDef, BodyId, BodyType, ColliderRef, FixtureDef, FixtureId, JointId, RigidbodyMass, RigidbodyRef, Shape};
 use crate::unity::transform::{global_position, global_rotation, local_to_world, lossy_scale, quaternion_to_matrix, Trs};
@@ -92,6 +92,45 @@ fn queue_index(c: Option<&Component>) -> usize {
         Some(Component::Other(198)) => 0xf,
         Some(_) => 0x10,
     }
+}
+
+/// level1's first instance id (its object 0): a scene object's id is this plus twice its index in the file.
+const LEVEL1_FIRST_ID: i32 = 66952;
+
+/// The Main scene's Physics2D natives: the ToolController's body and every scene hierarchy that holds
+/// Physics2D components (root first, loaded ids), for `set_active` and the scripts' references.
+pub struct SceneNatives {
+    pub tool_body: BodyId,
+    pub roots: Vec<Instance>,
+}
+
+/// A scene GameObject's Transform.
+fn scene_transform(db: &AssetDb, go: ObjRef) -> Result<crate::assets::classes::Transform, String> {
+    let g = db.game_object(go)?;
+    let t = g.components.iter().filter_map(|&c| db.resolve(go.file, c)).find(|&c| matches!(db.class(c), 4 | 224)).ok_or_else(|| format!("{}: no Transform", g.name))?;
+    crate::assets::classes::Transform::read(db.data(t))
+}
+
+/// Whether a hierarchy holds a Rigidbody2D, Collider2D or Joint2D on an object active in it.
+fn has_physics(db: &AssetDb, go: ObjRef) -> Result<bool, String> {
+    let g = db.game_object(go)?;
+    if !g.active {
+        return Ok(false);
+    }
+    for c in g.components.iter().filter_map(|&c| db.resolve(go.file, c)) {
+        let class = db.class(c);
+        if class == 50 || crate::assets::components::Collider2D::CLASSES.contains(&class) || crate::assets::components::Joint2D::CLASSES.contains(&class) {
+            return Ok(true);
+        }
+    }
+    for child in scene_transform(db, go)?.children {
+        let t = db.resolve(go.file, child).ok_or("unresolved child transform")?;
+        let child_go = db.resolve(go.file, crate::assets::classes::Transform::read(db.data(t))?.game_object).ok_or("child without GameObject")?;
+        if has_physics(db, child_go)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 impl Instance {
@@ -220,10 +259,18 @@ impl Game {
     /// (1809112c0) wakes them: sorted by SortBehaviourItemByExecutionOrderAndReverseInstanceID (180915860),
     /// script execution order first, then the higher clone id.
     pub fn instantiate_native(&mut self, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> (Instance, Vec<(usize, usize)>) {
+        let inst = self.clone_prefab(prefab, position, rotation, |g, o| (g.allocate_instance_id(), o.components.iter().map(|_| g.allocate_instance_id()).collect()));
+        let mut insts = [inst];
+        let behaviours = self.awake_instances(&mut insts, original_ids).pop().unwrap();
+        let [inst] = insts;
+        (inst, behaviours)
+    }
+
+    /// The clones of `prefab`, with the ids `ids` gives each object (GameObject id, component ids).
+    fn clone_prefab(&mut self, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], mut ids: impl FnMut(&mut Game, &PrefabObject) -> (i32, Vec<i32>)) -> Instance {
         let mut inst = Instance { prefab: std::rc::Rc::new(prefab.clone()), ..Default::default() };
         for (i, o) in prefab.objects.iter().enumerate() {
-            let game_object = self.allocate_instance_id();
-            let components = o.components.iter().map(|_| self.allocate_instance_id()).collect();
+            let (game_object, components) = ids(self, o);
             let Some((_, Component::Transform(t))) = o.components.first() else { panic!("{}: first component not a Transform", o.name) };
             let v3 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
             let mut trs = Trs { t: v3(t.local_position), q: t.local_rotation, s: v3(t.local_scale) };
@@ -239,37 +286,84 @@ impl Game {
         // interest, so the clones start with none and nothing changed.
         inst.interest = vec![0; inst.objects.len()];
         inst.changed = vec![0; inst.objects.len()];
+        inst
+    }
+
+    /// The AwakeFromLoadQueue of `insts` together: queues 0..0x13 (every native component) in one pass, each
+    /// queue in the order of the originals' ids. Returns each instance's queue 0x14 MonoBehaviours.
+    fn awake_instances(&mut self, insts: &mut [Instance], original_ids: &HashMap<ObjRef, i32>) -> Vec<Vec<(usize, usize)>> {
         // The remap: every original (GameObject and component) with its clone, sorted by original id.
-        let mut items: Vec<(i32, usize, Option<usize>)> = Vec::new();
-        for (i, o) in prefab.objects.iter().enumerate() {
-            items.push((original_ids[&o.game_object], i, None));
-            for (c, (r, _)) in o.components.iter().enumerate() {
-                items.push((original_ids[r], i, Some(c)));
+        let mut items: Vec<(i32, usize, usize, Option<usize>)> = Vec::new();
+        for (n, inst) in insts.iter().enumerate() {
+            for (i, o) in inst.prefab.objects.iter().enumerate() {
+                items.push((original_ids[&o.game_object], n, i, None));
+                for (c, (r, _)) in o.components.iter().enumerate() {
+                    items.push((original_ids[r], n, i, Some(c)));
+                }
             }
         }
         items.sort_by_key(|x| x.0);
-        let mut queues: Vec<Vec<(usize, Option<usize>)>> = vec![Vec::new(); 0x15];
-        for &(_, o, c) in &items {
-            queues[queue_index(c.map(|c| &prefab.objects[o].components[c].1))].push((o, c));
+        let mut queues: Vec<Vec<(usize, usize, Option<usize>)>> = vec![Vec::new(); 0x15];
+        for &(_, n, o, c) in &items {
+            queues[queue_index(c.map(|c| &insts[n].prefab.objects[o].components[c].1))].push((n, o, c));
         }
         for items in &queues[..0x14] {
-            for &(o, c) in items {
+            for &(n, o, c) in items {
                 let Some(c) = c else { continue };
+                let prefab = insts[n].prefab.clone();
                 match &prefab.objects[o].components[c].1 {
-                    Component::Rigidbody2D(rb) => self.rigidbody2d_awake(&mut inst, prefab, o, c, rb),
-                    Component::Collider2D(_) => self.collider2d_awake(&mut inst, prefab, o, c),
-                    Component::Joint2D(j) => self.joint2d_awake(&mut inst, prefab, o, c, j),
+                    Component::Rigidbody2D(rb) => self.rigidbody2d_awake(&mut insts[n], &prefab, o, c, rb),
+                    Component::Collider2D(_) => self.collider2d_awake(&mut insts[n], &prefab, o, c),
+                    Component::Joint2D(j) => self.joint2d_awake(&mut insts[n], &prefab, o, c, j),
                     // Transform, SpriteRenderer and the unread classes make no physics state.
                     _ => {}
                 }
             }
         }
-        let mut behaviours: Vec<(usize, usize)> = queues[0x14].iter().map(|&(o, c)| (o, c.unwrap())).collect();
-        behaviours.sort_by_key(|&(o, c)| {
-            let Component::Script { execution_order, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
-            (*execution_order, std::cmp::Reverse(inst.objects[o].components[c]))
-        });
-        (inst, behaviours)
+        insts
+            .iter()
+            .enumerate()
+            .map(|(n, inst)| {
+                let mut behaviours: Vec<(usize, usize)> = queues[0x14].iter().filter(|q| q.0 == n).map(|&(_, o, c)| (o, c.unwrap())).collect();
+                behaviours.sort_by_key(|&(o, c)| {
+                    let Component::Script { execution_order, .. } = &inst.prefab.objects[o].components[c].1 else { unreachable!() };
+                    (*execution_order, std::cmp::Reverse(inst.objects[o].components[c]))
+                });
+                behaviours
+            })
+            .collect()
+    }
+
+    /// SceneManager.LoadScene("Main") up to its native AwakeFromLoad: the Rigidbody2Ds and Collider2Ds of the
+    /// scene's hierarchies, all in one AwakeFromLoadQueue in the order of their loaded ids (the scene's first id
+    /// plus twice the object's index in the file). Everything here exists before the first MonoBehaviour's Awake
+    /// (MapLoaderBehaviour.Awake instantiates the map after it).
+    pub fn load_scene_natives(&mut self, db: &mut AssetDb) -> Result<SceneNatives, String> {
+        let file = db.file_index("level1").ok_or("no level1")?;
+        // The scene's PhysicsScene2D, made first, owns the static ground body the body-less colliders go on.
+        self.world.ground_body();
+        let index: HashMap<i64, i32> = db.files[file].objects.iter().enumerate().map(|(i, o)| (o.path_id, i as i32)).collect();
+        let id = |r: ObjRef| LEVEL1_FIRST_ID + 2 * index[&r.path_id];
+        let gos: Vec<i64> = db.files[file].objects.iter().filter(|o| o.class_id == 1).map(|o| o.path_id).collect();
+        let mut roots = Vec::new();
+        let mut original_ids = HashMap::new();
+        for path_id in gos {
+            let go = ObjRef { file, path_id };
+            if !scene_transform(db, go)?.father.is_null() || !has_physics(db, go)? {
+                continue;
+            }
+            let prefab = db.prefab(go)?;
+            for o in &prefab.objects {
+                original_ids.insert(o.game_object, id(o.game_object));
+                original_ids.extend(o.components.iter().map(|&(r, _)| (r, id(r))));
+            }
+            let t = scene_transform(db, go)?;
+            roots.push(self.clone_prefab(&prefab, t.local_position, t.local_rotation, |_, o| (id(o.game_object), o.components.iter().map(|&(r, _)| id(r)).collect())));
+        }
+        self.awake_instances(&mut roots, &original_ids);
+        let tool = roots.iter().find(|r| r.prefab.objects[0].name == "ToolController").ok_or("level1 has no ToolController with Physics2D components")?;
+        let tool_body = *tool.bodies.get(&0).ok_or("the ToolController has no Rigidbody2D body")?;
+        Ok(SceneNatives { tool_body, roots })
     }
 
     /// Instantiate's id allocation: each new object takes the next id below the last.
@@ -594,6 +688,15 @@ impl Game {
                 }
                 box_collider_polygon(V::new(col.offset[0], col.offset[1]), V::new(size[0], size[1]), *edge_radius, &matrix).map(Shape::Polygon).into_iter().collect()
             }
+            // CircleCollider2D::PrepareShapes (180c13210): the offset through the matrix, and the radius times the
+            // larger absolute lossy scale axis, clamped to 0.0001..1e6.
+            ColliderShape::Circle { radius } => {
+                let s = inst.lossy_scale(o);
+                let scale = if s[1].abs() > s[0].abs() { s[1].abs() } else { s[0].abs() };
+                let r = scale * radius;
+                let r = if r <= 0.0001 { 0.0001 } else { f32::min(1e6, r) };
+                vec![Shape::Circle(Circle { radius: r, p: matrix.apply(V::new(col.offset[0], col.offset[1])) })]
+            }
             other => unimplemented!("Collider2D::PrepareShapes for {other:?}"),
         };
         if shapes.is_empty() {
@@ -792,7 +895,6 @@ impl Game {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::assets::db::AssetDb;
     use crate::assets::mono::Value;
 
     /// Every rewritten script on the Person prefab loads its serialized fields; prints the runtime-only ones.
@@ -980,10 +1082,11 @@ pub(crate) mod tests {
                 let fx = g.world.fixtures[fixtures[0]].as_ref().unwrap();
                 let (gf, gs) = (word("fixture"), word("shape"));
                 let md = fx.mass_data;
-                // Friction and restitution come from the scripts' materials; the filter word's top byte is padding.
-                let mut ours_f = [md.mass, md.center.x, md.center.y, md.inertia, md.area, fx.density].map(f32::to_bits).to_vec();
+                // The filter word's top byte is padding. Friction and restitution are the scripts' materials: a
+                // person's are not applied here.
+                let mut ours_f = [md.mass, md.center.x, md.center.y, md.inertia, md.area, fx.density, fx.friction, fx.restitution].map(f32::to_bits).to_vec();
                 ours_f.extend([fx.filter.category_bits as u32 | (fx.filter.mask_bits as u32) << 16, fx.filter.group_index as u16 as u32 | (fx.is_sensor as u32) << 16]);
-                let game_f: Vec<u32> = gf[..6].iter().copied().chain([gf[9], gf[10] & 0xff_ffff]).collect();
+                let game_f: Vec<u32> = gf[..8].iter().copied().chain([gf[9], gf[10] & 0xff_ffff]).collect();
                 if full && game_f != ours_f {
                     out.push(format!("{fname} fixture: game {game_f:08x?} ours {ours_f:08x?}"));
                 }
@@ -1087,6 +1190,8 @@ pub(crate) mod tests {
         let prefab = db.prefab(map.unwrap()).unwrap();
         let mut g = Game::default();
         g.world = World::new(V::new(-0.0, -9.81));
+        // LoadScene's natives come first: the ToolController's body and the two resize handles' fixtures.
+        let mut scene = g.load_scene_natives(&mut db).unwrap();
         // The recorded clone of the map root: its GameObject is the first id.
         g.next_instance_id = -12588;
         let (mut inst, _) = g.instantiate_native(&prefab, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &db.resource_load_order().unwrap());
@@ -1094,22 +1199,117 @@ pub(crate) mod tests {
         // ActivateIfTutorial.Awake: SetActive(UserPreferenceManager.Current.ShowTutorial), off in the recording.
         let tutorial = prefab.objects.iter().position(|o| o.name == "tutorial").unwrap();
         g.set_active(&mut inst, tutorial, false);
+        // PhysicalBehaviour.Start -> SetProperties: rigidbody.sharedMaterial = Properties.PhysicMaterial (the prefab
+        // Rigidbodies have none), whose friction and bounciness Rigidbody2D::SetMaterial gives the body's fixtures.
+        for (o, ob) in prefab.objects.iter().enumerate() {
+            for (_, c) in &ob.components {
+                let Component::Script { class, fields, .. } = c else { continue };
+                let (true, Some(&b)) = (class == "PhysicalBehaviour", inst.bodies.get(&o)) else { continue };
+                let props = db.resolve(ob.game_object.file, fields.get("Properties").and_then(Value::pptr).unwrap()).unwrap();
+                let (_, _, props) = db.mono(props).unwrap().unwrap();
+                let material = db.resolve(ob.game_object.file, props.get("PhysicMaterial").and_then(Value::pptr).unwrap()).map(|m| crate::assets::components::PhysicsMaterial2D::read(db.data(m)).unwrap());
+                if let Some(m) = material {
+                    for f in g.world.body(b).fixtures.clone() {
+                        let fixture = g.world.fixtures[f].as_mut().unwrap();
+                        (fixture.friction, fixture.restitution) = (m.friction, m.bounciness);
+                    }
+                }
+            }
+        }
+        // ResizeHandles.Update (the first frame): no targets, SetActive(false).
+        let handles = scene.roots.iter_mut().find(|r| r.prefab.objects[0].name == "Resizing handles").unwrap();
+        g.set_active(handles, 0, false);
         // The recorded snapshot is long after the first steps: Solve clears the created-asleep flag, and an awake
         // kinematic body's sweep angle becomes angle + dt * 0, then so does its previous angle.
         for _ in 0..2 {
             g.world.step(0.02, 32, 32);
         }
         let mut out = Vec::new();
-        let ours: Vec<String> = g.world.body_list.iter().rev().map(|&b| body_name(&inst, &prefab, b)).collect();
+        let tool = scene.roots.iter().find(|r| r.bodies.values().any(|&b| b == scene.tool_body)).unwrap();
+        let name = |b: BodyId| match b {
+            b if Some(b) == g.world.ground => "ground".to_string(),
+            b if b == scene.tool_body => body_name(tool, &tool.prefab, b),
+            b => body_name(&inst, &prefab, b),
+        };
+        let ours: Vec<String> = g.world.body_list.iter().rev().map(|&b| name(b)).collect();
         let world = first.of("b2World").next().unwrap();
         let theirs: Vec<&str> = world.get("bodies").unwrap().split(';').filter(|n| ours.iter().any(|o| o == n)).collect();
         if theirs != ours {
             out.push(format!("bodies: game {theirs:?} ours {ours:?}"));
         }
         compare_bodies(&g, &inst, &prefab, &first, true, &mut out);
-        // Open: the game's tree has two other leaves (ids 0, 1) inserted before the Light's, so every proxy id is
-        // 2 leaf slots higher; the collider creation order of the Tutorial Displays is not yet known.
-        out.retain(|l| !l.contains("proxy id:"));
+        compare_bodies(&g, tool, &tool.prefab, &first, true, &mut out);
+        assert!(out.is_empty(), "{} mismatches:
+{}", out.len(), out.join("
+"));
+    }
+
+    /// The broad-phase leaf ids the scene's, the map's and the two removals leave free: the knife and the person
+    /// spawned after them take the game's recorded proxy ids.
+    #[test]
+    fn spawned_proxy_ids_follow_scene_and_map() {
+        let Some((_, _, person, mut db, first)) = spawn_recorded("dump26stabhead2") else { return };
+        let mut map = None;
+        let mut knife = None;
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, cat) = db.mono(catalog).unwrap().unwrap();
+        for item in cat.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, sp) = db.mono(asset).unwrap().unwrap();
+            if let Some(p) = sp.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) {
+                if db.game_object(p).unwrap().name == "Knife" {
+                    knife = Some(p);
+                }
+            }
+        }
+        for m in db.find_scripts("Map").unwrap() {
+            let (_, _, v) = db.mono(m).unwrap().unwrap();
+            let p = v.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(m.file, p)).unwrap();
+            if db.game_object(p).unwrap().name == "Default map" {
+                map = Some(p);
+            }
+        }
+        let (map, knife) = (db.prefab(map.unwrap()).unwrap(), db.prefab(knife.unwrap()).unwrap());
+        let ids = db.resource_load_order().unwrap();
+        let mut g = Game::default();
+        g.world = World::new(V::new(-0.0, -9.81));
+        let mut scene = g.load_scene_natives(&mut db).unwrap();
+        g.next_instance_id = -12588;
+        let (mut m, _) = g.instantiate_native(&map, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
+        let tutorial = map.objects.iter().position(|o| o.name == "tutorial").unwrap();
+        g.set_active(&mut m, tutorial, false);
+        g.set_active(scene.roots.iter_mut().find(|r| r.prefab.objects[0].name == "Resizing handles").unwrap(), 0, false);
+        // The recorded knife collider is -62000; the clones' ids descend in pre-order, each GameObject first.
+        let mut pos = 0;
+        'find: for o in &knife.objects {
+            pos += 1;
+            for (_, c) in &o.components {
+                if matches!(c, Component::Collider2D(_)) {
+                    break 'find;
+                }
+                pos += 1;
+            }
+        }
+        g.next_instance_id = -62000 + 2 * pos;
+        let (k, _) = g.instantiate_native(&knife, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
+        let root = first.of("TransformChain").find(|r| r.name == "Human").unwrap();
+        g.next_instance_id = root.id + 2;
+        let (p, _) = g.instantiate_native(&person, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
+        let mut out = Vec::new();
+        for (inst, prefab) in [(&k, &knife), (&p, &person)] {
+            for (&(o, c), f) in &inst.fixtures {
+                let name = format!("{}#{}:0", prefab.objects[o].name.replace(' ', "_"), inst.objects[o].components[c]);
+                let Some(rec) = first.of("b2Fixture").find(|r| r.name == name) else {
+                    out.push(format!("{name}: no b2Fixture"));
+                    continue;
+                };
+                let ours = g.world.fixtures[f[0]].as_ref().unwrap().proxies[0].1.to_string();
+                let game = rec.get("proxies").unwrap().split_once(',').unwrap().0;
+                if game != ours {
+                    out.push(format!("{name}: game {game} ours {ours}"));
+                }
+            }
+        }
         assert!(out.is_empty(), "{} mismatches:
 {}", out.len(), out.join("
 "));

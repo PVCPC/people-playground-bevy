@@ -408,7 +408,8 @@ pub trait ShatterHost {
     fn add_fixed_joint(&mut self, shard: usize, connect_to: usize, frequency: f32, break_force: f32);
 }
 
-fn v2_distance(a: Vec2, b: Vec2) -> f32 {
+/// Vector2.Distance
+pub fn v2_distance(a: Vec2, b: Vec2) -> f32 {
     let (x, y) = (a[0] - b[0], a[1] - b[1]);
     (d(x) * x + d(y) * y).0.sqrt() as f32
 }

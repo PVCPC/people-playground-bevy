@@ -175,8 +175,11 @@ impl Game {
         for o in (0..n).filter(|o| inst.bodies.contains_key(o)) {
             let mut p = inst.objects[o].parent;
             while let Some(t) = p {
-                if inst.bodies.contains_key(&t) {
-                    return Err(format!("{}: a body under a body", prefab.objects[o].name));
+                // A static body never moves in the simulation, so its Transform serves as a plain node (the
+                // Default map's walls under Root).
+                let static_body = prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(rb) if rb.body_type == 2));
+                if inst.bodies.contains_key(&t) && !static_body {
+                    return Err(format!("{}: a body under a non-static body", prefab.objects[o].name));
                 }
                 if l.arenas.node.contains_key(&t) {
                     break;
@@ -234,6 +237,10 @@ impl Game {
             // GameObject.isStatic: player data carries no static editor flags.
             p.isStatic = false;
             p.colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, x))| matches!(x, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+            p.collider_defs = prefab.objects[o].components.iter().filter_map(|(_, x)| match x {
+                Component::Collider2D(c) => Some(c.clone()),
+                _ => None,
+            }).collect();
             p.all_colliders = p.colliders.clone();
             p.all_colliders.sort_by(|a, b| b.cmp(a));
             p.Properties = match db.resolve(file, field(v, "Properties")?.pptr().ok_or("Properties")?) {
@@ -383,9 +390,12 @@ impl Game {
         }
         // LimbBehaviour.Awake's GetOrAddComponent<GForceMeasureBehaviour>() adds the ones the prefab lacks; the
         // arena keeps the limb index only if the prefab has all or none.
+        // Stored by ascending instance id, as a recording lists them.
         let mut map_lights = HashMap::new();
-        for o in 0..n {
-            let Some((_, _, v)) = script(prefab, o, "MapLightBehaviour") else { continue };
+        let mut lights: Vec<(i32, usize)> = (0..n).filter_map(|o| script(prefab, o, "MapLightBehaviour").map(|(c, _, _)| (inst.objects[o].components[c], o))).collect();
+        lights.sort();
+        for (_, o) in lights {
+            let (_, _, v) = script(prefab, o, "MapLightBehaviour").unwrap();
             let mut m = MapLight::default();
             load_values(m.fields(), v)?;
             // A serialized array is never null.
@@ -472,11 +482,13 @@ impl Game {
     /// The Starts are queued: Unity runs them in the spawn frame, PersonBehaviour's before its LateUpdate and the
     /// rest after the LateUpdate phase (`update_scripts`). The b2 bodies see PersonBehaviour.Awake's rescale at the
     /// next SyncTransforms.
-    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4]) -> Result<(Instance, Linked), String> {
+    /// `parent_audio` is the PlayAudioAtRandom of the parent the clone goes under (`ambient_audio`).
+    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], parent_audio: Option<usize>) -> Result<(Instance, Linked), String> {
         let original_ids = db.resource_load_order()?;
         let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, &original_ids);
         let first = self.physicals.len();
-        let linked = self.link_instance(db, prefab, &inst)?;
+        let mut linked = self.link_instance(db, prefab, &inst)?;
+        linked.parent_audio = parent_audio;
         // GetHashCode (Random.InitState in PhysicalBehaviour.Start) is Mono's object hash, (address >> 3) *
         // 0x9e3779b1 (mono_object_hash, 180116520), of a managed heap address that differs per run in the game too.
         // A PhysicalBehaviour is a Boehm large object, 2048-aligned (every recorded hash has a zero low byte).
@@ -485,7 +497,7 @@ impl Game {
             self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
-        self.queue_starts(prefab, &inst, &linked, &behaviours)?;
+        self.queue_starts(db, prefab, &inst, &linked, &behaviours)?;
         Ok((inst, linked))
     }
 
@@ -494,13 +506,37 @@ impl Game {
     /// and GoreStringBehaviour only read components; MapConfig, MapLightBehaviour and WindControllerBehaviour
     /// only fetch components), and none of these scripts has OnEnable.
     pub fn awake_behaviours(&mut self, prefab: &Prefab, inst: &mut Instance, linked: &Linked, order: &[(usize, usize)]) {
+        // The behaviours whose OnEnable has run (awake and enabled), for OnDisable.
+        let mut enabled_behaviours = std::collections::HashSet::new();
         for &(o, c) in order {
             if !inst.objects[o].active {
                 continue;
             }
-            let Component::Script { class, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            let Component::Script { class, enabled, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            if *enabled {
+                enabled_behaviours.insert((o, c));
+            }
             let limb = || linked.limbs[&o];
             match class.as_str() {
+                // SetActive(ShowTutorial); a tutorial left active clears the preference.
+                "ActivateIfTutorial" if self.prefs.ShowTutorial => self.prefs.ShowTutorial = false,
+                "ActivateIfTutorial" => {
+                    for (d, k) in self.set_active(inst, o, false) {
+                        if !enabled_behaviours.remove(&(d, k)) {
+                            continue;
+                        }
+                        let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+                        match class.as_str() {
+                            "PhysicalBehaviour" => self.physical_on_disable(linked.physicals[&d]),
+                            // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
+                            "ActivateIfTutorial" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
+                            _ => unimplemented!("{class}.OnDisable"),
+                        }
+                    }
+                    for (&d, &p) in &linked.physicals {
+                        self.physicals[p].active = inst.objects[d].active;
+                    }
+                }
                 "PersonBehaviour" => {
                     if let Some(s) = self.person_awake(linked.person.unwrap()) {
                         inst.set_local_scale(0, s);
@@ -523,7 +559,7 @@ impl Game {
     /// LateUpdate). Each PhysicalBehaviour's `hash_code` must be set by then: Random.InitState(GetHashCode()) takes
     /// Mono's object hash. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts only
     /// touch rendering, event subscriptions and the stat manager.
-    pub fn queue_starts(&mut self, prefab: &Prefab, inst: &Instance, linked: &Linked, order: &[(usize, usize)]) -> Result<(), String> {
+    pub fn queue_starts(&mut self, db: &mut AssetDb, prefab: &Prefab, inst: &Instance, linked: &Linked, order: &[(usize, usize)]) -> Result<(), String> {
         use super::misc::PendingStart;
         for &(o, c) in order {
             let Component::Script { class, fields: v, enabled, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
@@ -550,11 +586,16 @@ impl Game {
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {
+                    let file = prefab.objects[o].game_object.file;
+                    let mut weather = Vec::new();
                     for prefab_field in ["SnowPrefab", "RainPrefab", "FogPrefab", "LightningCreatorPrefab"] {
-                        if field(v, prefab_field)?.pptr().is_some_and(|p| !p.is_null()) {
-                            unimplemented!("MapConfig.Reinitialise with a {prefab_field}");
-                        }
+                        let p = field(v, prefab_field)?.pptr().ok_or(prefab_field)?;
+                        weather.push(match p.is_null() {
+                            true => None,
+                            false => Some(std::sync::Arc::new(db.prefab(db.resolve(file, p).ok_or_else(|| format!("{prefab_field} outside the data"))?)?)),
+                        });
                     }
+                    let lightning = weather.pop().unwrap();
                     // Awake's GetComponent<BoundingBoxBehaviour>().
                     let (_, _, b) = script(prefab, o, "BoundingBoxBehaviour").ok_or("MapConfig without a BoundingBoxBehaviour")?;
                     let ambience = field(v, "Ambience")?;
@@ -565,6 +606,10 @@ impl Game {
                         ambience: field(v, "OverrideAmbientSounds")?.bool().ok_or("OverrideAmbientSounds")?.then(|| -> Result<_, String> { Ok((float(ambience, "Chance")?, array(ambience, "Clips")?.len())) }).transpose()?,
                         gravity: float(settings, "Gravity")?,
                         ambient_temperature: float(settings, "Ambient_temperature")?,
+                        lightning_chance: float(settings, "Lightning_chance")?,
+                        weather,
+                        lightning,
+                        original_ids: std::sync::Arc::new(db.resource_load_order()?),
                     })
                 }
                 _ => continue,
@@ -674,7 +719,7 @@ mod tests {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
-        g.queue_starts(&prefab, &inst, &linked, &order).unwrap();
+        g.queue_starts(&mut db, &prefab, &inst, &linked, &order).unwrap();
         g.run_pending_starts();
         assert!(g.physicals.iter().all(|p| p.in_world));
         // The first frame's render: OnWillRenderObject fills the blood colour caches.

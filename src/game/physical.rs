@@ -141,6 +141,9 @@ script! {
         colliders: Vec<i32> = Vec::new(),
         /// Every Collider2D on the GameObject (triggers too), as GetComponentsInChildren<Collider2D> sees them.
         all_colliders: Vec<i32> = Vec::new(),
+        /// The serialized Collider2Ds behind `colliders` (BakeColliderGridPoints reads their geometry); empty for
+        /// physicals loaded from a recording.
+        collider_defs: Vec<crate::assets::components::Collider2D> = Vec::new(),
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
@@ -317,11 +320,147 @@ impl Game {
             *g = [g[0] + c[0] * 0.02, g[1] + c[1] * 0.02];
         }
         if self.physicals[p].Circumference < 0.0 {
-            unimplemented!("PhysicalBehaviour.CalculateCircumference");
+            self.physical_calculate_circumference(p);
         }
+        // Instantiate(Global.main.MetalScrapePrefab, transform): a particle effect for OnCollisionStay to play.
+        // Only its instance ids and its ActivateIfFancyEffects Awakes reach the simulation (load_main checks):
+        // SetActive(Chance > Random.value && FancyEffects) on childless flash objects.
         if self.properties[self.physicals[p].Properties].SparksOnSlide {
-            unimplemented!("PhysicalBehaviour.Start: Instantiate(MetalScrapePrefab)");
+            let (n, draws) = self.metal_scrape.unwrap_or_else(|| unimplemented!("PhysicalBehaviour.Start: MetalScrapePrefab outside a scene loaded from data"));
+            for _ in 0..n {
+                self.allocate_instance_id();
+            }
+            for _ in 0..draws {
+                self.random.value();
+            }
         }
+    }
+
+    /// PhysicalBehaviour.CalculateCircumference: the perimeter of LocalColliderGridPoints' convex hull
+    /// (Utils.ComputeConvexHull sorts the points in place).
+    fn physical_calculate_circumference(&mut self, p: usize) {
+        let ph = &mut self.physicals[p];
+        if ph.LocalColliderGridPoints.as_ref().unwrap().is_empty() {
+            let baked = self.physical_bake_collider_grid_points(p);
+            self.physicals[p].LocalColliderGridPoints = Some(baked);
+        }
+        let ph = &mut self.physicals[p];
+        let points = ph.LocalColliderGridPoints.as_mut().unwrap();
+        if points.is_empty() {
+            ph.Circumference = 0.0;
+            return;
+        }
+        let mut hull = Vec::new();
+        super::shatter::compute_convex_hull(points, &mut hull);
+        let mut num = 0.0f32;
+        for i in 0..hull.len() {
+            num += super::shatter::v2_distance(hull[i], hull[(i + 1) % hull.len()]);
+        }
+        ph.Circumference = num;
+    }
+
+    /// Collider2D.bounds (Collider2D::GetBounds, 180c11150): the union of the shapes' AABBs (ComputeAABB with the
+    /// radius) as center and extents, z from the Transform. The AutoSyncTransforms it starts with finds nothing
+    /// to sync: the rewrite moves bodies and transforms together.
+    fn collider_bounds(&self, p: usize, collider: i32) -> ([f32; 3], [f32; 3]) {
+        let body = self.world.body(self.physicals[p].rigidbody.body);
+        let mut aabb: Option<crate::b2::broadphase::Aabb> = None;
+        for &f in &body.fixtures {
+            let fx = self.world.fixture(f);
+            if fx.collider.id != collider {
+                continue;
+            }
+            let a = fx.shape.compute_aabb(&body.xf);
+            aabb = Some(match aabb {
+                None => a,
+                Some(b) => crate::b2::broadphase::Aabb {
+                    lower: crate::b2::math::Vec2::new(b.lower.x.min(a.lower.x), b.lower.y.min(a.lower.y)),
+                    upper: crate::b2::math::Vec2::new(b.upper.x.max(a.upper.x), b.upper.y.max(a.upper.y)),
+                },
+            });
+        }
+        let Some(a) = aabb else { unimplemented!("Collider2D.bounds of a collider without shapes") };
+        let z = self.physicals[p].transform.position[2];
+        ([(a.upper.x + a.lower.x) * 0.5, (a.upper.y + a.lower.y) * 0.5, z], [(a.upper.x - a.lower.x) * 0.5, (a.upper.y - a.lower.y) * 0.5, 0.0])
+    }
+
+    /// Collider2D.OverlapPoint (180c12440): any of the collider's shapes contains the point.
+    fn collider_overlap_point(&self, p: usize, collider: i32, point: [f32; 2]) -> bool {
+        let body = self.world.body(self.physicals[p].rigidbody.body);
+        body.fixtures.iter().map(|&f| self.world.fixture(f)).filter(|fx| fx.collider.id == collider).any(|fx| super::tool::test_point(&fx.shape, &body.xf, crate::b2::math::Vec2::new(point[0], point[1])))
+    }
+
+    /// PhysicalBehaviour.BakeColliderGridPoints: a (GridRes + 1)^2 grid over the non-trigger colliders' bounds
+    /// (shrunk by 0.999), keeping the points inside a collider and at least 0.025 from every earlier grid point,
+    /// in local space; then each collider's outline points.
+    fn physical_bake_collider_grid_points(&self, p: usize) -> Vec<[f32; 2]> {
+        use crate::assets::components::ColliderShape;
+        let ph = &self.physicals[p];
+        if ph.collider_defs.len() != ph.colliders.len() {
+            unimplemented!("{}: BakeColliderGridPoints without the serialized colliders", ph.name);
+        }
+        // Bounds(position, zero), Encapsulate(collider.bounds) each: Encapsulate(center - extents) and
+        // Encapsulate(center + extents), each SetMinMax(Min(min, point), Max(max, point)).
+        let (mut center, mut extents) = (ph.transform.position, [0.0f32; 3]);
+        let mut encapsulate = |point: [f32; 3]| {
+            let min: [f32; 3] = std::array::from_fn(|i| super::mathf::min(center[i] - extents[i], point[i]));
+            let max: [f32; 3] = std::array::from_fn(|i| super::mathf::max(center[i] + extents[i], point[i]));
+            extents = std::array::from_fn(|i| (max[i] - min[i]) * 0.5);
+            center = std::array::from_fn(|i| min[i] + extents[i]);
+        };
+        // GetComponents<Collider2D>() where !isTrigger.
+        let colls: Vec<(i32, &crate::assets::components::Collider2D)> = ph.colliders.iter().copied().zip(&ph.collider_defs).filter(|(_, c)| !c.is_trigger).collect();
+        for &(c, _) in &colls {
+            let (bc, be) = self.collider_bounds(p, c);
+            encapsulate(std::array::from_fn(|i| bc[i] - be[i]));
+            encapsulate(std::array::from_fn(|i| bc[i] + be[i]));
+        }
+        // bounds.size *= 0.999f
+        extents = extents.map(|e| e * 2.0 * 0.999 * 0.5);
+        let size = extents.map(|e| e * 2.0);
+        let num2 = ph.GridRes.max(1);
+        let step = [size[0] / num2 as f32, size[1] / num2 as f32];
+        let min = [center[0] - extents[0], center[1] - extents[1]];
+        let mut list = Vec::new();
+        let mut seen: Vec<[f32; 2]> = Vec::new();
+        for num3 in 0..num2 + 1 {
+            for num4 in 0..num2 + 1 {
+                let pos = [min[0] + num4 as f32 * step[0], min[1] + num3 as f32 * step[1]];
+                if seen.iter().any(|&q| super::shatter::v2_distance(q, pos) < 0.025) {
+                    continue;
+                }
+                seen.push(pos);
+                if colls.iter().any(|&(c, _)| self.collider_overlap_point(p, c, pos)) {
+                    let l = self.inverse_transform_point(p, [pos[0], pos[1], 0.0]);
+                    list.push([l[0], l[1]]);
+                }
+            }
+        }
+        for &(_, c) in &colls {
+            let o = c.offset;
+            match &c.shape {
+                ColliderShape::Polygon { paths, .. } => list.extend(paths.first().into_iter().flatten().map(|q| [q[0] + o[0], q[1] + o[1]])),
+                ColliderShape::Box { size, .. } => {
+                    let h = [size[0] / 2.0, size[1] / 2.0];
+                    list.push([h[0] + o[0], h[1] + o[1]]);
+                    list.push([(0.0 - h[0]) + o[0], h[1] + o[1]]);
+                    list.push([(0.0 - h[0]) + o[0], (0.0 - h[1]) + o[1]]);
+                    list.push([h[0] + o[0], (0.0 - h[1]) + o[1]]);
+                }
+                ColliderShape::Circle { radius } => {
+                    let pi = std::f32::consts::PI;
+                    let n = ((d(pi) * 2.0f32 * *radius / 0.25f32).f() as f64).ceil() as i32;
+                    let n = n.clamp(6, 32);
+                    for i in 0..n {
+                        let f = (d(pi) * 2.0f32 * ((d(i as f32) / n as f32).f() - 1.0)).f();
+                        let v = [((f as f64).cos() as f32) * radius, ((f as f64).sin() as f32) * radius];
+                        list.push([v[0] + o[0], v[1] + o[1]]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        list
     }
 
     /// PhysicalBehaviour.RecalculateMassBasedOnSize
@@ -1171,14 +1310,18 @@ impl Game {
             let g = &mut self.gforces[l];
             (g.acceleration, g.sustainedAcceleration, g.velocity, g.velocityLastFrame) = ([0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2]);
         }
-        // PhysicalBehaviour.OnDisable: an empty Collision2D exit to each collider still in the stay buffer
-        // (SendMessage skips inactive objects; collision messages reach disabled behaviours).
+        self.physical_on_disable(p);
+        // The HingeJoint2D/SpringJoint2D Deactivate cleanups find their b2 joints already gone.
+    }
+
+    /// PhysicalBehaviour.OnDisable: an empty Collision2D exit to each collider still in the stay buffer
+    /// (SendMessage skips inactive objects; collision messages reach disabled behaviours).
+    pub fn physical_on_disable(&mut self, p: usize) {
         for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {
             if pair.Active && self.physicals[pair.Coll].active {
                 self.physical_on_collision_exit(pair.Coll, &ScriptCollision::default());
             }
         }
-        // The HingeJoint2D/SpringJoint2D Deactivate cleanups find their b2 joints already gone.
     }
 
     /// Rigidbody2D::Cleanup (180c1dd20) with DeactivateOperation 0: no attached colliders are left, every joint on
