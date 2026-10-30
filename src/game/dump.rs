@@ -882,6 +882,12 @@ impl Game {
             match (phase, entry.1) {
                 (_, B::Circulation(l) | B::Skin(l) | B::GoreString(l) | B::GForce(l)) if !self.limb_active(l) => {}
                 (_, B::Grip(g)) if !self.physicals[self.grips[g].PhysicalBehaviour].active => {}
+                (_, B::Machinery(m)) if { let p = &self.physicals[self.machinery[m].PhysicalBehaviour]; !p.active || p.destroyed } => {}
+                (Phase::Fixed, B::Machinery(m)) => self.machinery_fixed_update(m),
+                (Phase::Fixed, B::Lava(l)) => self.lava_fixed_update(l),
+                (Phase::Fixed, B::HeatRect(h)) => self.heat_rect_fixed_update(h),
+                (Phase::Update, B::Spawner(s)) => self.spawner_update(s),
+                (Phase::Update, B::Machinery(m)) => self.machinery_update(m),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),

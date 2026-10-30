@@ -272,7 +272,7 @@ impl Default for AmbientTemperatureGridBehaviour {
 }
 
 /// Mathf.RoundToInt (Math.Round: ties to even).
-fn round_to_int(f: f32) -> i32 {
+pub(super) fn round_to_int(f: f32) -> i32 {
     (f as f64).round_ties_even() as i32
 }
 fn ceil_to_int(f: f32) -> i32 {

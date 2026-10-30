@@ -314,7 +314,7 @@ impl Game {
 
     /// Runs `f` on the clone that holds the component `id` (still unsynced, or retained by the sync), with the
     /// index of its object.
-    fn with_component_instance<R>(&mut self, id: i32, f: impl FnOnce(&mut Game, &mut super::spawn::Instance, usize) -> R) -> R {
+    pub(super) fn with_component_instance<R>(&mut self, id: i32, f: impl FnOnce(&mut Game, &mut super::spawn::Instance, usize) -> R) -> R {
         let owns = |i: &super::spawn::Instance| i.objects.iter().any(|x| x.components.contains(&id));
         let (list, i) = match self.unsynced.iter().position(owns) {
             Some(i) => (true, i),
@@ -329,42 +329,44 @@ impl Game {
 
     /// GameObject.SetActive on one of the water's prefab objects. SetActive(true) of an active object does nothing.
     fn water_set_active(&mut self, w: usize, o: usize, active: bool) {
-        self.with_water_instance(w, |g, inst| {
-            if active {
-                let prefab = inst.prefab.clone();
-                for (d, k) in g.set_active(inst, o, true) {
-                    let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
-                    let id = inst.objects[d].components[k];
-                    match class.as_str() {
-                        "PhysicalBehaviour" => {
-                            let p = g.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
-                            g.physicals[p].active = true;
-                        }
-                        // No OnEnable.
-                        "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" => {}
-                        _ => unimplemented!("{class}.OnEnable"),
-                    }
-                }
-                return;
-            }
-            let prefab = inst.prefab.clone();
-            for (d, k) in g.set_active(inst, o, false) {
-                let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+        self.with_water_instance(w, |g, inst| g.set_active_scripts(inst, o, active));
+    }
+
+    /// GameObject.SetActive on object `o` of a clone, then the OnEnable or OnDisable of the scripts it passes.
+    pub(super) fn set_active_scripts(&mut self, inst: &mut super::spawn::Instance, o: usize, active: bool) {
+        let prefab = inst.prefab.clone();
+        if active {
+            for (d, k) in self.set_active(inst, o, true) {
+                let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
                 let id = inst.objects[d].components[k];
                 match class.as_str() {
                     "PhysicalBehaviour" => {
-                        let p = g.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
-                        g.physicals[p].active = false;
-                        if *enabled {
-                            g.physical_on_disable(p);
-                        }
+                        let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
+                        self.physicals[p].active = true;
                     }
-                    // No OnDisable.
-                    "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" => {}
-                    _ => unimplemented!("{class}.OnDisable"),
+                    // No OnEnable.
+                    "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" | "PoliceBoxBehaviour" | "ExistByChance" => {}
+                    _ => unimplemented!("{class}.OnEnable"),
                 }
             }
-        });
+            return;
+        }
+        for (d, k) in self.set_active(inst, o, false) {
+            let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+            let id = inst.objects[d].components[k];
+            match class.as_str() {
+                "PhysicalBehaviour" => {
+                    let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
+                    self.physicals[p].active = false;
+                    if *enabled {
+                        self.physical_on_disable(p);
+                    }
+                }
+                // No OnDisable.
+                "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" | "PoliceBoxBehaviour" | "ExistByChance" => {}
+                _ => unimplemented!("{class}.OnDisable"),
+            }
+        }
     }
 
     /// WaterBehaviour.UpdateObjectsToBeActiveIfWater: the objects, then SpriteRenderer.enabled and

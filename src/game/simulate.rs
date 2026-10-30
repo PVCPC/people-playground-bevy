@@ -309,9 +309,9 @@ impl Game {
             let prefab = inst.prefab.clone();
             self.sync_transforms(&mut inst, &prefab);
             self.refresh_autofix_joints(&inst);
-            // A WaterBehaviour's later GameObject.SetActive calls and a Rigidbody2D's later bodyType changes need the clone.
+            // A WaterBehaviour's or ExistByChance's later GameObject.SetActive calls and a Rigidbody2D's later bodyType changes need the clone.
             if prefab.objects.iter().any(|o| o.components.iter().any(|(_, c)| match c {
-                crate::assets::db::Component::Script { class, .. } => class == "WaterBehaviour",
+                crate::assets::db::Component::Script { class, .. } => class == "WaterBehaviour" || class == "ExistByChance",
                 c => matches!(c, crate::assets::db::Component::Rigidbody2D(_)),
             })) {
                 self.retained.push(inst);

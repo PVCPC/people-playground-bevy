@@ -45,6 +45,12 @@ pub struct Linked {
     pub map_lights: HashMap<usize, usize>,
     /// Game::waters index by object.
     pub waters: HashMap<usize, usize>,
+    pub machinery: HashMap<usize, usize>,
+    /// Game::lavas, spawners and heat_rects index by object.
+    pub lavas: HashMap<usize, usize>,
+    pub spawners: HashMap<usize, usize>,
+    pub heat_rects: HashMap<usize, usize>,
+    pub random_sprites: HashMap<usize, usize>,
     /// Game::node_rigidbodies index by object.
     pub node_rigidbodies: HashMap<usize, usize>,
     /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
@@ -200,18 +206,28 @@ impl Linker<'_> {
 /// A UnityEvent's persistent calls (all but the Off ones run on Invoke) may only reach audio and particle components,
 /// which the rewrite does not simulate.
 fn check_presentation_event(prefab: &Prefab, file: usize, event: &Value, what: &str) {
-    let calls = event.get("m_PersistentCalls").and_then(|c| c.get("m_Calls")).and_then(Value::array).unwrap();
-    for call in calls.iter().filter(|c| c.get("m_CallState").and_then(Value::i64) != Some(0)) {
-        let target = call.get("m_Target").and_then(Value::pptr).unwrap();
-        // AudioSource, the audio filters and reverb zone, ParticleSystem.
-        let presentation = target.file == 0
-            && prefab.index.get(&ObjRef { file, path_id: target.path_id }).is_some_and(|&(o, c)| {
-                c != usize::MAX && matches!(prefab.objects[o].components[c].1, Component::Other(82 | 164..=170 | 198))
-            });
-        if !presentation {
-            unimplemented!("{what}: a persistent call on {target:?}");
-        }
+    if !presentation_event(prefab, file, event) {
+        unimplemented!("{what}: a persistent call beyond audio and particles");
     }
+}
+
+/// Whether every persistent call of a UnityEvent that runs on Invoke targets an AudioSource, an audio filter or
+/// reverb zone, a ParticleSystem or a RectangleAudioSourceBehaviour.
+fn presentation_event(prefab: &Prefab, file: usize, event: &Value) -> bool {
+    let calls = event.get("m_PersistentCalls").and_then(|c| c.get("m_Calls")).and_then(Value::array).unwrap();
+    calls.iter().filter(|c| c.get("m_CallState").and_then(Value::i64) != Some(0)).all(|call| {
+        let target = call.get("m_Target").and_then(Value::pptr).unwrap();
+        target.file == 0
+            && prefab.index.get(&ObjRef { file, path_id: target.path_id }).is_some_and(|&(o, c)| {
+                c != usize::MAX
+                    && match &prefab.objects[o].components[c].1 {
+                        Component::Other(82 | 164..=170 | 198) => true,
+                        // Its LateUpdate only drives an AudioSource (see check_rewritten).
+                        Component::Script { class, .. } => class == "RectangleAudioSourceBehaviour",
+                        _ => false,
+                    }
+            })
+    })
 }
 
 /// Stops at a MonoBehaviour whose Unity messages (lifecycle.rs) the rewrite does not run: every class with any is
@@ -221,11 +237,17 @@ pub(super) fn check_rewritten(class: &str, person_root: bool) {
         "PhysicalBehaviour" | "LimbBehaviour" | "CirculationBehaviour" | "PersonBehaviour" | "SkinMaterialHandler" | "ConnectedNodeBehaviour"
         | "GoreStringBehaviour" | "GripBehaviour" | "HingeJointLimitAutofixBehaviour" | "MapLightBehaviour" | "MapConfig" | "BoundingBoxBehaviour"
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
-        | "JointBreakSoundBehaviour" => {}
+        | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" => {}
         // OnChildDisintegrated over a person's limbs (PersonBehaviour.DisintegrationCount).
         "DisintegrationCounterBehaviour" if person_root => {}
-        // Global.AddAudioSource/RemoveAudioSource, AudioSource.volume, StatManager, SpriteRenderer.color.
-        "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "IncreaseStatOnStart" | "PanelsBehaviour" => {}
+        // Global.AddAudioSource/RemoveAudioSource, AudioSource.volume, StatManager, SpriteRenderer.color; material
+        // property blocks in OnWillRenderObject.
+        // AudioSource.Play/Stop/volume from the camera position (RectangleAudioSourceBehaviour), the radio clip (its instance
+        // id is taken in Awake), and the OnBecameVisible fade of a SpriteRenderer before SetActive(false) of a render-only
+        // subtree (PoliceBoxBehaviour).
+        "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "IncreaseStatOnStart" | "PanelsBehaviour" | "BurnableSpriteBehaviour"
+        | "GlowingHotMetalBehaviour" | "FuseBoxBehaviour" | "RectangleAudioSourceBehaviour" | "PoliceBoxBehaviour" => {}
         _ => {
             let messages = super::lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == class).map_or(&[][..], |(_, m)| *m);
             if !messages.is_empty() {
@@ -603,6 +625,95 @@ impl Game {
             waters.insert(o, self.waters.len());
             self.waters.push(w);
         }
+        let mut machinery = HashMap::new();
+        for o in 0..n {
+            let Some((_, _, v)) = script(prefab, o, "DamagableMachineryBehaviour") else { continue };
+            let mut m = super::machinery::Machinery::default();
+            load_values(m.fields(), v)?;
+            m.PhysicalBehaviour = *l.arenas.physical.get(&o).ok_or("DamagableMachineryBehaviour without a PhysicalBehaviour")?;
+            // SparkPrefab, else Resources.Load("Prefabs/BrokenElectronicsSpark").
+            m.SparkPrefab = l.object(field(v, "SparkPrefab")?)?.is_some() || db.resource("Prefabs/BrokenElectronicsSpark", 1)?.is_some();
+            m.ExplosionPrefab = !field(v, "ExplosionPrefab")?.pptr().ok_or("ExplosionPrefab")?.is_null();
+            for b in array(v, "BehavioursToToggle")? {
+                if let Some(t) = b.pptr().filter(|p| !p.is_null()) {
+                    let (to, tc) = prefab.index[&ObjRef { file, path_id: t.path_id }];
+                    let Component::Script { class, .. } = &prefab.objects[to].components[tc].1 else { unreachable!() };
+                    m.BehavioursToToggle.push(class.clone());
+                }
+            }
+            m.GameObjectsToToggle = array(v, "GameObjectsToToggle")?.iter().filter(|g| g.pptr().is_some_and(|p| !p.is_null())).count();
+            m.OnDamagedPresentation = presentation_event(prefab, file, field(v, "OnDamaged")?);
+            machinery.insert(o, self.machinery.len());
+            self.machinery.push(m);
+        }
+        let (mut lavas, mut spawners, mut heat_rects) = (HashMap::new(), HashMap::new(), HashMap::new());
+        for o in 0..n {
+            if let Some((_, _, v)) = script(prefab, o, "LavaBehaviour") {
+                let mut lava = super::scenery::Lava::default();
+                load_values(lava.fields(), v)?;
+                let pp = field(v, "Trigger")?.pptr().ok_or("Trigger")?;
+                let (to, tc) = prefab.index.get(&ObjRef { file, path_id: pp.path_id }).copied().filter(|_| !pp.is_null() && pp.file == 0).ok_or("LavaBehaviour.Trigger outside the prefab or null")?;
+                lava.trigger_fixtures = inst.fixtures.get(&(to, tc)).cloned().unwrap_or_default();
+                let filter = field(v, "ContactFilter")?;
+                let flag = |name: &str| field(filter, name).and_then(|x| x.bool().ok_or_else(|| name.to_string()));
+                if flag("useDepth")? || flag("useOutsideDepth")? || flag("useNormalAngle")? || flag("useOutsideNormalAngle")? {
+                    unimplemented!("LavaBehaviour.ContactFilter depth or normal angle filtering");
+                }
+                if flag("useLayerMask")? {
+                    lava.layer_mask = field(field(filter, "layerMask")?, "m_Bits")?.i64().ok_or("layerMask.m_Bits")? as u32;
+                }
+                if let Some(r) = field(v, "ImpactPrefab")?.pptr().and_then(|pp| db.resolve(file, pp)) {
+                    lava.impact = Some(self.splash_pool_for(db, r)?);
+                }
+                lavas.insert(o, self.lavas.len());
+                self.lavas.push(lava);
+            }
+            if let Some((_, _, v)) = script(prefab, o, "RandomPrefabSpawnerBehaviour") {
+                let mut s = super::scenery::Spawner::default();
+                load_values(s.fields(), v)?;
+                for p in array(v, "Prefabs")? {
+                    s.prefabs.push(db.resolve(file, p.pptr().ok_or("Prefabs")?));
+                }
+                s.chain = inst.chain(o);
+                spawners.insert(o, self.spawners.len());
+                self.spawners.push(s);
+            }
+            if let Some((_, _, v)) = script(prefab, o, "TemperatureTargetRectangleBehaviour") {
+                let mut h = super::scenery::HeatRect::default();
+                load_values(h.fields(), v)?;
+                let ints = |name: &str| -> Result<[i32; 3], String> {
+                    let x = field(v, name)?;
+                    let c = |k: &str| field(x, k).and_then(|y| y.i64().map(|i| i as i32).ok_or_else(|| format!("{name}.{k}")));
+                    Ok([c("x")?, c("y")?, c("z")?])
+                };
+                (h.Size, h.Offset, h.position) = (ints("Size")?, ints("Offset")?, inst.position(o));
+                heat_rects.insert(o, self.heat_rects.len());
+                self.heat_rects.push(h);
+            }
+        }
+        let mut random_sprites = HashMap::new();
+        for o in 0..n {
+            let Some((_, _, v)) = script(prefab, o, "RandomSpriteBehaviour") else { continue };
+            let physical = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("RandomSpriteBehaviour without a PhysicalBehaviour"));
+            let r = prefab.objects[o].components.iter().find_map(|(_, x)| match x {
+                Component::SpriteRenderer(r) => Some(r),
+                _ => None,
+            });
+            let r = r.ok_or("RandomSpriteBehaviour without a SpriteRenderer")?;
+            let mut sprites = Vec::new();
+            for s in array(v, "sprites")? {
+                let s = db.resolve(file, s.pptr().ok_or("sprites")?).unwrap_or_else(|| unimplemented!("RandomSpriteBehaviour: a null sprite"));
+                sprites.push((s, renderer_bounds(&Sprite::read(db.data(s))?, r)));
+            }
+            random_sprites.insert(o, self.random_sprites.len());
+            self.random_sprites.push(super::misc::RandomSprite {
+                PhysicalBehaviour: physical,
+                PickRandomOnStart: field(v, "PickRandomOnStart")?.bool().ok_or("PickRandomOnStart")?,
+                chosenIndex: field(v, "chosenIndex")?.i64().ok_or("chosenIndex")? as i32,
+                sprites,
+                OnAfterChangePresentation: presentation_event(prefab, file, field(v, "OnAfterChange")?),
+            });
+        }
         let gforces = (0..n).filter(|&o| script(prefab, o, "GForceMeasureBehaviour").is_some()).count();
         if gforces != 0 && gforces != l.arenas.limb.len() {
             unimplemented!("a prefab with GForceMeasureBehaviour on some limbs only");
@@ -673,7 +784,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, node_rigidbodies, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -832,6 +943,12 @@ impl Game {
                 "WaterBehaviour" => self.water_awake(linked.waters[&o]),
                 "LimbBehaviour" => self.limb_awake(limb()),
                 "CirculationBehaviour" => self.circulation_awake(limb()),
+                "DamagableMachineryBehaviour" => self.machinery_awake(linked.machinery[&o]),
+                // AudioClip.Create("radioClip", ...) takes an instance id; the stream callback and Source.clip are audio.
+                "FuseBoxBehaviour" => {
+                    self.allocate_instance_id();
+                }
+                "RandomSpriteBehaviour" => self.random_sprite_awake(linked.random_sprites[&o], *enabled),
                 // Registered with its object: OnJointBreak2D for the joints on its own GameObject (SendMessage reaches no
                 // other) and the break limit key each sits under.
                 "JointBreakSoundBehaviour" => {
@@ -860,6 +977,10 @@ impl Game {
                 "GripBehaviour" => Some(Behaviour::Grip(self.limbs[limb()].GripBehaviour.unwrap())),
                 "GoreStringBehaviour" => Some(Behaviour::GoreString(limb())),
                 "GForceMeasureBehaviour" => Some(Behaviour::GForce(limb())),
+                "DamagableMachineryBehaviour" => Some(Behaviour::Machinery(linked.machinery[&o])),
+                "LavaBehaviour" => Some(Behaviour::Lava(linked.lavas[&o])),
+                "RandomPrefabSpawnerBehaviour" => Some(Behaviour::Spawner(linked.spawners[&o])),
+                "TemperatureTargetRectangleBehaviour" => Some(Behaviour::HeatRect(linked.heat_rects[&o])),
                 _ => None,
             };
             if let (Some(b), true) = (behaviour, *enabled) {
@@ -958,6 +1079,9 @@ impl Game {
                 "ShatteredObjectGenerator" if flag("GenerateOnStart") => unimplemented!("ShatteredObjectGenerator.Start with GenerateOnStart"),
                 "MapLightBehaviour" => PendingStart::MapLight(linked.map_lights[&o]),
                 "WaterBehaviour" => PendingStart::Water(linked.waters[&o]),
+                "DamagableMachineryBehaviour" => PendingStart::Machinery(linked.machinery[&o]),
+                "ExistByChance" => PendingStart::ExistByChance(inst.objects[o].components[c], float(v, "Chance")?),
+                "RandomSpriteBehaviour" => PendingStart::RandomSprite(linked.random_sprites[&o]),
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {

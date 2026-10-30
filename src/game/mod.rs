@@ -8,6 +8,7 @@ pub mod circulation;
 pub mod dump;
 pub mod lifecycle;
 pub mod limb;
+pub mod machinery;
 pub mod link;
 pub mod map;
 pub mod misc;
@@ -16,6 +17,7 @@ pub mod physical;
 pub mod shatter;
 pub mod spawn;
 pub mod scene;
+pub mod scenery;
 pub mod simulate;
 pub mod stab;
 pub mod temperature;
@@ -874,6 +876,10 @@ pub enum Behaviour {
     GForce(usize),
     Splat(usize),
     Bleeding(usize),
+    Machinery(usize),
+    Lava(usize),
+    Spawner(usize),
+    HeatRect(usize),
 }
 
 impl Behaviour {
@@ -887,6 +893,10 @@ impl Behaviour {
             Behaviour::GForce(_) => "GForceMeasureBehaviour",
             Behaviour::Splat(_) => "FancyBloodSplatController",
             Behaviour::Bleeding(_) => "BleedingParticleBehaviour",
+            Behaviour::Machinery(_) => "DamagableMachineryBehaviour",
+            Behaviour::Lava(_) => "LavaBehaviour",
+            Behaviour::Spawner(_) => "RandomPrefabSpawnerBehaviour",
+            Behaviour::HeatRect(_) => "TemperatureTargetRectangleBehaviour",
         }
     }
 }
@@ -968,6 +978,11 @@ pub struct Game {
     pub autofix_joints: Vec<misc::AutofixJoints>,
     pub joint_break_sounds: Vec<misc::JointBreakSound>,
     pub behaviours: Behaviours,
+    pub machinery: Vec<machinery::Machinery>,
+    pub lavas: Vec<scenery::Lava>,
+    pub spawners: Vec<scenery::Spawner>,
+    pub heat_rects: Vec<scenery::HeatRect>,
+    pub random_sprites: Vec<misc::RandomSprite>,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
     pub blood_puffs: Vec<misc::BloodPuff>,
     pub blood_puff_pool: Option<misc::ObjectPool>,

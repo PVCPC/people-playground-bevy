@@ -197,6 +197,37 @@ impl Game {
         self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf)).into_iter().filter_map(|h| h.0).collect()
     }
 
+    /// Collider2D.OverlapCollider(ContactFilter2D, Collider2D[1024]) on the collider whose fixtures are `query`
+    /// (OverlapColliderQuery2D, 180bf1240 and Overlap2DQueryBase::RunQuery): AutoSyncTransforms, then b2World::QueryAABB
+    /// over the union of every child's ComputeAABB, ReportFixture's filters as `overlap_query` (the filter's depth
+    /// and normal-angle tests are off), and IsFixtureValid: any child of the query shapes against the other shape's
+    /// children. The hits are sorted by z with std::sort (insertion sort up to 32 elements).
+    pub(super) fn overlap_collider(&mut self, query: &[crate::b2::world::FixtureId], mask: u32) -> Vec<(Option<usize>, i32)> {
+        self.sync_pending();
+        let shapes: Vec<(&Shape, crate::b2::math::Transform)> = query.iter().map(|&f| self.world.fixture(f)).map(|fx| (&fx.shape, self.world.body(fx.body).xf)).collect();
+        let mut aabb: Option<crate::b2::broadphase::Aabb> = None;
+        for &(shape, xf) in &shapes {
+            for c in 0..shape.child_count() {
+                let b = shape.compute_aabb(&xf, c);
+                aabb = Some(match aabb {
+                    None => b,
+                    Some(a) => crate::b2::broadphase::Aabb { lower: V::new(a.lower.x.min(b.lower.x), a.lower.y.min(b.lower.y)), upper: V::new(a.upper.x.max(b.upper.x), a.upper.y.max(b.upper.y)) },
+                });
+            }
+        }
+        let Some(aabb) = aabb else { return Vec::new() };
+        let hits = self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, _, xf| {
+            shapes.iter().any(|&(shape, xa)| (0..shape.child_count()).any(|ca| (0..other.child_count()).any(|cb| shape.test_overlap(ca, &xa, other, cb, xf))))
+        });
+        // ReportFixture skips the query collider's own fixtures.
+        let own: Vec<i32> = query.iter().map(|&f| self.world.fixture(f).collider.id).collect();
+        let hits: Vec<_> = hits.into_iter().filter(|h| !own.contains(&h.1)).collect();
+        if hits.len() > 32 {
+            unimplemented!("Collider2D.OverlapCollider with more than 32 hits (std::sort is not a stable insertion sort)");
+        }
+        hits
+    }
+
     /// The overlap queries' shared filter: sensors skipped (QueriesHitTriggers off), the layer mask, the depth
     /// range on the Transform's z, each collider once, then a stable sort by z. The callers run PhysicsQuery2D's
     /// AutoSyncTransforms (Physics2DSettings.autoSyncTransforms is on) before querying.

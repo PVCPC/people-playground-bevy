@@ -525,6 +525,9 @@ impl Game {
         if let Some(n) = self.properties[self.physicals[s.victim].Properties].StabSound.filter(|&n| n != 0) {
             self.pick_random(n);
         }
+        if let Some(m) = self.machinery.iter().position(|m| m.PhysicalBehaviour == s.victim) {
+            self.machinery_stabbed(m, s.stabber);
+        }
         if let Some(l) = self.limbs.iter().position(|l| l.PhysicalBehaviour == s.victim) {
             self.limb_stabbed(l, s);
             if self.physicals[s.stabber].StabCausesWound {

@@ -416,6 +416,10 @@ pub enum PendingStart {
     GoreString(usize, bool),
     MapLight(usize),
     Water(usize),
+    Machinery(usize),
+    /// ExistByChance.Start: the component's instance id and its Chance.
+    ExistByChance(i32, f32),
+    RandomSprite(usize),
     /// BoundingBoxBehaviour with its serialized box.
     BoundingBox(super::Bounds),
     MapConfig(super::map::MapConfigStart),
@@ -823,6 +827,9 @@ impl Game {
                     }
                 }
                 PendingStart::Water(w) => self.water_start(w),
+                PendingStart::Machinery(m) => self.machinery_start(m),
+                PendingStart::ExistByChance(id, chance) => self.exist_by_chance_start(id, chance),
+                PendingStart::RandomSprite(r) => self.random_sprite_set_to_index(r),
                 PendingStart::Limb(l) => self.limb_start(l),
                 PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),
                 PendingStart::Grip(g) => self.grip_start(g),
@@ -1166,6 +1173,58 @@ mod decal_tests {
             let (_, _, v) = db.mono(r).unwrap().unwrap();
             let decal = db.resolve(r.file, v.get("Decal").unwrap().pptr().unwrap()).unwrap();
             assert_eq!(db.mono(decal).unwrap().unwrap().1.name, "Sparse blood");
+        }
+    }
+}
+
+/// RandomSpriteBehaviour: the sprite pick that its Awake and Start draw. The outline refresh and context menu are UI.
+#[derive(Clone, Debug)]
+pub struct RandomSprite {
+    pub PhysicalBehaviour: usize,
+    pub PickRandomOnStart: bool,
+    pub chosenIndex: i32,
+    /// sprites, each with the renderer's bounds it gives (SpriteRenderer::GetSpriteBounds).
+    pub sprites: Vec<(crate::assets::db::ObjRef, ([f32; 3], [f32; 3]))>,
+    /// OnAfterChange's persistent calls reach only audio and particle components.
+    pub OnAfterChangePresentation: bool,
+}
+
+impl Game {
+    /// RandomSpriteBehaviour.Awake
+    pub fn random_sprite_awake(&mut self, r: usize, enabled: bool) {
+        if enabled {
+            let s = &self.random_sprites[r];
+            if !s.sprites.is_empty() && s.PickRandomOnStart {
+                self.random_sprites[r].chosenIndex = self.random.range_int(0, s.sprites.len() as i32);
+            }
+            self.random_sprite_set_to_index(r);
+        }
+    }
+
+    /// RandomSpriteBehaviour.SetSpriteToIndex
+    pub fn random_sprite_set_to_index(&mut self, r: usize) {
+        let n = self.random_sprites[r].sprites.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let s = &self.random_sprites[r];
+        let i = if s.chosenIndex == i32::MIN {
+            if s.PickRandomOnStart { self.random.range_int(0, n) } else { 0 }
+        } else if s.chosenIndex >= n {
+            0
+        } else if s.chosenIndex < 0 {
+            n - 1
+        } else {
+            s.chosenIndex
+        };
+        self.random_sprites[r].chosenIndex = i;
+        let s = &self.random_sprites[r];
+        let (sprite, bounds) = s.sprites[i as usize];
+        let p = &mut self.physicals[s.PhysicalBehaviour];
+        p.sprite.as_mut().expect("RandomSpriteBehaviour without a SpriteRenderer").0 = sprite;
+        p.sprite_bounds = Some(bounds);
+        if !s.OnAfterChangePresentation {
+            unimplemented!("RandomSpriteBehaviour.OnAfterChange: a persistent call beyond audio and particles");
         }
     }
 }
