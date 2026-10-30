@@ -1,3 +1,4 @@
+mod assets;
 mod b2;
 mod desktop;
 mod game;
