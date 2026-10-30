@@ -584,7 +584,7 @@ impl Game {
                     self.people[person].Consciousness = (d(self.people[person].Consciousness) - d(0.001) * ib).f();
                 }
                 if self.random.value() as f64 > 0.99 {
-                    let i = self.random.value() * self.circulations[l].InternalBleedingIntensity * 60.0;
+                    let i = (d(self.random.value()) * self.circulations[l].InternalBleedingIntensity * 60.0f32).f();
                     self.person_wince(person, i);
                 }
             }

@@ -234,12 +234,13 @@ impl Game {
         let pick = |v: f32| if connected { mathf::clamp01(v) } else { 0.0 };
         let (t2, num2, num3, num4, num5) =
             (pick(p.OxygenLevel), pick(p.Consciousness), pick(p.PainLevel), pick(p.AdrenalineLevel), pick(p.ShockLevel));
-        let mut num6 = mathf::lerp(0.0, 95.0, num4 + num5 + num3);
+        // Mono evaluates each float expression in double, rounding at stores and call arguments.
+        let mut num6 = mathf::lerp(0.0, 95.0, (d(num4) + num5 + num3).f());
         num6 += if connected { mathf::clamp(p.SeizureTime * 0.5, 0.0, 30.0) } else { 0.0 };
         num6 = (d(num6) + d(mathf::perlin(self.time.time / 7.0, self.limbs[l].randomOffset)) * 10.0f32).f();
         let v = mathf::max(
             c.ArtificialHeartbeat,
-            (mathf::lerp(0.0, 70.0 - (1.0 - num2) * 22.0, t) + num6) * mathf::lerp(0.5, 1.0, t2) * num,
+            ((d(mathf::lerp(0.0, (70.0f32 - (d(1.0f32) - num2) * 22.0f32).f(), t)) + num6) * mathf::lerp(0.5, 1.0, t2) * num).f(),
         );
         self.circulations[l].cachedHeartRate = Some(v);
         v
@@ -519,7 +520,7 @@ impl Game {
             if c.BleedingRate < 1.0 {
                 c.BleedingRate = (d(c.BleedingRate) - d(self.time.deltaTime) * 0.05f32).f();
             }
-            let amount = dt / mathf::lerp(60.0, 20.0, c.BloodFlow) * c.BleedingRate * 0.2;
+            let amount = (d(dt) / mathf::lerp(60.0, 20.0, c.BloodFlow) * c.BleedingRate * 0.2f32).f();
             self.drain(l, amount);
         }
     }
