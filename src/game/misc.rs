@@ -295,6 +295,18 @@ impl DecalDescriptor {
     }
 }
 
+/// AddForceBehaviour (no lifecycle): AddRelativeForce(intensity) is called by UnityEvents.
+#[derive(Clone, Debug)]
+pub struct AddForce {
+    pub id: i32,
+    /// The PhysicalBehaviour of its GameObject (GetComponent<Rigidbody2D>()).
+    pub physical: usize,
+    /// ForceMode2D: 0 Force, 1 Impulse
+    pub ForceMode: i32,
+    pub LocalAxis: [f32; 2],
+    pub ScaleWithSize: bool,
+}
+
 /// JointBreakSoundBehaviour: the joints on its own GameObject, as the break limit keys they sit under.
 #[derive(Clone, Debug)]
 pub struct JointBreakSound {
@@ -303,6 +315,8 @@ pub struct JointBreakSound {
     pub explosives: Vec<usize>,
     /// OnBreak's CarBehaviour calls, by component id.
     pub cars: Vec<(i32, super::car::CarCall)>,
+    /// OnBreak's other component calls (AddForceBehaviour.AddRelativeForce), run after the above.
+    pub calls: Vec<super::link::EventCall>,
     pub enabled: bool,
     /// Clips.Length
     pub clips: usize,
@@ -787,13 +801,16 @@ impl Game {
         for s in 0..self.joint_break_sounds.len() {
             let sound = &self.joint_break_sounds[s];
             if sound.enabled && sound.joints.contains(&j) {
-                let (clips, explosives, cars) = (sound.clips, sound.explosives.clone(), sound.cars.clone());
+                let (clips, explosives, cars, calls) = (sound.clips, sound.explosives.clone(), sound.cars.clone(), sound.calls.clone());
                 self.pick_random(clips);
                 for e in explosives {
                     self.explosive_force_immediate(e);
                 }
                 for (id, call) in cars {
                     self.car_invoke(id, call);
+                }
+                for call in calls {
+                    self.event_call(call);
                 }
             }
         }

@@ -223,10 +223,15 @@ impl Game {
 
     /// CameraShakeBehaviour.Shake(intensity, position)
     pub fn camera_shake(&mut self, intensity: f32, position: [f32; 2]) {
+        self.camera_shake_at(intensity, position, 1.0);
+    }
+
+    /// CameraShakeBehaviour.Shake(intensity, position, distanceInfluence)
+    pub fn camera_shake_at(&mut self, intensity: f32, position: [f32; 2], distance_influence: f32) {
         // CameraListenerBehaviour.NormalisedDistance
         let nd = (d(mathf::clamp(self.camera_orthographic_size(), 5.0, 200.0)) - 5.0f32).f() / (200.0 - 5.0);
         let num = (1.0 - d(nd) * 0.5f32).f();
-        let num2 = mathf::max(1.0, mathf::magnitude2(sub(position, self.camera_position())));
+        let num2 = mathf::max(1.0, mathf::magnitude2(sub(position, self.camera_position())) * distance_influence);
         self.camera.shakeIntensity = (d(self.camera.shakeIntensity) + d(intensity) * num / num2).f();
     }
 
@@ -938,7 +943,7 @@ impl Game {
                 // raycastHit2D.transform.gameObject.SendMessage("Decal", new DecalInstruction(BloodDecal, point, colour))
                 match self.hit_transform_physical(&hit) {
                     Some(other) => {
-                        let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
+                        let ty = self.limb_blood_decal(l);
                         self.physical_decal(other, ty, [hit.point.x, hit.point.y], 1.0, colour);
                     }
                     None if self.bare_colliders[&hit.collider].receives(&["DecalControllerBehaviour", "DecalRenderer", "DecalRendererController"]) => {

@@ -278,6 +278,7 @@ impl Game {
                         "ExplosionSoundBehviour" | "AudioSourceTimeScaleBehaviour" | "ExistInDetailView" => {}
                         // DeregisterBehaviour.OnDestroy: FindRelevantAction / DeregisterAction of this object.
                         "DeregisterBehaviour" => g.undo_deregister_related(key),
+                        "GearBehaviour" => g.gear_destroy(cid),
                         // DetectorBehaviour.OnDestroy removes its ContinuousActivationBehaviour listener, which sends nothing received.
                         "DetectorBehaviour" => {}
                         // BulbBehaviour.OnDestroy: Object.Destroy(OtherPart), a child (destroyed with the hierarchy already) until Break detaches it.

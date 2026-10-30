@@ -910,6 +910,7 @@ impl Game {
                 (Phase::Update, B::Destroyable(x)) => self.destroyable_update(x),
                 (Phase::Fixed, B::Explosive(e)) => self.explosive_fixed_update(e),
                 (Phase::Fixed, B::PointToVelocity(i)) => self.point_to_velocity_fixed_update(i),
+                (Phase::Fixed, B::AndroidSpark(i)) => self.android_spark_fixed_update(i),
                 (Phase::Update, B::Car(i)) => self.car_update(i),
                 (_, B::Tyre(t)) if { let p = &self.physicals[self.tyres[t].Phys]; !p.active || p.destroyed } => {}
                 (Phase::Fixed, B::Tyre(t)) => self.tyre_fixed_update(t),
@@ -987,7 +988,9 @@ impl Game {
         }
         self.tool_update();
         // level1's order-0 behaviours update in load order (UndoControllerBehaviour, WORLD's PlayAudioAtRandom,
-        // ToolControllerBehaviour, then ResizeHandles), before the map's and the spawned ones.
+        // ToolControllerBehaviour, Managers' GearManagerBehaviour, then ResizeHandles), before the map's and the
+        // spawned ones.
+        self.gear_manager_update();
         self.resize_handles_update();
         // DragTool.Update (added to the ToolController in ToolControllerBehaviour.Start, after the scene's behaviours).
         self.drag_tool_update();

@@ -15,6 +15,7 @@ pub mod crushing_poison;
 pub mod deformation_behaviour;
 pub mod disable_when_wet;
 pub mod durability_serum;
+pub mod electricity_transformer_behaviour;
 pub mod emit_particles_on_shake_behaviour;
 pub mod fan_behaviour;
 pub mod fire_sound_emitter;
@@ -35,6 +36,7 @@ pub mod pink_dormant_liquid;
 pub mod reflection_poison;
 pub mod regeneration_serum;
 pub mod resistor_behaviour;
+pub mod rocket_launcher_behaviour;
 pub mod rotor_behaviour;
 pub mod siren_behaviour;
 pub mod target_line_renderer;
@@ -53,6 +55,7 @@ pub struct Translated {
     pub cosmetic_rotation_behaviour: Vec<cosmetic_rotation_behaviour::CosmeticRotationBehaviour>,
     pub deformation_behaviour: Vec<deformation_behaviour::DeformationBehaviour>,
     pub disable_when_wet: Vec<disable_when_wet::DisableWhenWet>,
+    pub electricity_transformer_behaviour: Vec<electricity_transformer_behaviour::ElectricityTransformerBehaviour>,
     pub emit_particles_on_shake_behaviour: Vec<emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour>,
     pub fan_behaviour: Vec<fan_behaviour::FanBehaviour>,
     pub fan_behaviour__buffer: Vec<i32>,
@@ -64,6 +67,7 @@ pub struct Translated {
     pub jack_o_latern_behaviour: Vec<jack_o_latern_behaviour::JackOLaternBehaviour>,
     pub motorised_hinge_behaviour: Vec<motorised_hinge_behaviour::MotorisedHingeBehaviour>,
     pub resistor_behaviour: Vec<resistor_behaviour::ResistorBehaviour>,
+    pub rocket_launcher_behaviour: Vec<rocket_launcher_behaviour::RocketLauncherBehaviour>,
     pub rotor_behaviour: Vec<rotor_behaviour::RotorBehaviour>,
     pub siren_behaviour: Vec<siren_behaviour::SirenBehaviour>,
     pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
@@ -95,6 +99,7 @@ impl Default for Translated {
             cosmetic_rotation_behaviour: Vec::new(),
             deformation_behaviour: Vec::new(),
             disable_when_wet: Vec::new(),
+            electricity_transformer_behaviour: Vec::new(),
             emit_particles_on_shake_behaviour: Vec::new(),
             fan_behaviour: Vec::new(),
             fan_behaviour__buffer: rt::new_array(128),
@@ -106,6 +111,7 @@ impl Default for Translated {
             jack_o_latern_behaviour: Vec::new(),
             motorised_hinge_behaviour: Vec::new(),
             resistor_behaviour: Vec::new(),
+            rocket_launcher_behaviour: Vec::new(),
             rotor_behaviour: Vec::new(),
             siren_behaviour: Vec::new(),
             target_line_renderer: Vec::new(),
@@ -139,6 +145,7 @@ pub enum TBehaviour {
     CosmeticRotationBehaviour(usize),
     DeformationBehaviour(usize),
     DisableWhenWet(usize),
+    ElectricityTransformerBehaviour(usize),
     EmitParticlesOnShakeBehaviour(usize),
     FanBehaviour(usize),
     FireSoundEmitter(usize),
@@ -149,12 +156,13 @@ pub enum TBehaviour {
     JackOLaternBehaviour(usize),
     MotorisedHingeBehaviour(usize),
     ResistorBehaviour(usize),
+    RocketLauncherBehaviour(usize),
     RotorBehaviour(usize),
     SirenBehaviour(usize),
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["AerialFaithPlateBehaviour", "ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["AerialFaithPlateBehaviour", "ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "ElectricityTransformerBehaviour", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RocketLauncherBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
@@ -164,6 +172,7 @@ impl TBehaviour {
             TBehaviour::CosmeticRotationBehaviour(_) => "CosmeticRotationBehaviour",
             TBehaviour::DeformationBehaviour(_) => "DeformationBehaviour",
             TBehaviour::DisableWhenWet(_) => "DisableWhenWet",
+            TBehaviour::ElectricityTransformerBehaviour(_) => "ElectricityTransformerBehaviour",
             TBehaviour::EmitParticlesOnShakeBehaviour(_) => "EmitParticlesOnShakeBehaviour",
             TBehaviour::FanBehaviour(_) => "FanBehaviour",
             TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
@@ -174,6 +183,7 @@ impl TBehaviour {
             TBehaviour::JackOLaternBehaviour(_) => "JackOLaternBehaviour",
             TBehaviour::MotorisedHingeBehaviour(_) => "MotorisedHingeBehaviour",
             TBehaviour::ResistorBehaviour(_) => "ResistorBehaviour",
+            TBehaviour::RocketLauncherBehaviour(_) => "RocketLauncherBehaviour",
             TBehaviour::RotorBehaviour(_) => "RotorBehaviour",
             TBehaviour::SirenBehaviour(_) => "SirenBehaviour",
             TBehaviour::TargetLineRenderer(_) => "TargetLineRenderer",
@@ -188,6 +198,7 @@ impl TBehaviour {
             TBehaviour::CosmeticRotationBehaviour(_) => true,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => true,
+            TBehaviour::ElectricityTransformerBehaviour(_) => false,
             TBehaviour::EmitParticlesOnShakeBehaviour(_) => true,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => true,
@@ -198,6 +209,7 @@ impl TBehaviour {
             TBehaviour::JackOLaternBehaviour(_) => false,
             TBehaviour::MotorisedHingeBehaviour(_) => true,
             TBehaviour::ResistorBehaviour(_) => true,
+            TBehaviour::RocketLauncherBehaviour(_) => false,
             TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => true,
             TBehaviour::TargetLineRenderer(_) => true,
@@ -212,6 +224,7 @@ impl TBehaviour {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::ElectricityTransformerBehaviour(_) => false,
             TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
@@ -222,6 +235,7 @@ impl TBehaviour {
             TBehaviour::JackOLaternBehaviour(_) => true,
             TBehaviour::MotorisedHingeBehaviour(_) => true,
             TBehaviour::ResistorBehaviour(_) => true,
+            TBehaviour::RocketLauncherBehaviour(_) => false,
             TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
@@ -236,6 +250,7 @@ impl TBehaviour {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::ElectricityTransformerBehaviour(_) => true,
             TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
@@ -246,8 +261,35 @@ impl TBehaviour {
             TBehaviour::JackOLaternBehaviour(_) => false,
             TBehaviour::MotorisedHingeBehaviour(_) => true,
             TBehaviour::ResistorBehaviour(_) => false,
+            TBehaviour::RocketLauncherBehaviour(_) => true,
             TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => true,
+            TBehaviour::TargetLineRenderer(_) => false,
+        }
+    }
+
+    /// It has UseContinuous (Messages.IUseContinuous).
+    pub fn has_use_continuous(self) -> bool {
+        match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => false,
+            TBehaviour::ConveyorBeltBehaviour(_) => false,
+            TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DeformationBehaviour(_) => false,
+            TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::ElectricityTransformerBehaviour(_) => true,
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
+            TBehaviour::FanBehaviour(_) => false,
+            TBehaviour::FireSoundEmitter(_) => false,
+            TBehaviour::GuideTemperatureBehaviour(_) => false,
+            TBehaviour::GyrostabiliserBehaviour(_) => false,
+            TBehaviour::HoverboxBehaviour(_) => false,
+            TBehaviour::IndustrialGyrostabiliserBehaviour(_) => false,
+            TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::MotorisedHingeBehaviour(_) => false,
+            TBehaviour::ResistorBehaviour(_) => false,
+            TBehaviour::RocketLauncherBehaviour(_) => false,
+            TBehaviour::RotorBehaviour(_) => false,
+            TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
         }
     }
@@ -260,6 +302,7 @@ impl TBehaviour {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::ElectricityTransformerBehaviour(_) => false,
             TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => false,
             TBehaviour::FireSoundEmitter(_) => false,
@@ -270,6 +313,7 @@ impl TBehaviour {
             TBehaviour::JackOLaternBehaviour(_) => false,
             TBehaviour::MotorisedHingeBehaviour(_) => false,
             TBehaviour::ResistorBehaviour(_) => false,
+            TBehaviour::RocketLauncherBehaviour(_) => false,
             TBehaviour::RotorBehaviour(_) => false,
             TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
@@ -333,6 +377,7 @@ pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
         "CosmeticRotationBehaviour" => &[],
         "DeformationBehaviour" => &[],
         "DisableWhenWet" => &[("PhysicalBehaviour", LinkKind::Physical), ("ToDisable", LinkKind::Prefab)],
+        "ElectricityTransformerBehaviour" => &[("PhysicalBehaviour", LinkKind::Physical)],
         "EmitParticlesOnShakeBehaviour" => &[],
         "FanBehaviour" => &[("HelicopterAudioSource", LinkKind::Present), ("FirstBladeRenderer", LinkKind::Present), ("SecondBladeRenderer", LinkKind::Present), ("Blades", LinkKind::Script("CosmeticRotationBehaviour")), ("Audio", LinkKind::Present), ("Switch", LinkKind::Present), ("StartupSound", LinkKind::Present), ("ShutoffSound", LinkKind::Present), ("Mask", LinkKind::Mask)],
         "FireSoundEmitter" => &[],
@@ -343,6 +388,7 @@ pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
         "JackOLaternBehaviour" => &[("GlowingSprites", LinkKind::Present), ("ObjectSprite", LinkKind::Present), ("LightSprite", LinkKind::Present)],
         "MotorisedHingeBehaviour" => &[("IndicatorArm", LinkKind::Transform), ("AudioSource", LinkKind::Present), ("Hinge", LinkKind::Hinge), ("PhysicalBehaviour", LinkKind::Physical), ("ActiveLight", LinkKind::Present)],
         "ResistorBehaviour" => &[("HandleJoint", LinkKind::Hinge), ("PhysicalBehaviour", LinkKind::Physical)],
+        "RocketLauncherBehaviour" => &[("Projectile", LinkKind::Prefab), ("AudioSource", LinkKind::Present), ("LaunchingSounds", LinkKind::Len)],
         "RotorBehaviour" => &[("Hinge", LinkKind::Hinge), ("AudioSource", LinkKind::Present), ("PhysicalBehaviour", LinkKind::Physical), ("ActiveLight", LinkKind::Present)],
         "SirenBehaviour" => &[("AudioSource", LinkKind::Present), ("SirenSound", LinkKind::Present), ("BrokenSirenSound", LinkKind::Present), ("DamagableMachineryBehaviour", LinkKind::Handwritten("DamagableMachineryBehaviour"))],
         "TargetLineRenderer" => &[("LineRenderer", LinkKind::Present), ("Target", LinkKind::Transform)],
@@ -388,6 +434,13 @@ impl Game {
                 (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
                 self.tr.disable_when_wet.push(x);
                 TBehaviour::DisableWhenWet(self.tr.disable_when_wet.len() - 1)
+            }
+            "ElectricityTransformerBehaviour" => {
+                let mut x = electricity_transformer_behaviour::ElectricityTransformerBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.electricity_transformer_behaviour.push(x);
+                TBehaviour::ElectricityTransformerBehaviour(self.tr.electricity_transformer_behaviour.len() - 1)
             }
             "EmitParticlesOnShakeBehaviour" => {
                 let mut x = emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour::default();
@@ -459,6 +512,13 @@ impl Game {
                 self.tr.resistor_behaviour.push(x);
                 TBehaviour::ResistorBehaviour(self.tr.resistor_behaviour.len() - 1)
             }
+            "RocketLauncherBehaviour" => {
+                let mut x = rocket_launcher_behaviour::RocketLauncherBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.rocket_launcher_behaviour.push(x);
+                TBehaviour::RocketLauncherBehaviour(self.tr.rocket_launcher_behaviour.len() - 1)
+            }
             "RotorBehaviour" => {
                 let mut x = rotor_behaviour::RotorBehaviour::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -493,6 +553,7 @@ impl Game {
             (TBehaviour::ConveyorBeltBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.conveyor_belt_behaviour[i].PhysicalBehaviour = v,
             (TBehaviour::DisableWhenWet(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.disable_when_wet[i].PhysicalBehaviour = v,
             (TBehaviour::DisableWhenWet(i), "ToDisable", LinkVal::Prefab(v)) => self.tr.disable_when_wet[i].ToDisable = v,
+            (TBehaviour::ElectricityTransformerBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.electricity_transformer_behaviour[i].PhysicalBehaviour = v,
             (TBehaviour::FanBehaviour(i), "HelicopterAudioSource", LinkVal::Present(v)) => self.tr.fan_behaviour[i].HelicopterAudioSource = v,
             (TBehaviour::FanBehaviour(i), "FirstBladeRenderer", LinkVal::Present(v)) => self.tr.fan_behaviour[i].FirstBladeRenderer = v,
             (TBehaviour::FanBehaviour(i), "SecondBladeRenderer", LinkVal::Present(v)) => self.tr.fan_behaviour[i].SecondBladeRenderer = v,
@@ -517,6 +578,9 @@ impl Game {
             (TBehaviour::MotorisedHingeBehaviour(i), "ActiveLight", LinkVal::Present(v)) => self.tr.motorised_hinge_behaviour[i].ActiveLight = v,
             (TBehaviour::ResistorBehaviour(i), "HandleJoint", LinkVal::Hinge(v)) => self.tr.resistor_behaviour[i].HandleJoint = v,
             (TBehaviour::ResistorBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.resistor_behaviour[i].PhysicalBehaviour = v,
+            (TBehaviour::RocketLauncherBehaviour(i), "Projectile", LinkVal::Prefab(v)) => self.tr.rocket_launcher_behaviour[i].Projectile = v,
+            (TBehaviour::RocketLauncherBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.rocket_launcher_behaviour[i].AudioSource = v,
+            (TBehaviour::RocketLauncherBehaviour(i), "LaunchingSounds", LinkVal::Len(v)) => self.tr.rocket_launcher_behaviour[i].LaunchingSounds = v,
             (TBehaviour::RotorBehaviour(i), "Hinge", LinkVal::Hinge(v)) => self.tr.rotor_behaviour[i].Hinge = v,
             (TBehaviour::RotorBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.rotor_behaviour[i].AudioSource = v,
             (TBehaviour::RotorBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.rotor_behaviour[i].PhysicalBehaviour = v,
@@ -539,6 +603,7 @@ impl Game {
             TBehaviour::CosmeticRotationBehaviour(i) => self.tr.cosmetic_rotation_behaviour[i].enabled,
             TBehaviour::DeformationBehaviour(i) => self.tr.deformation_behaviour[i].enabled,
             TBehaviour::DisableWhenWet(i) => self.tr.disable_when_wet[i].enabled,
+            TBehaviour::ElectricityTransformerBehaviour(i) => self.tr.electricity_transformer_behaviour[i].enabled,
             TBehaviour::EmitParticlesOnShakeBehaviour(i) => self.tr.emit_particles_on_shake_behaviour[i].enabled,
             TBehaviour::FanBehaviour(i) => self.tr.fan_behaviour[i].enabled,
             TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
@@ -549,6 +614,7 @@ impl Game {
             TBehaviour::JackOLaternBehaviour(i) => self.tr.jack_o_latern_behaviour[i].enabled,
             TBehaviour::MotorisedHingeBehaviour(i) => self.tr.motorised_hinge_behaviour[i].enabled,
             TBehaviour::ResistorBehaviour(i) => self.tr.resistor_behaviour[i].enabled,
+            TBehaviour::RocketLauncherBehaviour(i) => self.tr.rocket_launcher_behaviour[i].enabled,
             TBehaviour::RotorBehaviour(i) => self.tr.rotor_behaviour[i].enabled,
             TBehaviour::SirenBehaviour(i) => self.tr.siren_behaviour[i].enabled,
             TBehaviour::TargetLineRenderer(i) => self.tr.target_line_renderer[i].enabled,
@@ -616,13 +682,22 @@ impl Game {
         match b {
             TBehaviour::AerialFaithPlateBehaviour(i) => self.aerial_faith_plate_behaviour_use(i, activation),
             TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_use(i, activation),
+            TBehaviour::ElectricityTransformerBehaviour(i) => self.electricity_transformer_behaviour_use(i, activation),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_use(i, activation),
             TBehaviour::GyrostabiliserBehaviour(i) => self.gyrostabiliser_behaviour_use(i, activation),
             TBehaviour::HoverboxBehaviour(i) => self.hoverbox_behaviour_use(i, activation),
             TBehaviour::IndustrialGyrostabiliserBehaviour(i) => self.industrial_gyrostabiliser_behaviour_use(i, activation),
             TBehaviour::MotorisedHingeBehaviour(i) => self.motorised_hinge_behaviour_use(i, activation),
+            TBehaviour::RocketLauncherBehaviour(i) => self.rocket_launcher_behaviour_use(i, activation),
             TBehaviour::RotorBehaviour(i) => self.rotor_behaviour_use(i, activation),
             TBehaviour::SirenBehaviour(i) => self.siren_behaviour_use(i, activation),
+            _ => {}
+        }
+    }
+
+    pub fn tr_use_continuous(&mut self, b: TBehaviour, activation: rt::Activation) {
+        match b {
+            TBehaviour::ElectricityTransformerBehaviour(i) => self.electricity_transformer_behaviour_use_continuous(i, activation),
             _ => {}
         }
     }
@@ -825,5 +900,5 @@ impl Game {
 
 /// The class has a method for SendMessage/BroadcastMessage `msg` (one the rewrite sends).
 pub fn receives(class: &str, msg: &str) -> bool {
-    matches!((class, msg), ("AerialFaithPlateBehaviour", "Use") | ("ConveyorBeltBehaviour", "Use") | ("FanBehaviour", "Use") | ("GyrostabiliserBehaviour", "Use") | ("HoverboxBehaviour", "Use") | ("IndustrialGyrostabiliserBehaviour", "Use") | ("MotorisedHingeBehaviour", "Use") | ("RotorBehaviour", "Use") | ("SirenBehaviour", "Use"))
+    matches!((class, msg), ("AerialFaithPlateBehaviour", "Use") | ("ConveyorBeltBehaviour", "Use") | ("ElectricityTransformerBehaviour", "Use") | ("ElectricityTransformerBehaviour", "UseContinuous") | ("FanBehaviour", "Use") | ("GyrostabiliserBehaviour", "Use") | ("HoverboxBehaviour", "Use") | ("IndustrialGyrostabiliserBehaviour", "Use") | ("MotorisedHingeBehaviour", "Use") | ("RocketLauncherBehaviour", "Use") | ("RotorBehaviour", "Use") | ("SirenBehaviour", "Use"))
 }

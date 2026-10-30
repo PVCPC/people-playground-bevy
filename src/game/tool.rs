@@ -484,7 +484,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_)))) => out.push(UseReceiver::Behaviour(b)),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_)))) => out.push(UseReceiver::Behaviour(b)),
                         Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                         _ => unimplemented!("{class}.Use"),
                     }
@@ -518,6 +518,8 @@ impl Game {
                 Behaviour::Bulb(i) => self.bulb_use(i),
                 Behaviour::Thrusterbed(i) => self.thrusterbed_use(i),
                 Behaviour::Piston(i) => self.piston_use(i),
+                // A direct activation: Channel 0.
+                Behaviour::Car(i) => self.car_use(i, 0),
                 _ => unreachable!(),
             }
         }

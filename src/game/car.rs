@@ -320,6 +320,20 @@ impl Game {
         });
     }
 
+    /// CarBehaviour.Use: channel 1 reverses the gear; else the engine toggles (the startup/shutoff sounds are audio).
+    pub fn car_use(&mut self, car: usize, channel: i32) {
+        let c = &mut self.cars[car];
+        if c.Health < 0.0 || !c.enabled {
+            return;
+        }
+        if channel == 1 {
+            c.MotorSpeed = -c.MotorSpeed;
+            return;
+        }
+        c.time = 0.0;
+        c.Activated = !c.Activated;
+    }
+
     /// A persistent call of a UnityEvent that targets the CarBehaviour with component id `id`.
     pub fn car_invoke(&mut self, id: i32, call: CarCall) {
         let car = self.cars.iter().position(|c| c.id == id).expect("a CarBehaviour in the arena");

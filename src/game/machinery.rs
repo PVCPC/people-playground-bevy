@@ -33,8 +33,11 @@ script! {
         /// Transform id).
         BehavioursToToggle: Vec<(String, i32)> = Vec::new(),
         GameObjectsToToggle: Vec<i32> = Vec::new(),
-        /// OnDamaged's persistent calls reach only audio and particle components.
+        /// OnDamaged's persistent calls reach only audio and particle components, or are all in `OnDamagedCalls`.
         OnDamagedPresentation: bool = true,
+        OnDamagedCalls: Vec<super::link::EventCall> = Vec::new(),
+        /// The component's instance id.
+        id: i32 = 0,
     }
 }
 
@@ -144,7 +147,12 @@ impl Game {
         }
         let mc = &self.machinery[m];
         if run_events && !mc.OnDamagedPresentation {
-            unimplemented!("DamagableMachineryBehaviour.OnDamaged: a persistent call beyond audio and particles");
+            unimplemented!("DamagableMachineryBehaviour.OnDamaged: a persistent call beyond audio, particles and the kept event calls");
+        }
+        if run_events {
+            for call in self.machinery[m].OnDamagedCalls.clone() {
+                self.event_call(call);
+            }
         }
     }
 

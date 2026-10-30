@@ -311,6 +311,7 @@ impl Game {
                     g.ambient_grid = grid;
                 }
                 // WORLD's ambience emitter; MapConfig.Reinitialise sets PositionCenter and Radius when a map loads.
+                "GearManagerBehaviour" => g.gear_manager_awake(),
                 "PlayAudioAtRandom" => {
                     found[3] = true;
                     let mut a = PlayAudioAtRandom::default();

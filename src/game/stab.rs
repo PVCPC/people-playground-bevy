@@ -580,7 +580,7 @@ impl Game {
             let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
             // stabber.SendMessage("Decal", ...)
             if self.physicals[s.stabber].active {
-                let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
+                let ty = self.limb_blood_decal(l);
                 self.physical_decal(s.stabber, ty, s.point, 1.0, colour);
             }
         }

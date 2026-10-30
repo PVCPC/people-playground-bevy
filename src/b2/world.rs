@@ -360,6 +360,20 @@ impl Body {
         }
     }
 
+    /// Rigidbody2D::SetSleeping(false) (180c241d0).
+    pub fn set_sleeping_false(&mut self) {
+        if self.kind != BodyType::Static {
+            self.flags |= BODY_AWAKE;
+        } else {
+            self.flags &= !BODY_AWAKE;
+            self.linear_velocity = Vec2::new(0.0, 0.0);
+            self.angular_velocity = 0.0;
+            self.force = Vec2::new(0.0, 0.0);
+            self.torque = 0.0;
+        }
+        self.sleep_time = 0.0;
+    }
+
     fn active_and_moving(&self) -> bool {
         self.flags & BODY_AWAKE != 0 && self.kind != BodyType::Static
     }

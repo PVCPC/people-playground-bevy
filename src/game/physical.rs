@@ -131,6 +131,8 @@ script! {
         hash_code: i32 = 0,
         /// The objects Awake and Start created, by instance id.
         ids: StartIds = StartIds::default(),
+        /// ActivationPropagationDelay: only UseWireBehaviour reads it; HaltNextPropagation sets it to -1.
+        ActivationPropagationDelay: f32 = 0.1,
         /// ReflectsLasers and AbsorbsLasers (the dump format has neither).
         ReflectsLasers: bool = false,
         AbsorbsLasers: bool = true,
@@ -209,6 +211,9 @@ script! {
         ContinuousActivationTracker: [super::continuous::DeltaInt; 3] = [super::continuous::DeltaInt { Value: 0, PreviousValue: 0, PreviousValueFixed: 0 }; 3],
     }
 }
+
+/// The index of a null DecalDescriptor (an Android limb's BloodDecal).
+pub(super) const NULL_DECAL: usize = usize::MAX;
 
 /// Instance ids of a Prefabs/SpawnParticles clone: GameObject, Transform, ParticleSystem, ParticleSystemRenderer,
 /// DeleteAfterTime.
@@ -957,9 +962,22 @@ impl Game {
         }
     }
 
+    /// The `DecalInstruction.type` of a limb's BloodDecal: `NULL_DECAL` for a null one.
+    pub(super) fn limb_blood_decal(&mut self, l: usize) -> usize {
+        match self.limbs[l].BloodDecal.clone() {
+            n if n.is_empty() => NULL_DECAL,
+            n => self.decal_descriptor(&n),
+        }
+    }
+
     /// DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
     fn decal_controller_decal(&mut self, p: usize, c: usize, ty: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
         if !self.prefs.Decals || self.physicals[p].decal_controllers[c].descriptor != ty {
+            return;
+        }
+        // A null DecalDescriptor: CreateContainer makes nothing, so there is no decalHolder and Decal returns
+        // (DecalControllerBehaviour.Start then destroys the controller and logs the error).
+        if ty == NULL_DECAL {
             return;
         }
         let local = self.inverse_transform_point(p, [position[0], position[1], 0.0]);

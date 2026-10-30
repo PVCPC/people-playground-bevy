@@ -344,6 +344,36 @@ impl Game {
         })
     }
 
+    /// `transform.right = v`: Transform.rotation = Quaternion.FromToRotation(Vector3.right, v).
+    pub fn tr_set_right(&mut self, xf: Xf, v: [f32; 3]) {
+        self.tr_set_rotation(xf, crate::unity::transform::from_to_rotation([1.0, 0.0, 0.0], v));
+    }
+
+    /// `transform.up = v`: Transform.rotation = Quaternion.FromToRotation(Vector3.up, v).
+    pub fn tr_set_up(&mut self, xf: Xf, v: [f32; 3]) {
+        self.tr_set_rotation(xf, crate::unity::transform::from_to_rotation_up(v));
+    }
+
+    /// Transform.rotation = q on a clone's object: the PhysicalBehaviours below it see their new poses, and the
+    /// bodies at the next SyncTransforms.
+    pub fn tr_set_rotation(&mut self, xf: Xf, q: [f32; 4]) {
+        let Xf::Physical(p) = xf else { unimplemented!("Transform.rotation = on a Transform without a PhysicalBehaviour ({xf:?})") };
+        let id = self.physicals[p].transform_id;
+        self.with_component_instance(id, |g, inst, o| {
+            inst.set_world_rotation(o, q);
+            for x in std::iter::once(o).chain(inst.descendants(o)) {
+                let t = inst.objects[x].components[0];
+                if let Some(ph) = g.physicals.iter().position(|ph| ph.transform_id == t) {
+                    g.physicals[ph].transform = crate::game::link::pose(inst, x);
+                }
+            }
+        });
+        if let Some(i) = self.retained.iter().position(|i| i.objects.iter().any(|x| x.components.contains(&id))) {
+            let inst = self.retained.remove(i);
+            self.unsynced.push(inst);
+        }
+    }
+
     /// Transform.parent
     pub fn tr_parent(&mut self, xf: Xf) -> Option<Xf> {
         let Xf::Physical(p) = xf else { unimplemented!("Transform.parent of a Transform without a PhysicalBehaviour ({xf:?})") };

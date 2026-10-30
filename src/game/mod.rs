@@ -49,6 +49,7 @@ pub mod temperature;
 pub mod tool;
 pub mod undo;
 pub mod clear;
+pub mod gear;
 pub mod water;
 
 use crate::b2::{
@@ -1072,6 +1073,7 @@ pub enum Behaviour {
     Bell(usize),
     MachineGun(usize),
     PointToVelocity(usize),
+    AndroidSpark(usize),
     Car(usize),
     Tyre(usize),
     Flask(usize),
@@ -1113,6 +1115,7 @@ impl Behaviour {
             Behaviour::Explosive(_) => "ExplosiveBehaviour",
             Behaviour::DeleteAfter(_) => "DeleteAfterTime",
             Behaviour::PointToVelocity(_) => "PointToVelocityBehaviour",
+            Behaviour::AndroidSpark(_) => "AndroidSparkCreator",
             Behaviour::Car(_) => "CarBehaviour",
             Behaviour::Tyre(_) => "TyreDeflationBehaviour",
             Behaviour::Flask(_) => "GasTankBehaviour",
@@ -1242,6 +1245,7 @@ pub struct Game {
     pub disintegration_counters: Vec<acts::DisintegrationCounter>,
     pub sticky_grenades: Vec<acts::StickyGrenade>,
     pub point_to_velocities: Vec<acts::PointToVelocity>,
+    pub android_sparks: Vec<acts::AndroidSparkCreator>,
     pub cars: Vec<car::CarBehaviour>,
     pub tyres: Vec<tyre::TyreDeflationBehaviour>,
     pub flasks: Vec<flask::Flask>,
@@ -1269,6 +1273,7 @@ pub struct Game {
     pub no_collide_gms: Vec<car::NoCollideGm>,
     pub random_car_textures: Vec<car::RandomCarTexture>,
     pub delete_afters: Vec<explosion::DeleteAfter>,
+    pub add_forces: Vec<misc::AddForce>,
     /// Coroutines in WaitForEndOfFrame, in the order they got there.
     pub end_of_frame: Vec<destroyable::Coroutine>,
     /// GlobalShrapnelEmitter.Instance
@@ -1382,6 +1387,8 @@ pub struct Game {
     pub catalog_selected: Option<String>,
     /// UndoControllerBehaviour's history and position.
     pub undo: undo::UndoController,
+    /// GearManagerBehaviour.Gears
+    pub gears: gear::GearList,
     /// NotificationControllerBehaviour.Show's texts since the UI last took them.
     pub notifications: Vec<String>,
     /// gameObject.name of the catalog's clones (by the id of the root Transform).

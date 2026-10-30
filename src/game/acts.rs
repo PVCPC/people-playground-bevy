@@ -36,6 +36,25 @@ script! {
     }
 }
 
+script! {
+    AndroidSparkCreator {
+    }
+    links {
+        /// GetComponent<LimbBehaviour>() (the limb's index).
+        limb: usize = 0,
+    }
+}
+
+impl Game {
+    /// AndroidSparkCreator.FixedUpdate: Random.value is only drawn on a limb below a tenth of its health.
+    pub fn android_spark_fixed_update(&mut self, i: usize) {
+        let l = self.android_sparks[i].limb;
+        if self.limbs[l].Health < self.limbs[l].InitialHealth * 0.1 && self.random.value() > 0.9995 {
+            unimplemented!("AndroidSparkCreator.FixedUpdate: Instantiate(spark, transform.position, identity)");
+        }
+    }
+}
+
 /// A persistent call of ActOnCollide.Actions.
 #[derive(Clone, Copy, Debug)]
 pub enum ActTarget {
