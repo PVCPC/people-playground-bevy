@@ -113,6 +113,9 @@ fn mouse(
     let size = window.size();
     let (Ok(origin), Ok(one)) = (camera.viewport_to_world_2d(at, Vec2::new(0.0, size.y)), camera.viewport_to_world_2d(at, Vec2::new(1.0, size.y))) else { return };
     let input = &mut play.game.input;
+    if let (Ok(min), Ok(max)) = (camera.viewport_to_world_2d(at, Vec2::new(0.0, size.y)), camera.viewport_to_world_2d(at, Vec2::new(size.x, 0.0))) {
+        input.view = Some((min.to_array(), max.to_array()));
+    }
     if let Some(c) = window.cursor_position() {
         // Unity's screen y runs up from the bottom.
         let pixel = [c.x, size.y - c.y];
@@ -160,9 +163,17 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         t.frameCount += 1;
         g.interpolate_bodies();
         g.update_scripts();
-        // ponytail: every active limb counts as drawn; cull against the camera once sprite bounds are loaded.
+        // OnWillRenderObject for the limbs the camera draws: renderer.bounds against the orthographic view (the
+        // sprites sit between its near and far planes, so the frustum test is the rectangle overlap).
         for l in 0..g.limbs.len() {
-            if g.limb_active(l) {
+            if !g.limb_active(l) {
+                continue;
+            }
+            let drawn = g.input.view.is_none_or(|(min, max)| {
+                let (c, e) = g.sprite_world_bounds(g.limbs[l].PhysicalBehaviour);
+                (0..2).all(|i| c[i] + e[i] >= min[i] && c[i] - e[i] <= max[i])
+            });
+            if drawn {
                 g.skin_will_render(l);
             }
         }

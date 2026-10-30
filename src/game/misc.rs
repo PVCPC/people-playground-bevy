@@ -464,8 +464,11 @@ impl Game {
             if self.prefs.GorelessMode {
                 color = super::circulation::change_red_to_orange(color);
             }
-            // ponytail: WaterBehaviour.IsPointUnderWater; water is not rewritten yet, so never under water.
-            let flag = false;
+            // transform.position: the bleeding particle's world position, which its splat tracks as initialParent.
+            let s = self.bleeding[b].BloodSplatController.expect("BleedingParticle.prefab has its FancyBloodSplatController");
+            self.update_splat_pose(s);
+            let at = self.splats[s].parent_position;
+            let flag = self.is_point_under_water([at[0], at[1]]);
             let dt = self.time.deltaTime;
             let c = &self.circulations[l];
             let (flow, mult, total) = (c.BloodFlow, c.BloodLossRateMultiplier, c.TotalLiquidAmount);

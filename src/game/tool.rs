@@ -22,6 +22,8 @@ pub struct Input {
     pub controls: HashMap<String, Control>,
     /// Input.mousePosition and the main camera, in a window (recordings carry only the world position).
     pub screen: Option<Screen>,
+    /// The main camera's orthographic view (world min, max), in a window.
+    pub view: Option<([f32; 2], [f32; 2])>,
 }
 
 /// Input.mousePosition (pixels from the bottom left) and the orthographic camera's ScreenToWorldPoint, world =
