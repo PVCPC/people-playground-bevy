@@ -12,6 +12,8 @@ pub struct Restored {
     pub world: World,
     pub bodies: HashMap<String, BodyId>,
     pub fixtures: HashMap<String, FixtureId>,
+    /// Revolute joints by "HingeJoint2D name#id".
+    pub joints: HashMap<String, JointId>,
     /// GameObjects by name (the recorder names components by their object); ids are this restore's own.
     pub objects: HashMap<String, i32>,
 }
@@ -231,6 +233,9 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         c.user_index = toi.get(6).map_or(-1, |&u| u as i32);
         contacts[i] = id;
     }
+    if let Some(r) = s.of("Contacts2D").next() {
+        world.contacts2d.simulation_id = r.req("sim")?.parse().map_err(|_| "bad sim")?;
+    }
     // Unity's Collision2D records in m_Collisions order; touching contacts point at their pair's record.
     for r in s.of("Collision2DRecord") {
         let col = collision_record(r, &bodies, &fixtures, &contacts, &mut objects)?;
@@ -270,7 +275,7 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         load_body(b, e)?;
     }
     world.finish_restore(inv_dt0, world_flags & 1 != 0, moves)?;
-    Ok(Restored { world, bodies, fixtures, objects })
+    Ok(Restored { world, bodies, fixtures, joints, objects })
 }
 
 fn contact_state(v: u32) -> Result<ContactState, String> {
@@ -343,7 +348,7 @@ fn manifold2d_words(m: &Manifold2D) -> Vec<u32> {
 
 /// Unity's Collision2D records after ProcessContacts against the snapshot's, in array order. Point words past
 /// pointCount are stale in the game, so only live points compare.
-fn compare_contacts2d(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> {
+pub fn compare_contacts2d(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> {
     let w = &r.world;
     let mut out = Vec::new();
     let fixture_name: HashMap<FixtureId, &str> = r.fixtures.iter().map(|(n, &f)| (f, n.as_str())).collect();
@@ -482,7 +487,7 @@ fn compare_reports(r: &Restored, reports: &[Report], s: &Snapshot) -> Result<Vec
 }
 
 /// The world against the snapshot after its step: bodies, contacts (by fixture pair) and hinges.
-fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> {
+pub fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> {
     let w = &r.world;
     let mut out = Vec::new();
     let body_name: HashMap<BodyId, &str> = r.bodies.iter().map(|(n, &b)| (b, n.as_str())).collect();

@@ -180,6 +180,8 @@ script! {
         /// initialParent world position and the controller's own rotation.
         parent_position: [f32; 3] = [0.0, 0.0, 0.0],
         rotation: [f32; 4] = [0.0, 0.0, 0.0, 1.0],
+        /// False between Instantiate and the delayed Start (loaded scenes are already started).
+        started: bool = true,
         destroyed: bool = false,
     }
 }
@@ -364,10 +366,38 @@ impl Game {
         }
     }
 
+    /// The delayed Start of every object instantiated since the last fixed step (Unity runs these
+    /// before the step's FixedUpdates). splat_fixed_update also runs its own pending Start, so this
+    /// only matters for the order of the random draws against other FixedUpdates.
+    pub fn run_pending_starts(&mut self) {
+        for s in 0..self.splats.len() {
+            if !self.splats[s].started && !self.splats[s].destroyed {
+                self.splat_start(s);
+            }
+        }
+    }
+
+    /// FancyBloodSplatController.Start (initialParent is the bleeding particle: parent_position).
+    pub fn splat_start(&mut self, s: usize) {
+        self.splats[s].started = true;
+        // UnparentAtStart only changes the hierarchy.
+        let v = self.splats[s].AmountRange;
+        let num = (self.random.range(v[0], v[1]) as f64).round_ties_even() as i32;
+        self.splats[s].particles.clear();
+        if !self.splats[s].Continuous {
+            for i in 0..num {
+                self.create_splat_particle(s, i);
+            }
+        }
+    }
+
     /// FancyBloodSplatController.FixedUpdate
     pub fn splat_fixed_update(&mut self, s: usize) {
         if self.splats[s].destroyed {
             return;
+        }
+        if !self.splats[s].started {
+            self.splat_start(s);
         }
         self.splats[s].particles.retain(|p| !(p.Life <= 0.0));
         if self.splats[s].Continuous {

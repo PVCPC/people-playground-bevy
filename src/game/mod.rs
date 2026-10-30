@@ -10,6 +10,7 @@ pub mod map;
 pub mod misc;
 pub mod person;
 pub mod physical;
+pub mod simulate;
 
 use crate::b2::{
     math::Vec2 as V,
@@ -100,6 +101,10 @@ pub mod mathf {
     }
     pub fn sqrt(f: f32) -> f32 {
         (f as f64).sqrt() as f32
+    }
+    /// Vector2.magnitude: (float)Math.Sqrt(x * x + y * y), in double.
+    pub fn magnitude2(v: [f32; 2]) -> f32 {
+        (super::d(v[0]) * v[0] + super::d(v[1]) * v[1]).0.sqrt() as f32
     }
     /// Vector2.normalized (magnitude is (float)Math.Sqrt(x * x + y * y), in double).
     pub fn normalized2(v: [f32; 2]) -> [f32; 2] {
@@ -312,6 +317,8 @@ pub struct Prefs {
     pub DropOnDeath: bool,
     pub DismembermentLooseTissue: bool,
     pub CrushForceMultiplier: f32,
+    pub ProceduralFragments: bool,
+    pub FancyEffects: bool,
 }
 
 /// CollisionQuality.Dynamic
@@ -331,6 +338,8 @@ impl Default for Prefs {
             DropOnDeath: true,
             DismembermentLooseTissue: true,
             CrushForceMultiplier: 1.0,
+            ProceduralFragments: false,
+            FancyEffects: true,
         }
     }
 }
@@ -450,6 +459,21 @@ impl Rigidbody {
     pub fn mass(&self, w: &World) -> f32 {
         w.body(self.body).rigidbody.mass
     }
+    /// Rigidbody2D.AddForce(force, ForceMode2D.Impulse): b2Body::ApplyLinearImpulse at the world centre, waking the body.
+    // ponytail: assumed from Box2D; the native Rigidbody2D::AddForce is not disassembled yet.
+    pub fn add_force_impulse(&self, w: &mut World, impulse: [f32; 2]) {
+        let b = w.body_mut(self.body);
+        if b.kind != BodyType::Dynamic {
+            return;
+        }
+        if b.flags & BODY_AWAKE == 0 {
+            b.flags |= BODY_AWAKE;
+            b.sleep_time = 0.0;
+        }
+        b.linear_velocity = V::new(b.linear_velocity.x + b.inv_mass * impulse[0], b.linear_velocity.y + b.inv_mass * impulse[1]);
+        let r = [b.sweep.c.x - b.sweep.c.x, b.sweep.c.y - b.sweep.c.y];
+        b.angular_velocity += b.inv_i * (r[0] * impulse[1] - r[1] * impulse[0]);
+    }
     /// Rigidbody2D::SetCollisionDetectionMode (CollisionDetectionMode2D: 0 discrete, 1 continuous)
     pub fn set_collision_detection_mode(&mut self, w: &mut World, mode: i32) {
         self.collisionDetectionMode = mode;
@@ -483,6 +507,8 @@ pub struct Hinge {
     pub anchor: [f32; 2],
     pub connectedAnchor: [f32; 2],
     pub enabled: bool,
+    /// The component was destroyed (a broken joint).
+    pub destroyed: bool,
 }
 
 /// b2Body::SetAwake(true) as the joint setters inline it: the sleep timer always restarts.
@@ -639,6 +665,16 @@ pub struct Game {
     /// Global.physicalBehaviourChunks (each chunk holds at most 128) and chunksUpToDate.
     pub physical_chunks: std::collections::HashMap<(i32, i32), Vec<usize>>,
     pub chunksUpToDate: bool,
+    /// PhysicalBehaviour.contactBuffer / LimbBehaviour.contactBuffer: static ContactPoint2D[8], stale between calls.
+    pub physical_contact_buffer: [crate::b2::contacts2d::ContactPoint2D; 8],
+    pub limb_contact_buffer: [crate::b2::contacts2d::ContactPoint2D; 8],
+    /// Physics2D.velocityIterations / positionIterations (UserPreferences.PhysicsIterations).
+    pub velocityIterations: i32,
+    pub positionIterations: i32,
+    /// PhysicsScene2D.m_JointBreakLimits: hinges with a finite break force or torque, in list order.
+    pub joint_break_limits: Vec<usize>,
+    /// Rigidbody-less Transforms that parent physical objects.
+    pub transform_nodes: Vec<crate::unity::transform::Node>,
 }
 
 impl Default for Random {

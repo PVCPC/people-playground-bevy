@@ -1,5 +1,7 @@
 //! UnityEngine natives the game scripts call, rewritten from UnityPlayer.dll (Unity 2020.3).
 
+pub mod transform;
+
 /// The engine's 2 pi constant (0x40c90fdb).
 const TWO_PI: f32 = 6.2831855;
 

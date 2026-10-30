@@ -1,5 +1,6 @@
 //! BloodContainer, CirculationBehaviour and the Liquid registry.
 use super::{d, mathf, script, CsDict, Game};
+use super::misc::{BleedingParticle, FancyBloodSplat, FixedIntervalDistributor};
 
 /// Liquid.Registry / Liquid.LiquidSet order (Global.Awake); a liquid is its index here.
 pub const LIQUIDS: &[(&str, &str)] = &[
@@ -538,10 +539,118 @@ impl Game {
         }
     }
 
+    /// GetOriginalBloodType().Color
+    pub fn original_blood_color(&self, l: usize) -> [f32; 4] {
+        liquid_color(self.blood_type(l))
+    }
+
+    /// CirculationBehaviour.IsWorldPointInArteryRect (mindistance = 4f / 35f)
+    pub fn is_world_point_in_artery_rect(&self, l: usize, world_point: [f32; 2]) -> bool {
+        let Some(rects) = &self.circulations[l].LocalArteryRects else { return false };
+        let mindistance = 4.0f32 / 35.0;
+        let num = mindistance * mindistance;
+        let vector = self.inverse_transform_point(self.limbs[l].PhysicalBehaviour, [world_point[0], world_point[1], 0.0]);
+        for r in rects {
+            // Bounds.ClosestPoint: the point clamped to center -+ extents.
+            let mut closest = [0.0f32; 3];
+            for i in 0..3 {
+                let (min, max) = (r[i] - r[i + 3], r[i] + r[i + 3]);
+                closest[i] = if vector[i] < min { min } else if vector[i] > max { max } else { vector[i] };
+            }
+            let dv = [closest[0] - vector[0], closest[1] - vector[1], closest[2] - vector[2]];
+            if (d(dv[0]) * dv[0] + d(dv[1]) * dv[1] + d(dv[2]) * dv[2]).f() <= num {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// CirculationBehaviour.CreateBleedingParticle
+    /// Every caller passes makeSound = false, so DripSounds is always nulled.
+    pub fn create_bleeding_particle(&mut self, l: usize, world_position: [f32; 2], direction: [f32; 2], laminarity: f32) {
+        if !self.limbs[l].IsAndroid && !self.limbs[l].IsZombie && self.circulations[l].BleedingPointCount < 8 {
+            // BleedingParticle.prefab (Resources/prefabs). The ClosestPoint onto the sprite bounds and
+            // the rotation only feed the splat's decal positions and directions (presentation), so the
+            // position is the unclamped worldPosition - direction * 0.1f and transform.up = direction
+            // is a z rotation.
+            let position = [(d(world_position[0]) - d(direction[0]) * 0.1f32).f(), (d(world_position[1]) - d(direction[1]) * 0.1f32).f(), 0.0];
+            let angle = (direction[1] as f64).atan2(direction[0] as f64) - std::f64::consts::FRAC_PI_2;
+            let rotation = [0.0, 0.0, (angle * 0.5).sin() as f32, (angle * 0.5).cos() as f32];
+            let b = self.bleeding.len();
+            // Awake of the clone's hierarchy (Trail, extraDecals, water puff): the two
+            // ActivateIfFancyEffects each draw `Chance(1) > Random.value` before reading FancyEffects.
+            let extra_decals = 1.0 > self.random.value() && self.prefs.FancyEffects;
+            let _water_puff = 1.0 > self.random.value() && self.prefs.FancyEffects;
+            // The extraDecals child is the FancyBloodSplatController (Start is delayed: started = false).
+            let splat = if extra_decals {
+                self.splats.push(FancyBloodSplat {
+                    UnparentAtStart: false,
+                    DirectionMode: 0,
+                    Continuous: true,
+                    Direction: [0.0, 1.0],
+                    SpawningChance: 0.0,
+                    AmountRange: [1.0, 4.0],
+                    AngleRandomisation: 9.0,
+                    LifetimeInSeconds: [1.0, 2.0],
+                    EjectionForce: [0.0, 1.0],
+                    DecalColourMultiplier: [1.0, 0.0, 0.0, 1.0],
+                    Size: 0.1,
+                    DestroyWhenNoParticles: true,
+                    TriggerOnCollide: false,
+                    particles: Vec::new(),
+                    parent_position: position,
+                    rotation,
+                    started: false,
+                    destroyed: false,
+                });
+                Some(self.splats.len() - 1)
+            } else {
+                None
+            };
+            // BleedingParticleBehaviour: Awake (clock, collision module) and Start (WaterPuffSystem) draw nothing.
+            self.bleeding.push(BleedingParticle {
+                IsOnlyForInternalBleeding: false,
+                SpeedMultiplier: 0.6,
+                RateMultiplier: 1.25,
+                Laminarity: laminarity,
+                DripSoundRateThreshold: 1.0,
+                ShouldBecomeSmokeInWater: self.circulations[l].BleedingPointCount == 0,
+                PulseSpeed: 2.0,
+                PulseIntensity: 1.3,
+                fakeHeartClock: 0.0,
+                CirculationBehaviour: l,
+                PushingTo: None,
+                BloodSplatController: splat,
+                dripSoundClock: FixedIntervalDistributor::with_rate(0.5),
+                DripSounds: None,
+                visible: false,
+                startSpeedMultiplier: 0.0,
+                rateOverTimeMultiplier: 0.0,
+                emission_enabled: false,
+                destroyed: false,
+            });
+            self.circulations[l].BleedingParticles.push(b);
+            self.circulations[l].BleedingPointCount += 1;
+        }
+    }
+
+    /// CirculationBehaviour.Cut
+    pub fn cut(&mut self, l: usize, point: [f32; 2], direction: [f32; 2]) {
+        if !self.circulations[l].ImmuneToDamage {
+            let flag = self.is_world_point_in_artery_rect(l, point);
+            self.circulations[l].BleedingRate += if flag { 1.0 } else { 0.25 };
+            self.create_bleeding_particle(l, point, direction, if flag { 1.0 } else { 0.0 });
+        }
+    }
+
     /// CirculationBehaviour.HealBleeding
     pub fn heal_bleeding(&mut self, l: usize) {
         for i in std::mem::take(&mut self.circulations[l].BleedingParticles) {
             self.bleeding[i].destroyed = true;
+            // The extraDecals splat is a child of the particle.
+            if let Some(s) = self.bleeding[i].BloodSplatController {
+                self.splats[s].destroyed = true;
+            }
         }
         let c = &mut self.circulations[l];
         c.BleedingRate = 0.0;

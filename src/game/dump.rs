@@ -5,6 +5,7 @@ use super::misc::FixedIntervalDistributor;
 use super::person::{LimbPose, RagdollPose};
 use super::physical::ColliderBoolPair;
 use super::*;
+use crate::unity::transform::{Node as TransformNode, Trs};
 use crate::b2::{math::Rot, world::BodyDef};
 use crate::game_assets::{CurveCache, HumanRig};
 use std::collections::HashMap;
@@ -123,6 +124,14 @@ fn list(text: &str) -> Vec<&str> {
     if inner.is_empty() { Vec::new() } else { split_top(inner, ';') }
 }
 
+/// A PhysicsMaterial2D asset's friction from the exported project.
+fn material_friction(name: &str) -> Result<f32, String> {
+    let path = format!("unity-export/ExportedProject/Assets/PhysicsMaterial2D/{name}.physicsMaterial2D");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    let v = text.lines().find_map(|l| l.trim().strip_prefix("friction: ")).ok_or(format!("{path}: no friction"))?;
+    v.parse().map_err(|e| format!("{path}: {e}"))
+}
+
 fn f(text: &str) -> f32 {
     f32::from_bits(u32::from_str_radix(text, 16).unwrap_or_else(|_| panic!("bad float {text}")))
 }
@@ -180,8 +189,17 @@ impl Game {
     pub fn from_snapshot(s: &Snapshot, rig: &HumanRig) -> Result<Game, String> {
         let mut g = Game::default();
         g.DynamicSqrdVelocityThreshold = 2500.0;
+        (g.velocityIterations, g.positionIterations) = (32, 32);
         g.load_time(s);
         g.world = World::new(V::new(0.0, -9.81));
+        // The whole b2 world when the dump has it (the map's colliders, contacts and listener records too).
+        let mut restored = match s.of("b2World").next() {
+            Some(_) => Some(physics::restore(s, V::new(0.0, -9.81))?),
+            None => None,
+        };
+        if let Some(r) = restored.as_mut() {
+            g.world = std::mem::replace(&mut r.world, World::new(V::ZERO));
+        }
 
         let props = ids(s, "PhysicalProperties");
         for r in s.of("PhysicalProperties") {
@@ -197,6 +215,12 @@ impl Game {
             p.SparksOnSlide = r.req("SparksOnSlide")? == "1";
             p.SoftImpact = list(r.req("SoftImpact")?).len();
             p.HardImpact = list(r.req("HardImpact")?).len();
+            p.friction = match (r.get("friction"), r.req("PhysicMaterial")?) {
+                (Some(bits), _) => Some(f(bits)),
+                (None, "null") => None,
+                // Older recordings: the material asset's serialized value.
+                (None, m) => Some(material_friction(&m[1..m.find('#').unwrap()])?),
+            };
             g.properties.push(p);
         }
 
@@ -219,11 +243,31 @@ impl Game {
         let rbs: Vec<&Record> = s.of("Rigidbody2D").collect();
         let mut limb_bodies = Vec::new();
         for (rb, raw) in rbs.iter().zip(s.of("b2Body")) {
-            let id = g.world.create_body(&BodyDef { kind: body_type(rb.req("bodyType")?.parse().unwrap()), ..Default::default() });
-            load_body(g.world.body_mut(id), raw)?;
+            let id = match &restored {
+                Some(r) => r.bodies[&format!("{}#{}", rb.name, rb.id)],
+                None => {
+                    let id = g.world.create_body(&BodyDef { kind: body_type(rb.req("bodyType")?.parse().unwrap()), ..Default::default() });
+                    load_body(g.world.body_mut(id), raw)?;
+                    id
+                }
+            };
             limb_bodies.push(id);
         }
 
+        // dump10's chain was the root alone, without parent links: treated as an older recording.
+        let chain: Vec<&Record> = s.of("TransformChain").filter(|r| r.get("parent").is_some()).collect();
+        for r in &chain {
+            let v3 = |k: &str| -> Result<[f32; 4], String> {
+                let [x, y, z]: [f32; 3] = floats(r.req(k)?);
+                Ok([x, y, z, 0.0])
+            };
+            let trs = Trs { t: v3("lpos")?, q: floats(r.req("lrot")?), s: v3("lscale")? };
+            g.transform_nodes.push(TransformNode { id: r.id, trs, parent: None });
+        }
+        let node_of = |g: &Game, text: &str| text.contains('#').then(|| reference(text)).flatten().and_then(|id| g.transform_nodes.iter().position(|n| n.id == id));
+        for (i, r) in chain.iter().enumerate() {
+            g.transform_nodes[i].parent = node_of(&g, r.req("parent")?);
+        }
         let phys_ids = ids(s, "PhysicalBehaviour");
         for r in s.of("PhysicalBehaviour") {
             let mut p = Physical { name: r.name.clone(), id: r.id, ..Default::default() };
@@ -235,6 +279,10 @@ impl Game {
                 t => Some(list(t).into_iter().map(floats::<2>).collect()),
             };
             p.has_fire_map = r.req("LocalFirePropagationMap")? != "null";
+            if let Some(rs) = &restored {
+                let collider = |k: &String| k.split(':').next()?.rsplit_once('#').filter(|(o, _)| *o == r.name).map(|(_, id)| id.parse::<i32>().unwrap());
+                p.collider = rs.fixtures.keys().find_map(collider).unwrap_or(0);
+            }
             match limb_by_name(&r.name) {
                 Some(l) => {
                     let rb = rbs[l];
@@ -244,6 +292,7 @@ impl Game {
                         collisionDetectionMode: rb.req("cdm")?.parse().unwrap(),
                         interpolation: rb.req("interpolation")?.parse().unwrap(),
                     };
+                    p.parent = rb.get("parent").and_then(|t| node_of(&g, t));
                     p.transform = Pose {
                         position: floats(rb.req("tpos")?),
                         rotation: floats(rb.req("trot")?),
@@ -251,7 +300,10 @@ impl Game {
                     };
                 }
                 None => {
-                    let body = g.world.create_body(&BodyDef::default());
+                    let body = match restored.as_ref().and_then(|rs| rs.bodies.iter().find(|(n, _)| n.rsplit_once('#').map(|(o, _)| o) == Some(r.name.as_str()))) {
+                        Some((_, &b)) => b,
+                        None => g.world.create_body(&BodyDef::default()),
+                    };
                     p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0 };
                 }
             }
@@ -292,9 +344,12 @@ impl Game {
                 anchor: [0.0; 2],
                 connectedAnchor: [0.0; 2],
                 enabled: r.req("enabled")? == "1",
+                destroyed: false,
             };
             let j = raw.req("joint")?;
-            if j != "null" {
+            if let Some(rs) = &restored {
+                h.joint = rs.joints.get(&format!("{}#{}", r.name, r.id)).copied();
+            } else if j != "null" {
                 let w = words(j);
                 let fl = |i: usize| f32::from_bits(w[i]);
                 let def = crate::b2::revolute::RevoluteDef {
@@ -315,6 +370,10 @@ impl Game {
                 h.joint = Some(id);
             }
             let _ = rig;
+            // ponytail: the recorder does not dump m_JointBreakLimits; finite-limit hinges list in hinge order.
+            if h.breakForce != f32::INFINITY || h.breakTorque != f32::INFINITY {
+                g.joint_break_limits.push(g.hinges.len());
+            }
             g.hinges.push(h);
         }
 
@@ -467,6 +526,16 @@ impl Game {
                 [lossy[0], lossy[1], 1.0]
             }
         };
+        // Older recordings lack the chain: the limbs hang off the root, spawned at the origin unrotated.
+        // ponytail: their group objects (FrontLeg, ...) are missing, so limb Transforms can be an ulp off there.
+        if g.transform_nodes.is_empty() {
+            let [sx, sy, sz] = p.localScale;
+            let trs = Trs { t: [0.0; 4], q: [0.0, 0.0, 0.0, 1.0], s: [sx, sy, sz, 0.0] };
+            g.transform_nodes.push(TransformNode { id: 0, trs, parent: None });
+            for &l in &p.Limbs {
+                g.physicals[g.limbs[l].PhysicalBehaviour].parent = Some(0);
+            }
+        }
         g.people.push(p);
         Ok(g)
     }
@@ -761,15 +830,41 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     out
 }
 
-/// --script-test: for every FS snapshot, load the game's state, run the FixedUpdate scripts and compare at FM.
+/// The physics pass's results at FE: the b2 world, the Collision2D records and each awake body's Transform.
+fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
+    // A second restore of the same snapshot builds the same ids, so its name maps fit the game's world.
+    let mut r = physics::restore(from, V::new(0.0, -9.81))?;
+    r.world = std::mem::replace(&mut g.world, World::new(V::ZERO));
+    let mut out = physics::compare_world(&r, to)?;
+    out.extend(physics::compare_contacts2d(&r, to)?);
+    g.world = std::mem::replace(&mut r.world, World::new(V::ZERO));
+    // Limb Transforms need the group objects between limb and root (TransformChain parents, from dump11 on).
+    let chain = from.of("TransformChain").any(|r| r.get("parent").is_some());
+    for (l, rb) in to.of("Rigidbody2D").enumerate().filter(|_| chain) {
+        let t = &g.physicals[g.limbs[l].PhysicalBehaviour].transform;
+        let (pos, rot): ([f32; 3], [f32; 4]) = (floats(rb.req("tpos")?), floats(rb.req("trot")?));
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        if bits(&pos) != bits(&t.position) || bits(&rot) != bits(&t.rotation) {
+            out.push(format!("Transform {}: game {:08x?} {:08x?} ours {:08x?} {:08x?}", rb.name, bits(&pos), bits(&rot), bits(&t.position), bits(&t.rotation)));
+        }
+    }
+    Ok(out)
+}
+
+/// --script-test: for every FS snapshot, load the game's state, run the FixedUpdate scripts and compare at FM;
+/// for every FM snapshot with the b2 world, run the physics pass with its callbacks and compare at FE.
 pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
     let text = std::fs::read_to_string(dump).map_err(|e| e.to_string())?;
     let snaps = parse(&text);
     let (mut segments, mut failed) = (0, 0);
     let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+    // The physics pass needs the contacts' Collision2D records and the scene's simulation id even on contactless
+    // frames (recorded from dump12 on).
+    let records = snaps.iter().any(|s| s.of("Contacts2D").next().is_some());
     for pair in snaps.windows(2) {
         let update = pair[0].pt == "US" && pair[1].pt == "UE";
-        if !update && (pair[0].pt != "FS" || pair[1].pt != "FM") {
+        let physics = records && pair[0].pt == "FM" && pair[1].pt == "FE" && pair[0].of("b2World").next().is_some();
+        if !update && !physics && (pair[0].pt != "FS" || pair[1].pt != "FM") {
             continue;
         }
         segments += 1;
@@ -782,12 +877,16 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 return Err(format!("euler {}: game {:08x} ours {:08x}", r.name, theirs.to_bits(), euler_z(q).to_bits()));
             }
         }
+        let mut diffs = Vec::new();
         if update {
             g.update_scripts();
+        } else if physics {
+            g.simulate_physics();
+            diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
         } else {
             g.fixed_update_scripts();
         }
-        let diffs = compare(&mut g, &pair[1]);
+        diffs.extend(compare(&mut g, &pair[1]));
         if let Ok(path) = std::env::var("PPG_DIFFS") {
             use std::io::Write;
             let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();

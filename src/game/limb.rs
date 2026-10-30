@@ -1,5 +1,7 @@
 //! LimbBehaviour
+use super::physical::{dot2, get_average_impulse_remove_outliers, get_contacts, get_first_valid_contact, get_min_impulse};
 use super::{d, mathf, person::pose_state, script, Game};
+use crate::b2::contacts2d::ScriptCollision;
 
 /// LimbBehaviour.BodyPart
 pub const HEAD: i32 = 0;
@@ -78,6 +80,10 @@ script! {
         SpeciesIdentity: String = "Human".into(),
         BloodLiquidType: String = "BLOOD".into(),
         enabled: bool = true,
+        /// The GoreStringBehaviour component: present, enabled and its `Joint` (a SpringJoint2D).
+        goreString: bool = true,
+        goreStringEnabled: bool = true,
+        goreStringJoint: bool = false,
     }
 }
 
@@ -245,7 +251,7 @@ impl Game {
         let h = self.limbs[l].Joint.unwrap();
         let ph = &self.physicals[self.limbs[l].PhysicalBehaviour];
         if ph.isDisintegrated {
-            self.hinges[h].set_break_force(0.0);
+            self.set_hinge_break_force(h, 0.0);
             return;
         }
         let limb = &self.limbs[l];
@@ -261,8 +267,8 @@ impl Game {
             num = f32::MAX;
         }
         let force = num * (if limb.IsAndroid { 80.0 } else { 2.5 });
-        self.hinges[h].set_break_force(force);
-        self.hinges[h].set_break_torque(num * 5000.0);
+        self.set_hinge_break_force(h, force);
+        self.set_hinge_break_torque(h, num * 5000.0);
     }
 
     /// LimbBehaviour.CalculateJointStress
@@ -718,6 +724,317 @@ impl Game {
             if !self.limbs[l].IsZombie {
                 self.add_pain(person, dt * 0.9);
             }
+        }
+    }
+}
+
+impl Game {
+    /// Transform.InverseTransformPoint of a physical object's transform.
+    // ponytail: managed-style inverse TRS (inverse rotation, then divide by scale); the native cached
+    // worldToLocal matrix may differ in the last bit. Only distance thresholds read the result.
+    pub fn inverse_transform_point(&self, p: usize, world: [f32; 3]) -> [f32; 3] {
+        let t = &self.physicals[p].transform;
+        let rel = [world[0] - t.position[0], world[1] - t.position[1], world[2] - t.position[2]];
+        let r = mathf::rotate([-t.rotation[0], -t.rotation[1], -t.rotation[2], t.rotation[3]], rel);
+        [r[0] / t.localScale[0], r[1] / t.localScale[1], r[2] / t.localScale[2]]
+    }
+
+    /// SkinMaterialHandler.AddDamagePoint
+    pub fn skin_add_damage_point(&mut self, l: usize, ty: i32, global_position: [f32; 2], intensity: f32) {
+        if self.skins[l].currentDamagePointCount < 128 && !(intensity <= mathf::EPSILON) {
+            let intensity = intensity * self.skins[l].intensityMultiplier;
+            self.skin_internal_add_damage_point(l, ty, global_position, intensity);
+            for a in self.skins[l].adjacentLimbs.clone() {
+                self.skin_internal_add_damage_point(a, ty, global_position, intensity);
+            }
+        }
+    }
+
+    /// SkinMaterialHandler.InternalAddDamagePoint (Sync only uploads to the material).
+    fn skin_internal_add_damage_point(&mut self, l: usize, ty: i32, global_position: [f32; 2], intensity: f32) {
+        use super::misc::damage_type::*;
+        if !(self.skins[l].currentDamagePointCount < 128 && !(intensity <= mathf::EPSILON)) {
+            return;
+        }
+        let intensity = mathf::clamp(intensity, 0.0, 100.0);
+        let local = self.inverse_transform_point(self.limbs[l].PhysicalBehaviour, [global_position[0], global_position[1], 0.0]);
+        let point_intensity = intensity * 0.1;
+        let min_distance = match ty {
+            BLUNT => 0.1 * point_intensity,
+            BULLET => 0.01 * mathf::min(point_intensity, 5.0),
+            STAB => 0.02 * point_intensity,
+            DISMEMBERMENT => 0.05,
+            BURN => 0.015,
+            _ => 0.0,
+        };
+        let skin = &mut self.skins[l];
+        // GetNearEntry
+        let num = min_distance * min_distance;
+        let mut near = None;
+        for index in 0..skin.currentDamagePointCount as usize {
+            let p = skin.damagePoints[index];
+            let dz = local[2] - 0.0;
+            let sqr = (d(local[0] - p[0]) * (local[0] - p[0]) + d(local[1] - p[1]) * (local[1] - p[1]) + d(dz) * dz).f();
+            if (mathf::floor(p[3]) as i32 == ty || p[2] <= 0.01) && sqr <= num {
+                skin.damagePoints[index][3] = ty as f32;
+                near = Some(index);
+                break;
+            }
+        }
+        match near {
+            Some(index) => skin.damagePoints[index][2] = mathf::max(skin.damagePoints[index][2], point_intensity),
+            None => {
+                let n = skin.currentDamagePointCount as usize;
+                skin.damagePointTimeStamps[n] = self.time.time;
+                skin.damagePoints[n] = [local[0], local[1], point_intensity, ty as f32];
+                skin.currentDamagePointCount += 1;
+            }
+        }
+    }
+
+    /// LimbBehaviour.OnCollisionEnter2D
+    pub fn limb_on_collision_enter(&mut self, l: usize, c: &ScriptCollision) {
+        use super::misc::damage_type::*;
+        let mut buffer = self.limb_contact_buffer;
+        let contacts = get_contacts(c, &mut buffer);
+        self.limb_contact_buffer = buffer;
+        let mut num = (d(get_average_impulse_remove_outliers(&buffer, contacts)) / self.mass_strength_ratio(l) * self.prefs.FragilityMultiplier * 0.8f32).f();
+        let normal = [buffer[0].normal.x, buffer[0].normal.y];
+        let point = [buffer[0].point.x, buffer[0].point.y];
+        if self.limbs[l].IsAndroid {
+            num *= 0.1;
+        }
+        if let Some(v) = self.collision_physical(c) {
+            let value = &self.physicals[v];
+            if value.SimulateTemperature && value.Temperature >= 70.0 && !self.limbs[l].IsAndroid {
+                let temperature = value.Temperature;
+                self.limb_damage(l, temperature / 140.0);
+                self.skin_add_damage_point(l, BURN, point, temperature * 0.01);
+                if self.limb_is_considered_alive(l) && !self.limb_is_paralysed(l) {
+                    self.add_pain(self.limbs[l].Person, 1.0);
+                }
+                self.limb_wince(l, 150.0);
+                if temperature >= 100.0 {
+                    self.heal_bleeding(l);
+                }
+            }
+        }
+        if self.limbs[l].HasBrain && num > 0.6 && self.random.value() as f64 > 0.8 {
+            self.circulations[l].InternalBleedingIntensity += num;
+        }
+        if num < 2.0 {
+            return;
+        }
+        self.limbs[l].BruiseCount = self.limbs[l].BruiseCount.wrapping_add(1);
+        self.propagate_impact_damage(l, num, normal, point, 0, l);
+        if !(num < 1.0) && !self.limbs[l].IsAndroid && !(self.amount_of_blood(l) < 0.2) {
+            if self.random.value() > 0.8 {
+                self.cut(l, point, normal);
+            }
+            if !(num < 3.0) || !(self.limbs[l].Health > self.limbs[l].InitialHealth * 0.2) {
+                // PhysicalBehaviour.CreateImpactEffect: instantiates the ShotImpact effect prefab.
+                // Decal message: decals are presentation; GetComputedColor still caches the blood colour.
+                let fallback = self.original_blood_color(l);
+                self.get_computed_color(l, fallback);
+            }
+        }
+    }
+
+    /// LimbBehaviour.PropagateImpactDamage
+    fn propagate_impact_damage(&mut self, l: usize, impulse: f32, direction: [f32; 2], pos: [f32; 2], iteration: i32, origin: usize) {
+        self.act_on_impact(l, impulse, [pos[0], pos[1], 0.0]);
+        if iteration >= 8 {
+            return;
+        }
+        for i in 0..self.limbs[l].ConnectedLimbs.len() {
+            let other = self.limbs[l].ConnectedLimbs[i];
+            if other == origin {
+                continue;
+            }
+            let (a, b) = (self.physicals[self.limbs[other].PhysicalBehaviour].transform.position, self.physicals[self.limbs[l].PhysicalBehaviour].transform.position);
+            let num = dot2([a[0] - b[0], a[1] - b[1]], direction);
+            if num > 0.0 {
+                self.propagate_impact_damage(other, (d(num) * impulse * 0.9f32).f(), direction, pos, iteration + 1, l);
+            }
+        }
+    }
+
+    /// LimbBehaviour.OnCollisionStay2D
+    pub fn limb_on_collision_stay(&mut self, l: usize, c: &ScriptCollision) {
+        use super::misc::damage_type::*;
+        if self.limbs[l].IsAndroid {
+            return;
+        }
+        let mut buffer = self.limb_contact_buffer;
+        let contacts = get_contacts(c, &mut buffer);
+        self.limb_contact_buffer = buffer;
+        let first_valid_contact = get_first_valid_contact(&buffer, contacts);
+        let mass_strength_ratio = self.mass_strength_ratio(l);
+        let sqr = mathf::sqr_magnitude([c.relative_velocity.x, c.relative_velocity.y]);
+        if d(sqr) * self.prefs.FragilityMultiplier / mass_strength_ratio > d(self.limbs[l].FrictionBurnWoundMinSpeedSqrd) {
+            self.limb_damage(l, 1.0);
+            self.skin_add_damage_point(l, BURN, [first_valid_contact.point.x, first_valid_contact.point.y], 2.0);
+        }
+        let p = self.limbs[l].PhysicalBehaviour;
+        if self.prefs.LimbCrushing && self.physicals[p].rigidbody.bodyType != 2 {
+            let threshold = d(mathf::max(10.0, self.limbs[l].BreakingThreshold))
+                * mathf::lerp(self.positionIterations as f32 / 16.0, 1.0, 0.2);
+            let force = d(get_min_impulse(&buffer, contacts)) * self.prefs.CrushForceMultiplier / mass_strength_ratio * self.prefs.FragilityMultiplier;
+            if !(force < threshold) {
+                // Decal message: decals are presentation; GetComputedColor still caches the blood colour.
+                let fallback = self.original_blood_color(l);
+                self.get_computed_color(l, fallback);
+                self.limb_crush(l);
+            }
+        }
+    }
+
+    /// LimbBehaviour.ActOnImpact
+    pub fn act_on_impact(&mut self, l: usize, impulse: f32, global_position: [f32; 3]) {
+        use super::misc::damage_type::*;
+        if self.limbs[l].ImmuneToDamage {
+            return;
+        }
+        let limb = &self.limbs[l];
+        let num = (d(limb.BreakingThreshold) * self.mass_strength_ratio(l) / limb.ImpactDamageMultiplier).f();
+        if impulse > num && self.random.value() > 0.2 {
+            self.break_bone(l);
+        }
+        let num2 = mathf::max(1.0, self.limbs[l].Vitality);
+        if d(impulse) > d(num) * 0.5f32 / num2 && d(self.random.value()) > d(0.8) / num2 {
+            self.circulations[l].InternalBleedingIntensity += mathf::clamp(impulse * num2, 0.0, 1.0);
+        }
+        let person = self.limbs[l].Person;
+        if !self.limbs[l].IsAndroid {
+            if self.prefs.BrainDamage && !self.limbs[l].IsZombie && self.limbs[l].HasBrain && self.random.value() > 0.991 && impulse > 4.0 {
+                self.people[person].BrainDamaged = true;
+            } else {
+                let damage = (d(impulse) * impulse * impulse * 2.8f32 * self.limbs[l].ImpactDamageMultiplier).f();
+                self.limb_damage(l, damage);
+            }
+        }
+        self.skin_add_damage_point(l, BLUNT, [global_position[0], global_position[1]], impulse * 4.0);
+        let num3 = (d(impulse) * (d(self.limbs[l].Vitality) + 1.0f32) * 0.25f32).f();
+        if !self.people[person].BrainDamaged && self.limbs[l].HasBrain && num3 > 1.0 && !self.limbs[l].IsAndroid && self.random.value() > 0.5 {
+            let r = self.random.value();
+            self.people[person].Consciousness = (d(self.people[person].Consciousness) * (d(r) * 0.8f32)).f();
+        }
+        if self.limb_is_considered_alive(l) && num3 > 0.2 && !self.limbs[l].IsZombie {
+            self.people[person].ShockLevel = (d(self.people[person].ShockLevel) + d(num3) * 0.04f32).f();
+        }
+    }
+
+    /// LimbBehaviour.Crush
+    pub fn limb_crush(&mut self, l: usize) {
+        let p = self.limbs[l].PhysicalBehaviour;
+        if self.physicals[p].isDisintegrated || self.limbs[l].ImmuneToDamage {
+            return;
+        }
+        let person = self.limbs[l].Person;
+        if self.nodes[l].IsConnectedToRoot {
+            if self.prefs.StopAnimationOnDamage {
+                self.people[person].OverridePoseIndex = -1;
+            }
+            self.add_pain(person, 25.0);
+        }
+        if !self.prefs.GorelessMode {
+            // The BloodExplosion prefab holds a FancyBloodSplatController whose Start draws random numbers,
+            // then SetColor(GetComputedColor) and ShatterProcedurally.
+            unimplemented!("LimbBehaviour.Crush: BloodExplosionPrefab, SetColor and ShatterProcedurally");
+        }
+        if !self.physicals[p].isDisintegrated {
+            self.physical_disintegrate(p);
+        }
+    }
+}
+
+impl Game {
+    /// SendMessage("OnJointBreak2D", joint) for hinge `h`, to the limb GameObject that owns it.
+    /// Receivers in component order (Person.prefab, every limb): PhysicalBehaviour, LimbBehaviour,
+    /// GoreStringBehaviour; disabled behaviours receive it too. The caller destroys the joint
+    /// afterwards (Hinge.destroyed), so everything here still sees it intact.
+    pub fn joint_break_messages(&mut self, h: usize) {
+        let Some(l) = self.limbs.iter().position(|limb| limb.Joint == Some(h)) else { return };
+        // PhysicalBehaviour.OnJointBreak2D: only matches `penetration.Joint` (a SliderJoint2D), never a hinge.
+        // LimbBehaviour.OnJointBreak2D
+        self.limb_on_joint_break(l, h);
+        // GoreStringBehaviour.OnJointBreak2D: acts only when `joint == Joint` (its own SpringJoint2D), never a hinge.
+    }
+
+    /// ConnectedNodeBehaviour.SetToNull
+    fn node_set_to_null(&mut self, node: usize, other: usize) {
+        if let Some(c) = self.nodes[node].Connections.iter_mut().find(|c| **c == Some(other)) {
+            *c = None;
+        }
+    }
+
+    /// LimbBehaviour.OnJointBreak2D (joint == Joint)
+    fn limb_on_joint_break(&mut self, l: usize, h: usize) {
+        let component = self.hinges[h].connected;
+        self.circulation_on_joint_break(l);
+        if self.limbs[l].IsLethalToBreak {
+            self.limbs[l].Health = 0.0;
+        }
+        if self.nodes[l].IsConnectedToRoot && !self.limb_is_paralysed(l) {
+            let person = self.limbs[l].Person;
+            self.add_pain(person, 15.0);
+        }
+        // The connected body always has a ConnectedNodeBehaviour (nodes are indexed by limb).
+        self.node_set_to_null(component, l);
+        self.node_set_to_null(l, component);
+        if let Some(i) = self.limbs[l].ConnectedLimbs.iter().position(|&x| x == component) {
+            self.limbs[l].ConnectedLimbs.remove(i);
+        }
+        let p = self.limbs[l].PhysicalBehaviour;
+        if !self.prefs.GorelessMode
+            && self.prefs.DismembermentLooseTissue
+            && self.limbs[l].goreString
+            && self.random.value() > 0.5
+            && self.limbs[l].goreStringEnabled
+            && !self.limbs[l].goreStringJoint
+            && self.skins[l].acidProgress < 0.7
+            && self.physicals[p].BurnProgress < 0.8
+        {
+            // SpringJoint2D plus Random.Range(5, 14) and per-line draws.
+            unimplemented!("GoreStringBehaviour.CreateJoint");
+        }
+        self.limbs[l].IsDismembered = true;
+        let vector = self.transform_point(p, self.hinges[h].anchor);
+        // CreateImpactEffect: effect prefab only.
+        self.skin_add_damage_point(l, super::misc::damage_type::DISMEMBERMENT, vector, 25.0);
+        let clips = self.people[self.limbs[l].Person].DismembermentClips;
+        // PlayClipOnce(PickRandom()): audio, the draw stays.
+        self.pick_random(clips);
+        self.synchronise_dismemberment(l, component);
+    }
+
+    /// LimbBehaviour.SynchroniseDismemberment(connectedLimb) (IsDismembered is true here)
+    fn synchronise_dismemberment(&mut self, l: usize, connected: usize) {
+        // Destroy(Joint): the joint is already being destroyed by the break.
+        self.limbs[l].HasJoint = false;
+        let remove_first = |v: &mut Vec<usize>, x: usize| {
+            if let Some(i) = v.iter().position(|&y| y == x) {
+                v.remove(i);
+            }
+        };
+        let mut i = 0;
+        while i < self.limbs[l].ConnectedLimbs.len() {
+            let o = self.limbs[l].ConnectedLimbs[i];
+            let attached = self.limbs[o].HasJoint && {
+                let oh = self.limbs[o].Joint.expect("MissingReferenceException: HasJoint without a Joint");
+                assert!(!self.hinges[oh].destroyed, "MissingReferenceException: connected limb's Joint was destroyed");
+                self.hinges[oh].connected == l
+            };
+            if !attached {
+                remove_first(&mut self.limbs[o].ConnectedLimbs, l);
+                // `Source == this` compares a CirculationBehaviour with a LimbBehaviour: never equal.
+            }
+            i += 1;
+        }
+        remove_first(&mut self.limbs[connected].ConnectedLimbs, l);
+        if let Some(src) = self.circulations[l].Source {
+            remove_first(&mut self.limbs[l].ConnectedLimbs, src);
+            remove_first(&mut self.limbs[src].ConnectedLimbs, l);
         }
     }
 }
