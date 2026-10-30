@@ -96,7 +96,7 @@ pub fn solve33(m: &Mat33, b: [f32; 3]) -> [f32; 3] {
 }
 
 /// b2Rot applied to (anchor - local center), in the DLL's term order.
-fn arm(q: Rot, x: f32, y: f32) -> Vec2 {
+pub(super) fn arm(q: Rot, x: f32, y: f32) -> Vec2 {
     Vec2::new(x * q.c - y * q.s, x * q.s + y * q.c)
 }
 

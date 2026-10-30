@@ -9,6 +9,7 @@ use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::distance_joint::{DistanceDef, DistanceJoint};
 use super::weld::{WeldDef, WeldJoint};
+use super::prismatic::{PrismaticDef, PrismaticJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
 use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
 use super::solver::*;
@@ -392,12 +393,13 @@ pub struct Contact {
 
 pub type JointId = usize;
 
-/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D and FixedJoint2D.
+/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D, FixedJoint2D and SliderJoint2D.
 #[derive(Clone, Debug)]
 pub enum JointKind {
     Revolute(RevoluteJoint),
     Distance(DistanceJoint),
     Weld(WeldJoint),
+    Prismatic(PrismaticJoint),
 }
 
 impl From<RevoluteDef> for JointKind {
@@ -409,6 +411,12 @@ impl From<RevoluteDef> for JointKind {
 impl From<DistanceDef> for JointKind {
     fn from(def: DistanceDef) -> Self {
         Self::Distance(DistanceJoint::new(def))
+    }
+}
+
+impl From<PrismaticDef> for JointKind {
+    fn from(def: PrismaticDef) -> Self {
+        Self::Prismatic(PrismaticJoint::new(def))
     }
 }
 
@@ -431,21 +439,21 @@ impl Joint {
     pub fn revolute(&self) -> &RevoluteJoint {
         match &self.kind {
             JointKind::Revolute(r) => r,
-            JointKind::Distance(_) | JointKind::Weld(_) => panic!("not a hinge"),
+            _ => panic!("not a hinge"),
         }
     }
 
     pub fn revolute_mut(&mut self) -> &mut RevoluteJoint {
         match &mut self.kind {
             JointKind::Revolute(r) => r,
-            JointKind::Distance(_) | JointKind::Weld(_) => panic!("not a hinge"),
+            _ => panic!("not a hinge"),
         }
     }
 
     pub fn distance(&self) -> &DistanceJoint {
         match &self.kind {
             JointKind::Distance(d) => d,
-            JointKind::Revolute(_) | JointKind::Weld(_) => panic!("not a spring"),
+            _ => panic!("not a spring"),
         }
     }
 
@@ -463,11 +471,35 @@ impl Joint {
         }
     }
 
+    pub fn prismatic(&self) -> &PrismaticJoint {
+        match &self.kind {
+            JointKind::Prismatic(p) => p,
+            _ => panic!("not a slider joint"),
+        }
+    }
+
+    pub fn prismatic_mut(&mut self) -> &mut PrismaticJoint {
+        match &mut self.kind {
+            JointKind::Prismatic(p) => p,
+            _ => panic!("not a slider joint"),
+        }
+    }
+
+    /// The reference angle Joint2D::Cleanup reads back from a live weld or prismatic joint.
+    pub fn reference_angle(&self) -> f32 {
+        match &self.kind {
+            JointKind::Weld(w) => w.def.reference_angle,
+            JointKind::Prismatic(p) => p.def.reference_angle,
+            _ => panic!("no reference angle"),
+        }
+    }
+
     fn ends(&self) -> (JointBody, JointBody) {
         match &self.kind {
             JointKind::Revolute(r) => (r.a, r.b),
             JointKind::Distance(d) => (d.a, d.b),
             JointKind::Weld(w) => (w.a, w.b),
+            JointKind::Prismatic(p) => (p.a, p.b),
         }
     }
 
@@ -476,6 +508,7 @@ impl Joint {
             JointKind::Revolute(r) => (&mut r.a, &mut r.b),
             JointKind::Distance(d) => (&mut d.a, &mut d.b),
             JointKind::Weld(w) => (&mut w.a, &mut w.b),
+            JointKind::Prismatic(p) => (&mut p.a, &mut p.b),
         }
     }
 }
@@ -505,8 +538,8 @@ pub struct World {
     pub sub_stepping: bool,
     step_complete: bool,
     inv_dt0: f32,
-    /// Physics2D.IgnoreCollision pairs (lower fixture id first), checked where Unity's contact filter runs.
-    pub ignored: std::collections::HashSet<(FixtureId, FixtureId)>,
+    /// Physics2D.IgnoreCollision pairs (lower collider instance id first), checked where Unity's contact filter runs.
+    pub ignored: std::collections::HashSet<(i32, i32)>,
     /// The contact listener's PhysicsContacts2D.
     pub contacts2d: Contacts2D,
     /// PhysicsScene2D's fixtureless static ground body (what a joint without connectedBody attaches to), made on first use.
@@ -751,6 +784,76 @@ impl World {
         }
         if !j.collide_connected {
             self.flag_contacts_between(j.body_b, j.body_a);
+        }
+    }
+
+    /// Collider2D.ClosestPoint (PhysicsQuery2D::ClosestPoint 180bea0c0): b2Distance (with radii) from a zero-radius
+    /// point to each fixture of the collider; the nearest surface point wins, and a point inside any shape (or a
+    /// non-finite one, or a collider without fixtures) comes back unchanged.
+    pub fn collider_closest_point(&self, collider: i32, point: Vec2) -> Vec2 {
+        let finite = |v: f32| v.to_bits() & 0x7f80_0000 != 0x7f80_0000;
+        if !finite(point.x) || !finite(point.y) {
+            return point;
+        }
+        let at = Circle { p: point, radius: 0.0 };
+        let (mut best, mut closest) = (f32::MAX, point);
+        for f in self.fixtures.iter().flatten().filter(|f| f.collider.id == collider) {
+            let xf = self.body(f.body).xf;
+            let mut cache = SimplexCache::default();
+            let out = distance(&mut cache, &DistanceProxy { vertices: std::slice::from_ref(&at.p), radius: 0.0 }, &Transform::default_identity(), &f.shape.proxy(), &xf, true);
+            if !(out.distance > 0.0) {
+                return point;
+            }
+            if out.distance < best {
+                best = out.distance;
+                closest = out.point_b;
+            }
+        }
+        closest
+    }
+
+    /// PhysicsScene2D::IgnoreCollision_Binding (180c20130): the pair is added (or removed, when it was there) and both
+    /// colliders are re-filtered, lower instance id first.
+    pub fn ignore_collision(&mut self, a: i32, b: i32, ignore: bool) {
+        if a == b {
+            return;
+        }
+        let key = (a.min(b), a.max(b));
+        if ignore {
+            self.ignored.insert(key);
+        } else if !self.ignored.remove(&key) {
+            return;
+        }
+        self.refilter_collider(key.0);
+        self.refilter_collider(key.1);
+    }
+
+    /// Collider2D's refilter (180c14640): b2Fixture::Refilter (180bb9cd0) on each fixture, then the first fixture's
+    /// body is woken and its contacts re-mix friction and restitution.
+    fn refilter_collider(&mut self, collider: i32) {
+        let fixtures: Vec<FixtureId> = (0..self.fixtures.len()).filter(|&i| self.fixtures[i].as_ref().is_some_and(|f| f.collider.id == collider)).collect();
+        for &f in &fixtures {
+            let body = self.fixture(f).body;
+            for (_, c) in self.body(body).contacts.clone() {
+                let contact = self.contact_mut(c);
+                if contact.fixture_a == f || contact.fixture_b == f {
+                    contact.flags |= CONTACT_FILTER;
+                }
+            }
+            let proxies: Vec<i32> = self.fixture(f).proxies.iter().map(|&(_, id)| id).collect();
+            for id in proxies {
+                self.broad_phase.touch_proxy(id);
+            }
+        }
+        let Some(&first) = fixtures.first() else { return };
+        let body = self.fixture(first).body;
+        self.body_mut(body).wake();
+        for (_, c) in self.body(body).contacts.clone() {
+            let (fa, fb) = (self.contact_mut(c).fixture_a, self.contact_mut(c).fixture_b);
+            let (a, b) = (self.fixture(fa), self.fixture(fb));
+            let (friction, restitution) = ((a.friction * b.friction).sqrt(), if a.restitution <= b.restitution { b.restitution } else { a.restitution });
+            let contact = self.contact_mut(c);
+            (contact.friction, contact.restitution) = (friction, restitution);
         }
     }
 
@@ -1049,7 +1152,8 @@ impl World {
     /// Unity's b2ContactFilter: the fixture filters, then Physics2D.IgnoreCollision.
     // ponytail: Unity's layer collision matrix is not modelled yet (every shipped object is on a colliding layer).
     fn fixtures_should_collide(&self, fa: FixtureId, fb: FixtureId) -> bool {
-        should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(fa.min(fb), fa.max(fb)))
+        let (ca, cb) = (self.fixture(fa).collider.id, self.fixture(fb).collider.id);
+        should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(ca.min(cb), ca.max(cb)))
     }
 
     /// b2ContactManager::OnContactCreate (180bb98f0).
@@ -1327,6 +1431,7 @@ impl World {
                 JointKind::Revolute(r) => r.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Distance(d) => d.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Weld(w) => w.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+                JointKind::Prismatic(p) => p.init_velocity_constraints(a, b, step, &positions, &mut velocities),
             }
         }
         for _ in 0..step.velocity_iterations {
@@ -1335,6 +1440,7 @@ impl World {
                     JointKind::Revolute(r) => r.solve_velocity_constraints(&mut velocities),
                     JointKind::Distance(d) => d.solve_velocity_constraints(&mut velocities),
                     JointKind::Weld(w) => w.solve_velocity_constraints(&mut velocities),
+                    JointKind::Prismatic(p) => p.solve_velocity_constraints(step, &mut velocities),
                 }
             }
             solver.solve_velocity_constraints(&mut velocities);
@@ -1371,6 +1477,7 @@ impl World {
                     JointKind::Revolute(r) => r.solve_position_constraints(&mut positions),
                     JointKind::Distance(d) => d.solve_position_constraints(&mut positions),
                     JointKind::Weld(w) => w.solve_position_constraints(&mut positions),
+                    JointKind::Prismatic(p) => p.solve_position_constraints(&mut positions),
                 };
             }
             if contacts_solved && joints_solved {

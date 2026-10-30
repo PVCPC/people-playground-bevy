@@ -459,8 +459,7 @@ impl Game {
         }
         self.pump_behaviour(l, fdt);
         self.handle_bleeding(l, fdt);
-        // HandlePenetrationBleeding: victimPenetrations stay empty until stabbing is rewritten.
-        assert!(self.physicals[self.limbs[l].PhysicalBehaviour].victimPenetrations.is_empty());
+        self.handle_penetration_bleeding(l);
         self.handle_damage_edge_cases(l);
         let c = &mut self.circulations[l];
         c.BloodFlow = mathf::clamp01(c.BloodFlow);
@@ -567,6 +566,39 @@ impl Game {
     /// GetOriginalBloodType().Color
     pub fn original_blood_color(&self, l: usize) -> [f32; 4] {
         liquid_color(self.blood_type(l))
+    }
+
+    /// CirculationBehaviour.HandlePenetrationBleeding
+    fn handle_penetration_bleeding(&mut self, l: usize) {
+        let p = self.limbs[l].PhysicalBehaviour;
+        for i in 0..self.physicals[p].victimPenetrations.len() {
+            let pen = self.physicals[p].victimPenetrations[i];
+            if self.penetration_arena[pen].Active && self.physicals[self.penetration_arena[pen].Stabber].StabCausesWound {
+                let depth = (d(self.penetration_current_depth(pen)) * 4.0f32).f();
+                self.circulations[l].BleedingRate = mathf::max(self.circulations[l].BleedingRate, depth);
+            }
+        }
+    }
+
+    /// CirculationBehaviour.Stabbed
+    pub fn circulation_stabbed(&mut self, l: usize, s: super::stab::Stabbing) {
+        if !self.circulations[l].ImmuneToDamage && !self.limbs[l].IsZombie && self.physicals[s.stabber].StabCausesWound {
+            let c = &mut self.circulations[l];
+            c.StabWoundCount = c.StabWoundCount.wrapping_add(1);
+            c.InternalBleedingIntensity = (d(c.InternalBleedingIntensity) + 0.1f32).f();
+            if self.circulations[l].IsPump && self.random.value() < 0.6 && self.is_world_point_in_vital_part(l, s.point) {
+                self.circulations[l].IsPump = false;
+            }
+        }
+    }
+
+    /// CirculationBehaviour.Unstabbed
+    pub fn circulation_unstabbed(&mut self, l: usize, s: super::stab::Stabbing) {
+        if !self.circulations[l].ImmuneToDamage && self.physicals[s.stabber].StabCausesWound {
+            let flag = self.is_world_point_in_artery_rect(l, s.point);
+            self.circulations[l].BleedingRate += if flag { 4.0 } else { 1.0 };
+            self.create_bleeding_particle(l, s.point, s.normal, if flag { 1.0 } else { 0.0 });
+        }
     }
 
     /// CirculationBehaviour.IsWorldPointInArteryRect (mindistance = 4f / 35f)

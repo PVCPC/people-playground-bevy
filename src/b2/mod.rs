@@ -7,6 +7,7 @@ pub mod contacts2d;
 pub mod distance;
 pub mod distance_joint;
 pub mod math;
+pub mod prismatic;
 pub mod probe;
 pub mod revolute;
 pub mod shape;

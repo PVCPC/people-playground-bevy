@@ -132,6 +132,11 @@ impl Transform {
         Self { p, q: Rot::new(angle) }
     }
 
+    /// The identity transform (position 0, rotation s 0 / c 1).
+    pub fn default_identity() -> Self {
+        Self { p: Vec2::new(0.0, 0.0), q: Rot { s: 0.0, c: 1.0 } }
+    }
+
     /// b2Mul(xf, v): (c x - s y) + p.x, (s x + c y) + p.y.
     pub fn apply(&self, v: Vec2) -> Vec2 {
         Vec2::new((self.q.c * v.x - self.q.s * v.y) + self.p.x, (self.q.s * v.x + self.q.c * v.y) + self.p.y)

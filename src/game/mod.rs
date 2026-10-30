@@ -13,6 +13,7 @@ pub mod person;
 pub mod physical;
 pub mod shatter;
 pub mod simulate;
+pub mod stab;
 pub mod temperature;
 pub mod tool;
 
@@ -734,6 +735,12 @@ pub struct Game {
     pub joint_break_limits: Vec<BreakJoint>,
     /// FixedJoint2D components (the shattered pieces' welds), by creation order.
     pub fixed_joints: Vec<simulate::FixedJoint>,
+    /// PhysicalBehaviour.Penetration objects, by creation order (Physical.penetrations/victimPenetrations index it).
+    pub penetration_arena: Vec<stab::Penetration>,
+    /// IgnoreCollisionStackController.stack: the request count of each collider pair (lower instance id first).
+    pub ignore_stack: std::collections::HashMap<(i32, i32), i32>,
+    /// LimbBehaviour.VitalParts by limb: Bounds as center then extents. The dump loader fills it.
+    pub vital_parts: std::collections::HashMap<usize, Vec<[f32; 6]>>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
     /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.

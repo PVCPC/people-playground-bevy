@@ -171,8 +171,9 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         .collect();
     for &a in &limb_fixtures {
         for &b in &limb_fixtures {
-            if a < b {
-                world.ignored.insert((a, b));
+            let (ca, cb) = (world.fixture(a).collider.id, world.fixture(b).collider.id);
+            if ca < cb {
+                world.ignored.insert((ca, cb));
             }
         }
     }

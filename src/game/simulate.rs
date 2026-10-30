@@ -3,6 +3,7 @@
 use super::*;
 use crate::b2::contacts2d::{Message, Report, ScriptCollision};
 use crate::b2::math::Vec2;
+use crate::b2::prismatic::{self, SliderJoint2d};
 use crate::b2::weld::{check_bodies, clamp_break, BodyFrame, Connected, FixedJoint2d};
 use crate::b2::world::{BodyId, JointId, JointKind};
 use crate::unity::{acosf, atan2f, cosf, sinf, transform};
@@ -195,7 +196,7 @@ impl Game {
     /// PhysicsScene2D::UpdateJoints (180c24cc0): a joint over its force (reaction magnitude) or torque (signed)
     /// gets OnJointBreak2D and is destroyed. The next joint is taken before each one is handled, as the native
     /// list walk does.
-    fn update_joints(&mut self, dt: f32) {
+    pub(super) fn update_joints(&mut self, dt: f32) {
         let mut next = self.joint_break_limits.first().copied();
         while let Some(j) = next {
             let at = self.joint_break_limits.iter().position(|&k| k == j).unwrap();
@@ -221,6 +222,10 @@ impl Game {
                     let f = d.reaction_force(inv_dt);
                     ([f.x, f.y], 0.0)
                 }
+                Some(JointKind::Prismatic(p)) => {
+                    let f = p.reaction_force(inv_dt);
+                    ([f.x, f.y], p.reaction_torque(inv_dt))
+                }
             };
             let broken = (force != f32::INFINITY && (fx * fx + fy * fy).sqrt() > force) || (torque != f32::INFINITY && t > torque);
             if broken {
@@ -241,7 +246,11 @@ impl Game {
                     }
                     BreakJoint::Fixed(f) => {
                         // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares
-                        // `penetration.Joint` (a SliderJoint2D) with it, and no other rewritten script sits on a piece.
+                        // `penetration.Joint` (a SliderJoint2D) with it, and no other rewritten script sits on a piece
+                        // (a stabber's other scripts compare against their own joints too).
+                        if self.fixed_joints[f].slider.is_some() {
+                            self.physical_on_joint_break_slider(f);
+                        }
                         // DestroyObjectHighLevel then removes the component.
                         self.fixed_joint_destroy(f);
                     }
@@ -306,9 +315,12 @@ impl Game {
 }
 
 /// UnityEngine.FixedJoint2D over its b2 weld joint, with the Joint2D/AnchoredJoint2D fields native Create reads.
+/// A SliderJoint2D shares the arena and every Joint2D/AnchoredJoint2D setter: `slider` holds its own state and the
+/// joint is a b2PrismaticJoint (BreakJoint::Fixed covers both).
 #[derive(Clone, Debug)]
 pub struct FixedJoint {
     pub state: FixedJoint2d,
+    pub slider: Option<SliderJoint2d>,
     /// m_Joint (+0x58)
     pub joint: Option<JointId>,
     /// The physical whose Rigidbody2D is body A, and the connectedBody's (None: the scene's ground body).
@@ -354,7 +366,18 @@ impl Game {
     /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
     pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joint_create_if_active(f);
+        f
+    }
+
+    /// AddComponent<SliderJoint2D>(): SliderJoint2D::Reset (180c05740) turns autoConfigureConnectedAnchor off, then
+    /// AddToManager creates the joint (to the ground body) when the GameObject is active and the component enabled.
+    pub fn add_slider_joint_component(&mut self, attached: usize) -> usize {
+        let f = self.fixed_joints.len();
+        let mut state = FixedJoint2d::reset();
+        state.auto_configure_connected_anchor = false;
+        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -379,7 +402,11 @@ impl Game {
             None => Connected::World,
             Some(b) => Connected::Body { frame: self.body_frame(b), lossy_scale: ends.scale_b },
         };
-        let def = self.fixed_joints[f].state.create_def(ends.scale_a, &frame_a, &connected);
+        let j = &mut self.fixed_joints[f];
+        let def: JointKind = match j.slider.as_mut() {
+            Some(slider) => slider.create_def(&mut j.state, ends.scale_a, &frame_a, &connected).into(),
+            None => j.state.create_def(ends.scale_a, &frame_a, &connected).into(),
+        };
         // FinalizeCreateJoint: body B is the connected body, or the scene's ground body. The one scene has one
         // world, so the different-worlds refusal cannot arise.
         let body_b = ends.body_b.unwrap_or_else(|| self.world.ground_body());
@@ -400,7 +427,7 @@ impl Game {
     /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
     /// FlushSimulationChanges after it does nothing while playing).
     fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
-        let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_ref().unwrap().weld().def.reference_angle);
+        let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_ref().unwrap().reference_angle());
         self.fixed_joints[f].state.cleanup(destroyed, live);
         if let Some(id) = self.fixed_joints[f].joint.take() {
             self.world.destroy_joint(id);
@@ -455,11 +482,13 @@ impl Game {
 
     /// FixedJoint2D::SetFrequency / SetDampingRatio: clamped and written into the live b2 joint without recreating it.
     pub fn fixed_joint_set_frequency(&mut self, f: usize, v: f32) {
+        assert!(self.fixed_joints[f].slider.is_none(), "frequency of a SliderJoint2D");
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
         self.fixed_joints[f].state.set_frequency(v, live);
     }
 
     pub fn fixed_joint_set_damping_ratio(&mut self, f: usize, v: f32) {
+        assert!(self.fixed_joints[f].slider.is_none(), "damping ratio of a SliderJoint2D");
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
         self.fixed_joints[f].state.set_damping_ratio(v, live);
     }
@@ -480,6 +509,61 @@ impl Game {
     fn fixed_joint_update_break_limits(&mut self, f: usize) {
         let (force, torque) = (self.fixed_joints[f].state.break_force, self.fixed_joints[f].state.break_torque);
         self.add_break_limits_update(BreakJoint::Fixed(f), force, torque);
+    }
+
+    /// SliderJoint2D::SetAutoConfigureAngle (180c05950): only stored.
+    pub fn slider_joint_set_auto_configure_angle(&mut self, f: usize, v: bool) {
+        self.fixed_joints[f].slider.as_mut().unwrap().auto_configure_angle = v;
+    }
+
+    /// SliderJoint2D::SetAngle (180c05890): the clamped value is stored; a live joint is destroyed (Cleanup(true))
+    /// and created again.
+    pub fn slider_joint_set_angle(&mut self, f: usize, v: f32) {
+        self.fixed_joints[f].slider.as_mut().unwrap().set_angle(v);
+        if self.fixed_joints[f].joint.is_some() {
+            self.fixed_joint_cleanup(f, true);
+            self.fixed_joint_create_if_active(f);
+        }
+    }
+
+    /// SliderJoint2D::SetUseMotor (180c062f0) / SetUseLimits (180c062d0): stored, then written to the live joint.
+    pub fn slider_joint_set_use_motor(&mut self, f: usize, v: bool) {
+        self.fixed_joints[f].slider.as_mut().unwrap().use_motor = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            prismatic::enable_motor(&mut self.world, id, v);
+        }
+    }
+
+    pub fn slider_joint_set_use_limits(&mut self, f: usize, v: bool) {
+        self.fixed_joints[f].slider.as_mut().unwrap().use_limits = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            prismatic::enable_limit(&mut self.world, id, v);
+        }
+    }
+
+    /// SliderJoint2D::SetMotor (180c06190): clamped and stored with useMotor on; a live joint gets EnableMotor(true),
+    /// the speed and the maximum force.
+    pub fn slider_joint_set_motor(&mut self, f: usize, speed: f32, max_torque: f32) {
+        let s = self.fixed_joints[f].slider.as_mut().unwrap();
+        s.set_motor(speed, max_torque);
+        let (speed, torque) = (s.motor_speed, s.max_motor_torque);
+        if let Some(id) = self.fixed_joints[f].joint {
+            prismatic::enable_motor(&mut self.world, id, true);
+            prismatic::set_motor_speed(&mut self.world, id, speed);
+            prismatic::set_max_motor_force(&mut self.world, id, torque);
+        }
+    }
+
+    /// SliderJoint2D::SetLimits (180c06000): clamped and stored with useLimits on; a live joint gets EnableLimit(true)
+    /// and the limits.
+    pub fn slider_joint_set_limits(&mut self, f: usize, lower: f32, upper: f32) {
+        let s = self.fixed_joints[f].slider.as_mut().unwrap();
+        s.set_limits(lower, upper);
+        let (lower, upper) = (s.lower, s.upper);
+        if let Some(id) = self.fixed_joints[f].joint {
+            prismatic::enable_limit(&mut self.world, id, true);
+            prismatic::set_limits(&mut self.world, id, lower, upper);
+        }
     }
 
     /// The component's destruction (Joint2D::Deactivate with a destroy operation): Cleanup(true), and the

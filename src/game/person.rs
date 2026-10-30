@@ -198,9 +198,7 @@ impl Game {
         for &l in &limbs {
             let p = self.limbs[l].PhysicalBehaviour;
             // PhysicalBehaviour.OnDestroy: DestroyStabJoint for each penetration (Disintegrate refused any).
-            if !self.physicals[p].penetrations.is_empty() {
-                unimplemented!("PhysicalBehaviour.DestroyStabJoint");
-            }
+            self.stab_destroy(p);
             // PhysicalObjectsInWorld / PhysicalObjectsInWorldByTransform / CameraControlBehaviour.CurrentlyFollowing
             // remove it: the object leaves every manager loop (the camera list has no rewritten state).
             self.physicals[p].enabled = false;

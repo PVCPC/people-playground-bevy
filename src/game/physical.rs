@@ -37,6 +37,10 @@ pub struct PhysicalProperties {
     pub IgnoreStabResistance: bool,
     pub SharpForceThresholdMultiplier: f32,
     pub SharpAxes: Vec<SharpAxis>,
+    /// Not read by the dump loader yet (PhysicalProperties.LodgeStrengthMultiplier is 1 in the game's defaults).
+    pub LodgeStrengthMultiplier: f32,
+    /// StabSound length; None when the array is null. Not read by the dump loader yet.
+    pub StabSound: Option<usize>,
 }
 
 /// PhysicalBehaviour.ColliderBoolPair; the collider is identified by its PhysicalBehaviour.
@@ -110,9 +114,13 @@ script! {
         onCollisionStayBuffer: [Option<ColliderBoolPair>; 8] = [None; 8],
         LocalColliderGridPoints: Option<Vec<[f32; 2]>> = None,
         stabWoundCount: u32 = 0,
-        /// Penetration and stab lists stay empty until stabbing is rewritten.
+        /// Indices into Game.penetration_arena.
         penetrations: Vec<usize> = Vec::new(),
         victimPenetrations: Vec<usize> = Vec::new(),
+        /// The stabbers (physical indices) of the live penetrations into this object.
+        beingStabbedBy: Vec<usize> = Vec::new(),
+        StabReleaseSpeedModifier: f32 = 1.0,
+        StabWoundSizeMultiplier: f32 = 1.0,
         /// The collider's GameObject is active (Collider.gameObject.activeSelf).
         active: bool = true,
         enabled: bool = true,
@@ -309,8 +317,7 @@ impl Game {
         if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && !self.physicals[p].decal_controllers.is_empty() {
             // ponytail: underwater decal fading is visual only; decals are not rewritten yet.
         }
-        // ponytail: penetrations stay empty until stabbing is rewritten.
-        assert!(self.physicals[p].penetrations.is_empty());
+        self.stab_fixed_update(p);
         if self.physicals[p].OnFire {
             if self.random.value() > 0.9993 {
                 self.extinguish(p);
@@ -374,7 +381,7 @@ impl Game {
                 }
             }
         }
-        assert!(self.physicals[p].penetrations.is_empty(), "penetrations are not rewritten yet");
+        self.stab_update(p);
     }
 
     /// PhysicalBehaviour.SetParticleEmission: only the flags and the fire emission's Random draws matter.
@@ -655,7 +662,7 @@ impl Game {
     }
 
     /// Transform.TransformVector for a 2D vector of a physical object's transform.
-    fn transform_vector(&self, p: usize, local: [f32; 2]) -> [f32; 3] {
+    pub(super) fn transform_vector(&self, p: usize, local: [f32; 2]) -> [f32; 3] {
         let t = &self.physicals[p].transform;
         mathf::rotate(t.rotation, [local[0] * t.localScale[0], local[1] * t.localScale[1], 0.0])
     }
@@ -879,13 +886,13 @@ impl Game {
         if dot2(contact_normal, normalized) < -0.98 {
             return;
         }
-        for axis in &props.SharpAxes {
+        let hit = props.SharpAxes.iter().copied().find(|axis| {
             let vector = self.transform_vector(p, axis.Axis);
             let vector = [vector[0], vector[1]];
-            if dot2(normalized, vector) < -0.92 && dot2(contact_normal, vector) < -0.3 {
-                // Velocity reset, Stabbing messages, SliderJoint2D and ignored colliders (DoStab).
-                unimplemented!("PhysicalBehaviour.DoStab: stab joints and penetrations are not rewritten yet");
-            }
+            dot2(normalized, vector) < -0.92 && dot2(contact_normal, vector) < -0.3
+        });
+        if let Some(axis) = hit {
+            self.stab_begin(p, v, axis, c, contact);
         }
     }
 
@@ -895,9 +902,7 @@ impl Game {
         if ph.isStatic || !ph.Disintegratable || !ph.Deletable {
             return;
         }
-        if !ph.penetrations.is_empty() || !ph.victimPenetrations.is_empty() {
-            unimplemented!("PhysicalBehaviour.Disintegrate: stab penetrations (DoStab is not rewritten yet)");
-        }
+        self.stab_disintegrate(p);
         // OnDisintegration: the limb's handler, then the person's DisintegrationCounterBehaviour (the other
         // subscriber, LimbStatusBehaviour, only hides the status UI).
         if let Some(l) = self.limbs.iter().position(|limb| limb.PhysicalBehaviour == p) {
@@ -935,7 +940,7 @@ impl Game {
         // Collider2D::Deactivate (180c0fc00): its Physics2D.IgnoreCollision pairs go; the cleanup finds no shapes.
         let collider = self.physicals[p].collider;
         let w = &mut self.world;
-        w.ignored.retain(|&(a, b)| w.fixtures[a].as_ref().is_some_and(|f| f.collider.id != collider) && w.fixtures[b].as_ref().is_some_and(|f| f.collider.id != collider));
+        w.ignored.retain(|&(a, b)| a != collider && b != collider);
         w.contacts2d.destroy_contacts(collider);
         self.rigidbody_cleanup(p);
         self.physicals[p].active = false;
@@ -972,8 +977,11 @@ impl Game {
                         d.joint = None;
                     }
                 }
+            } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(j)) {
+                // FixedJoint2D / SliderJoint2D
+                self.fixed_joints[f].joint = None;
             } else {
-                unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge or gore string");
+                unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge, gore string, drag joint or fixed/slider joint");
             }
             self.world.destroy_joint(j);
         }
