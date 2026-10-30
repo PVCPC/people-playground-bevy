@@ -91,6 +91,8 @@ fn run() -> Result<(), String> {
     let mut script = None;
     let mut looped = None;
     let mut play = None;
+    let mut play_map = None;
+    let mut item = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -141,6 +143,12 @@ fn run() -> Result<(), String> {
             "--play" => {
                 play = Some(PathBuf::from(arguments.next().ok_or("--play needs a PPG_DUMP recording")?));
             }
+            "--play-map" => play_map = Some(arguments.next().ok_or("--play-map needs a map name")?),
+            "--item" => item = Some(arguments.next().ok_or("--item needs a catalog item name")?),
+            "--play-map-test" => {
+                play_map = Some(arguments.next().ok_or("--play-map-test needs a map name")?);
+                headless = true;
+            }
             "--script-test" => {
                 script = Some(PathBuf::from(arguments.next().ok_or("--script-test needs a PPG_DUMP recording")?));
             }
@@ -157,11 +165,16 @@ fn run() -> Result<(), String> {
     if let Some(recording) = replay {
         return replay::compare_motors(&rig, &recording);
     }
-    if let Some(recording) = play {
+    let start = match (play, play_map) {
+        (Some(recording), _) => Some(play::Start::Recording(recording)),
+        (None, Some(map)) => Some(play::Start::Map(game.clone(), map, item)),
+        (None, None) => None,
+    };
+    if let Some(start) = start {
         if headless {
-            return play::test(&recording, &rig);
+            return play::test(&start, &rig);
         }
-        return play::run(&recording, rig, cache);
+        return play::run(&start, rig, cache);
     }
     if let Some(dump) = script {
         return game::dump::script_test(&dump, &rig);

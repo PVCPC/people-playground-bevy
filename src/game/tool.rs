@@ -116,7 +116,7 @@ pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -
         Shape::Polygon(poly) => {
             let (dx, dy) = (p.x - xf.p.x, p.y - xf.p.y);
             let local = V::new(c * dx + s * dy, c * dy - s * dx);
-            let polygon_radius = f32::from_bits(0x3c23d70a);
+            let polygon_radius = crate::b2::settings::globals().polygon_radius;
             let n = poly.count;
             let sep = |i: usize| (local.x - poly.vertices[i].x) * poly.normals[i].x + (local.y - poly.vertices[i].y) * poly.normals[i].y;
             if !(polygon_radius < poly.radius) {
@@ -176,7 +176,7 @@ impl Game {
         let point = V::new((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5);
         let size = [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()];
         let min = f32::from_bits(0x38d1b717);
-        let shape = Shape::Polygon(crate::b2::shape::Polygon::set_as_box((size[0] * 0.5).max(min), (size[1] * 0.5).max(min), point, crate::b2::shape::POLYGON_RADIUS));
+        let shape = Shape::Polygon(crate::b2::shape::Polygon::set_as_box((size[0] * 0.5).max(min), (size[1] * 0.5).max(min), point, crate::b2::settings::globals().polygon_radius));
         let Shape::Polygon(poly) = &shape else { unreachable!() };
         let (mut lower, mut upper) = (poly.vertices[0], poly.vertices[0]);
         for v in &poly.vertices[1..4] {
@@ -197,7 +197,7 @@ impl Game {
             if fx.is_sensor {
                 continue;
             }
-            let Some(&layer) = self.layers.get(&fx.collider.game_object) else {
+            let Some(&layer) = self.world.layers.get(&fx.collider.game_object) else {
                 panic!("OverlapPoint: no layer for collider {}", fx.collider.id);
             };
             if mask & (1 << layer) == 0 {

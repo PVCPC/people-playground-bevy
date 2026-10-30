@@ -2,7 +2,8 @@
 
 use super::math::{Rot, Vec2};
 use super::revolute::JointBody;
-use super::solver::{Position, TimeStep, Velocity, MAX_LINEAR_CORRECTION};
+use super::settings::globals;
+use super::solver::{Position, TimeStep, Velocity};
 
 /// b2_linearSlop.
 const LINEAR_SLOP: f32 = f32::from_bits(0x3ba3_d70a);
@@ -145,7 +146,8 @@ impl DistanceJoint {
             let inv = 1.0 / length;
             u = Vec2::new(u.x * inv, u.y * inv);
         }
-        let c = MAX_LINEAR_CORRECTION.min(length - d.length).max(-MAX_LINEAR_CORRECTION);
+        let max_correction = globals().max_linear_correction;
+        let c = max_correction.min(length - d.length).max(-max_correction);
         let impulse = -(c * self.mass);
         let p = Vec2::new(u.x * impulse, u.y * impulse);
         ca = Vec2::new(ca.x - a.inv_mass * (p.x * a.axis.x), ca.y - a.inv_mass * (p.y * a.axis.y));

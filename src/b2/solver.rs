@@ -5,11 +5,8 @@
 use super::collide::{Manifold, ManifoldPoint, ManifoldType, WorldManifold};
 use super::math::{cross, Rot, Transform, Vec2};
 
-pub const VELOCITY_THRESHOLD: f32 = 1.0;
-pub const BAUMGARTE: f32 = 0.2;
-pub const TOI_BAUMGARTE: f32 = 0.75;
-/// Physics2DSettings.m_MaxLinearCorrection, stored unscaled.
-pub const MAX_LINEAR_CORRECTION: f32 = 16.0;
+use super::settings::globals;
+
 const LINEAR_SLOP: f32 = 0.005;
 const MAX_CONDITION_NUMBER: f32 = 1000.0;
 
@@ -251,6 +248,7 @@ impl ContactSolver {
 
     /// InitializeVelocityConstraints (180bbe5f0).
     pub fn initialize_velocity_constraints(&mut self, positions: &[Position], velocities: &[Velocity]) {
+        let velocity_threshold = globals().velocity_threshold;
         for (vc, pc) in self.velocity_constraints.iter_mut().zip(&mut self.position_constraints) {
             let (pa, pb) = (positions[vc.index_a], positions[vc.index_b]);
             let (va, vb) = (velocities[vc.index_a], velocities[vc.index_b]);
@@ -284,7 +282,7 @@ impl ContactSolver {
                 p.velocity_bias = 0.0;
                 let dv = relative_velocity(va, p.r_a, vb, p.r_b);
                 let v_rel = dv.y * n.y + dv.x * n.x;
-                if v_rel < -VELOCITY_THRESHOLD {
+                if v_rel < -velocity_threshold {
                     p.velocity_bias = -(v_rel * vc.restitution);
                 }
             }
@@ -405,16 +403,17 @@ impl ContactSolver {
 
     /// SolvePositionConstraints (180bbee60).
     pub fn solve_position_constraints(&self, positions: &mut [Position]) -> bool {
-        self.solve_positions(positions, BAUMGARTE, None) >= -3.0 * LINEAR_SLOP
+        self.solve_positions(positions, globals().baumgarte, None) >= -3.0 * LINEAR_SLOP
     }
 
     /// SolveTOIPositionConstraints (180bbf3a0): only the two TOI bodies move.
     pub fn solve_toi_position_constraints(&self, positions: &mut [Position], toi_index_a: usize, toi_index_b: usize) -> bool {
-        self.solve_positions(positions, TOI_BAUMGARTE, Some((toi_index_a, toi_index_b))) >= -1.5 * LINEAR_SLOP
+        self.solve_positions(positions, globals().toi_baumgarte, Some((toi_index_a, toi_index_b))) >= -1.5 * LINEAR_SLOP
     }
 
     /// The shared Gauss-Seidel position pass; returns the minimum separation seen.
     fn solve_positions(&self, positions: &mut [Position], baumgarte: f32, toi: Option<(usize, usize)>) -> f32 {
+        let max_linear_correction = globals().max_linear_correction;
         let mut min_separation = 0.0f32;
         for pc in &self.position_constraints {
             let moves = |index: usize| toi.is_none_or(|(a, b)| index == a || index == b);
@@ -438,7 +437,7 @@ impl ContactSolver {
                 } else {
                     let c = (separation + LINEAR_SLOP) * baumgarte;
                     let c = if 0.0 <= c { 0.0 } else { c };
-                    let c = if -MAX_LINEAR_CORRECTION <= c { c } else { -MAX_LINEAR_CORRECTION };
+                    let c = if -max_linear_correction <= c { c } else { -max_linear_correction };
                     -(c / k)
                 };
                 let p = Vec2::new(n.x * impulse, n.y * impulse);

@@ -29,7 +29,7 @@ pub struct Clone {
 #[derive(Clone, Debug, Default)]
 pub struct Instance {
     /// The prefab it was cloned from.
-    pub prefab: std::rc::Rc<Prefab>,
+    pub prefab: std::sync::Arc<Prefab>,
     pub objects: Vec<Clone>,
     /// Rigidbody2D bodies by object.
     pub bodies: HashMap<usize, BodyId>,
@@ -268,9 +268,11 @@ impl Game {
 
     /// The clones of `prefab`, with the ids `ids` gives each object (GameObject id, component ids).
     fn clone_prefab(&mut self, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], mut ids: impl FnMut(&mut Game, &PrefabObject) -> (i32, Vec<i32>)) -> Instance {
-        let mut inst = Instance { prefab: std::rc::Rc::new(prefab.clone()), ..Default::default() };
+        let mut inst = Instance { prefab: std::sync::Arc::new(prefab.clone()), ..Default::default() };
         for (i, o) in prefab.objects.iter().enumerate() {
             let (game_object, components) = ids(self, o);
+            // GameObject.layer, which the overlap queries filter by.
+            self.world.layers.insert(game_object, o.layer as i32);
             let Some((_, Component::Transform(t))) = o.components.first() else { panic!("{}: first component not a Transform", o.name) };
             let v3 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
             let mut trs = Trs { t: v3(t.local_position), q: t.local_rotation, s: v3(t.local_scale) };
@@ -440,6 +442,12 @@ impl Game {
         }
         if !self.world.body(body).joints.is_empty() {
             unimplemented!("{}: Rigidbody2D::Cleanup with joints", prefab.objects[o].name);
+        }
+        // m_Body becomes null: a PhysicalBehaviour's Rigidbody keeps the component's own mass fields.
+        let mass = self.world.body(body).rigidbody;
+        for ph in self.physicals.iter_mut().filter(|ph| ph.rigidbody.body == body && ph.rigidbody.detached.is_none()) {
+            ph.rigidbody.detached = Some(mass);
+            ph.rigidbody.movement.listed = false;
         }
         self.world.destroy_body(body);
         inst.bodies.remove(&o);
@@ -1016,7 +1024,7 @@ pub(crate) mod tests {
         let original_ids = db.resource_load_order().unwrap();
         let human_go = root.id + 2;
         let mut g = Game::default();
-        g.world = World::new(V::new(-0.0, -9.81));
+        g.apply_physics2d_settings(&Game::load_physics2d_settings(&db).unwrap());
         g.next_instance_id = human_go;
         let (mut inst, _) = g.instantiate_native(&prefab, spawn, [0.0, 0.0, 0.0, 1.0], &original_ids);
         inst.set_local_scale(0, hex3("lscale"));
@@ -1189,7 +1197,7 @@ pub(crate) mod tests {
         }
         let prefab = db.prefab(map.unwrap()).unwrap();
         let mut g = Game::default();
-        g.world = World::new(V::new(-0.0, -9.81));
+        g.apply_physics2d_settings(&Game::load_physics2d_settings(&db).unwrap());
         // LoadScene's natives come first: the ToolController's body and the two resize handles' fixtures.
         let mut scene = g.load_scene_natives(&mut db).unwrap();
         // The recorded clone of the map root: its GameObject is the first id.
@@ -1272,7 +1280,7 @@ pub(crate) mod tests {
         let (map, knife) = (db.prefab(map.unwrap()).unwrap(), db.prefab(knife.unwrap()).unwrap());
         let ids = db.resource_load_order().unwrap();
         let mut g = Game::default();
-        g.world = World::new(V::new(-0.0, -9.81));
+        g.apply_physics2d_settings(&Game::load_physics2d_settings(&db).unwrap());
         let mut scene = g.load_scene_natives(&mut db).unwrap();
         g.next_instance_id = -12588;
         let (mut m, _) = g.instantiate_native(&map, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);

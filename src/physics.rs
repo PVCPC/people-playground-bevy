@@ -2,7 +2,7 @@
 //! scripts' FixedUpdate). Entities carry body and joint ids; despawning one destroys it in the world.
 use crate::b2::{
     math::Vec2 as V,
-    shape::{box_corners, Polygon, POLYGON_RADIUS},
+    shape::{box_corners, Polygon},
     world::{BodyId, Filter, FixtureDef, JointId, Shape, World},
 };
 use crate::game_assets::{BoxShape, SimulationSettings};
@@ -57,7 +57,7 @@ pub fn bevy(p: V) -> Vec2 {
 
 pub fn box_fixture(shape: &BoxShape, friction: f32, restitution: f32, filter: Filter) -> FixtureDef {
     let corners = box_corners(V::new(shape.offset[0], shape.offset[1]), V::new(shape.size[0], shape.size[1]));
-    let shape = Shape::Polygon(Polygon::from_points(&corners, POLYGON_RADIUS));
+    let shape = Shape::Polygon(Polygon::from_points(&corners, crate::b2::settings::globals().polygon_radius));
     // ponytail: the live app has no Unity objects yet; each fixture is its own collider (Unity-style negative ids).
     static NEXT_COLLIDER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-2);
     let id = NEXT_COLLIDER.fetch_sub(2, std::sync::atomic::Ordering::Relaxed);

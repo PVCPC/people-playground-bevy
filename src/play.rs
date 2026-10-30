@@ -1,10 +1,12 @@
 //! --play <recording>: the rewritten game in a window, starting from the game's own state in a PPG_DUMP recording
 //! (its first FixedUpdate snapshot with the b2 world) and running Unity's player loop from there.
+//! --play-map <map>: the same, starting from LoadScene("Main") with that map, all from the game's data.
 
 use crate::b2::world::Shape;
 use crate::game::{dump, Game};
 use crate::game_assets::HumanRig;
 use bevy::{prelude::*, sprite::Anchor, text::FontSize};
+use crate::assets::db::AssetDb;
 use std::path::{Path, PathBuf};
 
 #[derive(Resource)]
@@ -22,7 +24,18 @@ struct LimbSprite(usize);
 #[derive(Component)]
 struct Hud;
 
-fn load(recording: &Path, rig: &HumanRig) -> Result<Game, String> {
+/// Where the game starts.
+pub enum Start {
+    Recording(PathBuf),
+    /// The installed game's folder, the Map asset's name and the catalog item selected (if any).
+    Map(PathBuf, String, Option<String>),
+}
+
+fn load(start: &Start, rig: &HumanRig) -> Result<Game, String> {
+    let recording = match start {
+        Start::Recording(recording) => recording,
+        Start::Map(game, map, item) => return new_game(game, map, item.as_deref()),
+    };
     let start = dump::snapshots(recording)?
         .find(|s| s.pt == "FS" && s.of("b2World").next().is_some())
         .ok_or("--play needs a recording with the b2 world (dump12 on)")?;
@@ -31,10 +44,29 @@ fn load(recording: &Path, rig: &HumanRig) -> Result<Game, String> {
     Ok(g)
 }
 
-/// --play-test: 30 s of 60 fps frames without a window; prints where each limb ends up.
-pub fn test(recording: &Path, rig: &HumanRig) -> Result<(), String> {
-    let mut g = load(recording, rig)?;
+/// SceneManager.LoadScene("Main") with the main menu's map choice: level1's managers and natives, then the
+/// MapLoaderBehaviour's Awake. Its behaviours' Starts run in the first frame.
+fn new_game(game: &Path, map: &str, item: Option<&str>) -> Result<Game, String> {
+    let mut db = AssetDb::open(game)?;
+    let mut g = Game::load_main(&mut db, game)?;
+    g.load_scene(&mut db)?;
+    g.map_loader_awake(&mut db, map)?;
+    g.assets = Some(Box::new(db));
+    g.catalog_selected = item.map(str::to_string);
+    Ok(g)
+}
+
+/// --play-test: 30 s of 60 fps frames without a window; prints where each limb ends up. A --play-map-test with
+/// --item spawns the item at the map's center on frame 30.
+pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
+    let mut g = load(start, rig)?;
     for n in 0..1800 {
+        // With a catalog item selected: "spawnRight" released at the map's center on frame 30.
+        if g.catalog_selected.is_some() {
+            let up = n == 30;
+            g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: n == 29, held: n == 29, up });
+            g.input.mouse = [g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0];
+        }
         if let Err(m) = step(&mut g, 1.0 / 60.0) {
             return Err(format!("frame {n}: {m}"));
         }
@@ -46,8 +78,8 @@ pub fn test(recording: &Path, rig: &HumanRig) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run(recording: &Path, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
-    let game = load(recording, &rig)?;
+pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
+    let game = load(start, &rig)?;
     App::new()
         .add_plugins(
             DefaultPlugins
@@ -69,7 +101,7 @@ pub fn run(recording: &Path, rig: HumanRig, cache: PathBuf) -> Result<(), String
 
 fn setup(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, play: Res<Play>) {
     let g = &play.game;
-    let center = g.limbs.first().map_or([0.0; 3], |l| g.physicals[l.PhysicalBehaviour].transform.position);
+    let center = g.limbs.first().map_or([g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0], |l| g.physicals[l.PhysicalBehaviour].transform.position);
     commands.spawn((
         Camera2d,
         Projection::Orthographic(OrthographicProjection { scale: 0.006, ..OrthographicProjection::default_2d() }),
@@ -105,6 +137,7 @@ fn controls(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Play>, mut exit: M
 /// The cursor and left button as InputSystem's "drag" control and Input.mousePosition, through this window's camera.
 fn mouse(
     buttons: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut play: ResMut<Play>,
@@ -130,6 +163,11 @@ fn mouse(
         up: buttons.just_released(MouseButton::Left),
     };
     input.controls.insert("drag".into(), control);
+    // InputSystem's default "spawnRight" (E) and "spawnLeft" (Q).
+    for (name, key) in [("spawnRight", KeyCode::KeyE), ("spawnLeft", KeyCode::KeyQ)] {
+        let control = crate::game::tool::Control { down: keys.just_pressed(key), held: keys.pressed(key), up: keys.just_released(key) };
+        input.controls.insert(name.into(), control);
+    }
 }
 
 /// One Unity player-loop frame: FixedUpdate scripts and the physics pass until fixed time catches up with the

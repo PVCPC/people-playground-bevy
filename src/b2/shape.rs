@@ -5,7 +5,6 @@ use super::math::Vec2;
 
 pub const MAX_POLYGON_VERTICES: usize = 8;
 /// b2_polygonRadius; Unity sets it from Physics2DSettings.defaultContactOffset.
-pub const POLYGON_RADIUS: f32 = 0.01;
 const WELD_TOLERANCE: f32 = f32::from_bits(0x36d1_b717);
 const COLLINEAR_COSINE: f32 = f32::from_bits(0x3f7f_ff58);
 
@@ -274,5 +273,5 @@ pub fn validate_polygon(points: &[Vec2]) -> bool {
 /// The polygons a BoxCollider2D contributes (non-tiled): none when the transformed box fails validation.
 pub fn box_collider_polygon(offset: Vec2, size: Vec2, edge_radius: f32, matrix: &ColliderMatrix) -> Option<Polygon> {
     let corners = box_corners(offset, size).map(|c| matrix.apply(c));
-    validate_polygon(&corners).then(|| Polygon::from_points(&corners, POLYGON_RADIUS + edge_radius))
+    validate_polygon(&corners).then(|| Polygon::from_points(&corners, super::settings::globals().polygon_radius + edge_radius))
 }

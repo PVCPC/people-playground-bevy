@@ -7,7 +7,8 @@
 
 use super::math::{Rot, Vec2};
 use super::revolute::JointBody;
-use super::solver::{Position, TimeStep, Velocity, MAX_LINEAR_CORRECTION};
+use super::settings::globals;
+use super::solver::{Position, TimeStep, Velocity};
 use super::weld::{arm, solve22, solve33, Mat33};
 use super::world::{Body, JointId, World};
 
@@ -302,6 +303,7 @@ impl PrismaticJoint {
 
     /// b2PrismaticJoint::SolvePositionConstraints (180bc3e10).
     pub fn solve_position_constraints(&self, positions: &mut [Position]) -> bool {
+        let max_linear_correction = globals().max_linear_correction;
         let (a, b, d) = (self.a, self.b, &self.def);
         let (Position { c: ca, a: aa }, Position { c: cb, a: ab }) = (positions[a.index], positions[b.index]);
         let (qa, qb) = (Rot::new(aa), Rot::new(ab));
@@ -325,20 +327,20 @@ impl PrismaticJoint {
             let t = dx * axis.x + dy * axis.y;
             let (lower, upper) = (d.lower_translation, d.upper_translation);
             if TWO_SLOP > (upper - lower).abs() {
-                c2 = maxss(-MAX_LINEAR_CORRECTION, minss(t, MAX_LINEAR_CORRECTION));
+                c2 = maxss(-max_linear_correction, minss(t, max_linear_correction));
                 if !(linear_error > t.abs()) {
                     linear_error = t.abs();
                 }
                 limited = true;
             } else if lower >= t {
-                c2 = maxss(-MAX_LINEAR_CORRECTION, minss((t - lower) + LINEAR_SLOP, 0.0));
+                c2 = maxss(-max_linear_correction, minss((t - lower) + LINEAR_SLOP, 0.0));
                 if !(linear_error > lower - t) {
                     linear_error = lower - t;
                 }
                 limited = true;
             } else if t >= upper {
                 let over = t - upper;
-                c2 = maxss(0.0, minss(over - LINEAR_SLOP, MAX_LINEAR_CORRECTION));
+                c2 = maxss(0.0, minss(over - LINEAR_SLOP, max_linear_correction));
                 if !(linear_error > over) {
                     linear_error = over;
                 }

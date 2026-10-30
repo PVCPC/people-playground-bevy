@@ -2,9 +2,10 @@
 //! reads, with the Awake/Start effects that touch it. A scene object's instance id is the scene's base id plus
 //! twice its index in the file (traced under cdb), so the file order is the id order.
 use super::{temperature::AmbientTemperatureGridBehaviour, tool::Tool, Game, PlayAudioAtRandom, Prefs};
-use crate::b2::world::BodyId;
+use crate::b2::settings::Physics2DSettings;
+use crate::b2::world::{BodyId, World};
 use crate::assets::classes::{MonoBehaviour, Transform};
-use crate::assets::db::{AssetDb, ObjRef};
+use crate::assets::db::{AssetDb, Component, ObjRef};
 use crate::assets::mono::Value;
 use crate::assets::serialized::Reader;
 use std::path::Path;
@@ -66,6 +67,38 @@ impl Game {
         Ok(())
     }
 
+    /// globalgamemanagers' Physics2DSettings (class 19).
+    pub fn load_physics2d_settings(db: &AssetDb) -> Result<Physics2DSettings, String> {
+        let file = db.file_index("globalgamemanagers").ok_or("no globalgamemanagers")?;
+        let settings = db.files[file].objects.iter().find(|o| o.class_id == 19).ok_or("no Physics2DSettings")?;
+        let r = &mut Reader::new(db.data(ObjRef { file, path_id: settings.path_id }));
+        Physics2DSettings::read(r)
+    }
+
+    /// PhysicsManager2D at startup: the b2 globals (Physics2DSettings::UpdateBox2D), a world at the settings' gravity
+    /// with their layer collision matrix and CallbacksOnDisable. What the rewrite does not model is refused.
+    pub fn apply_physics2d_settings(&mut self, s: &Physics2DSettings) {
+        if s.job_options.use_multithreading {
+            unimplemented!("b2World with PhysicsJobOptions2D.useMultithreading");
+        }
+        if !s.default_material.is_null() {
+            unimplemented!("Physics2DSettings.m_DefaultMaterial");
+        }
+        if s.simulation_mode != 0 {
+            unimplemented!("Physics2D.simulationMode other than FixedUpdate");
+        }
+        if s.queries_hit_triggers || s.queries_start_in_colliders {
+            unimplemented!("Physics2D.queriesHitTriggers / queriesStartInColliders");
+        }
+        if !s.reuse_collision_callbacks || !s.auto_sync_transforms {
+            unimplemented!("Physics2D.reuseCollisionCallbacks / autoSyncTransforms off");
+        }
+        s.update_box2d();
+        self.world = World::new(s.gravity);
+        self.world.layer_collision_matrix = s.layer_collision_matrix.clone();
+        self.world.contacts2d.callbacks_on_disable = s.callbacks_on_disable;
+    }
+
     /// The scene's ToolController after ToolControllerBehaviour.Start (`body` is its Rigidbody2D). SetTool(0)
     /// adds ToolLibrary.Tools[0]'s component and calls OnToolChosen: the DragTool starts at its field
     /// initializers (rotationSpeed 1) with isActive set, and its Awake only subscribes to
@@ -115,6 +148,62 @@ impl Game {
         })
     }
 
+    /// The rest of LoadScene("Main") after `load_main`: the scene's Physics2D natives (`load_scene_natives`),
+    /// the ToolController after its Start (`scene_tool`) and the resize handles ResizeHandles.Update hides.
+    pub fn load_scene(&mut self, db: &mut AssetDb) -> Result<(), String> {
+        let mut scene = self.load_scene_natives(db)?;
+        self.tool = Some(Game::scene_tool(db, scene.tool_body)?);
+        let scripts = scene_scripts(db, "level1")?;
+        let handles = scripts.iter().find(|s| s.runs && s.class == "ResizeHandles").ok_or("level1 has no running ResizeHandles")?;
+        if !handles.fields.get("Targets").and_then(Value::array).ok_or("ResizeHandles.Targets")?.is_empty() {
+            unimplemented!("ResizeHandles with serialized Targets");
+        }
+        let root = scene.roots.iter().position(|r| r.prefab.objects.iter().any(|o| o.game_object == handles.game_object)).ok_or("ResizeHandles outside the scene's Physics2D roots")?;
+        let inst = scene.roots.swap_remove(root);
+        let o = inst.prefab.objects.iter().position(|o| o.game_object == handles.game_object).unwrap();
+        self.resize_handles = Some((inst, o));
+        Ok(())
+    }
+
+    /// MapLoaderBehaviour.Awake -> Load with CurrentMap = the Map asset named `map` (the main menu's choice;
+    /// MapLoadOverride is editor-only): WORLD has no children to destroy or deactivate, InstantiateMap
+    /// (`load_map`; no InstantiateOverride without mods), and no mod loaders to tell.
+    pub fn map_loader_awake(&mut self, db: &mut AssetDb, map: &str) -> Result<(), String> {
+        let scripts = scene_scripts(db, "level1")?;
+        let loader = scripts.iter().find(|s| s.runs && s.class == "MapLoaderBehaviour").ok_or("level1 has no running MapLoaderBehaviour")?;
+        let go = db.game_object(loader.game_object)?;
+        let t = go.components.iter().filter_map(|&c| db.resolve(loader.game_object.file, c)).find(|&c| db.class(c) == 4).ok_or("MapLoaderBehaviour without a Transform")?;
+        if !Transform::read(db.data(t))?.children.is_empty() {
+            unimplemented!("MapLoaderBehaviour.Load: Object.Destroy of WORLD's scene children");
+        }
+        let mut names = Vec::new();
+        let mut prefab = None;
+        for m in db.find_scripts("Map")? {
+            let Some((_, mb, v)) = db.mono(m)? else { continue };
+            if mb.name == map {
+                prefab = Some(v.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(m.file, p)).ok_or("Map.Prefab")?);
+            }
+            names.push(mb.name);
+        }
+        let prefab = prefab.ok_or_else(|| format!("no map {map:?}; the maps are {names:?}"))?;
+        let prefab = db.prefab(prefab)?;
+        self.load_map(db, &prefab)?;
+        Ok(())
+    }
+
+    /// ResizeHandles.Update: with no valid Targets (none are ever set: the resize context menu is not rewritten)
+    /// it hides itself with SetActive(false), which removes the handles' fixtures. Its other behaviours have no
+    /// OnDisable.
+    pub fn resize_handles_update(&mut self) {
+        let Some((mut inst, o)) = self.resize_handles.take() else { return };
+        for (d, k) in self.set_active(&mut inst, o, false) {
+            let Component::Script { class, .. } = &inst.prefab.objects[d].components[k].1 else { unreachable!() };
+            if class != "ResizeHandles" {
+                unimplemented!("{class}.OnDisable under the resize handles");
+            }
+        }
+    }
+
     /// SceneManager.LoadScene("Main"): the scene objects' serialized state and the Awake/Start effects the
     /// simulation reads. `game` is the game folder (UserPreferenceManager's working directory).
     pub fn load_main(db: &mut AssetDb, game: &Path) -> Result<Game, String> {
@@ -122,6 +211,7 @@ impl Game {
         // UserPreferenceLoader (level0) ran UserPreferenceManager.Load.
         g.prefs = Prefs::load(game);
         g.load_time_manager(db)?;
+        g.apply_physics2d_settings(&Self::load_physics2d_settings(db)?);
         let mut found = [false; 4];
         for s in scene_scripts(db, "level1")? {
             let v = &s.fields;
@@ -191,6 +281,26 @@ impl Game {
 mod tests {
     use super::*;
 
+    /// The b2 globals the code starts with (before load_main) are what the data and UpdateBox2D give, and the
+    /// recorder's `physics` header (the game's own Physics2D readings) says the same.
+    #[test]
+    fn physics2d_settings_match_data_and_recording() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let db = AssetDb::open(&game).unwrap();
+        let s = Game::load_physics2d_settings(&db).unwrap();
+        assert_eq!(crate::b2::settings::globals(), s.globals());
+        let dump = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("reference-probe/game/dump22drag.txt"));
+        let Ok(dump) = dump else { return };
+        let header = dump.lines().find(|l| l.contains("velThreshold=")).unwrap();
+        // Each reading is `value|bits`; gravity's two components are separated by a space.
+        let get = |k: &str| -> f32 { f32::from_bits(u32::from_str_radix(header.split(' ').find_map(|kv| kv.strip_prefix(&format!("{k}="))).unwrap().split('|').nth(1).unwrap(), 16).unwrap()) };
+        // The recorded gravity is MapConfig's (Gravity * Vector2.up: x is -0), the data's default is +0.
+        assert_eq!((s.gravity.x, s.gravity.y.to_bits()), (get("gravity"), 0xc11cf5c3));
+        let got = [s.velocity_threshold, s.max_linear_correction, s.max_angular_correction, s.max_translation_speed, s.max_rotation_speed, s.baumgarte_scale, s.baumgarte_toi_scale, s.time_to_sleep, s.linear_sleep_tolerance, s.angular_sleep_tolerance, s.default_contact_offset];
+        let want = ["velThreshold", "maxLin", "maxAng", "maxTrans", "maxRot", "baum", "baumToi", "sleepTime", "linSleep", "angSleep", "contactOffset"].map(get);
+        assert_eq!(got, want);
+    }
+
     /// The scene state against a recording made with the same config.json: the fields the map leaves alone.
     #[test]
     fn main_scene_matches_recording() {
@@ -230,3 +340,4 @@ mod tests {
         assert_eq!(d.req("dragJoint").unwrap(), "null");
     }
 }
+

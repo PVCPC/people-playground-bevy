@@ -27,13 +27,27 @@ const CREATE_PROXY: u32 = 0xbac6e0;
 const DESTROY_PROXY: u32 = 0xbac7d0;
 const MOVE_PROXY: u32 = 0xbae4a0;
 const QUERY_BROAD_PHASE: u32 = 0xbb72b0;
-/// b2_velocityThreshold, b2_maxLinearCorrection, b2_baumgarte and b2_toiBaugarte in .data.
-const SOLVER_GLOBALS: [[u32; 2]; 4] = [
-    [0x1999c2c, VELOCITY_THRESHOLD.to_bits()],
-    [0x1999c30, MAX_LINEAR_CORRECTION.to_bits()],
-    [0x1999c40, BAUMGARTE.to_bits()],
-    [0x1999c44, TOI_BAUMGARTE.to_bits()],
-];
+/// Every b2_ global Physics2DSettings::UpdateBox2D writes, as `settings::globals()` holds them.
+fn solver_globals() -> Vec<[u32; 2]> {
+    let g = super::settings::globals();
+    [
+        (0x1999c28, g.polygon_radius),
+        (0x1999c2c, g.velocity_threshold),
+        (0x1999c30, g.max_linear_correction),
+        (0x1999c34, g.max_angular_correction),
+        (0x1999c38, g.max_translation),
+        (0x1a43874, g.max_translation_squared),
+        (0x1999c3c, g.max_rotation),
+        (0x1a43878, g.max_rotation_squared),
+        (0x1999c40, g.baumgarte),
+        (0x1999c44, g.toi_baumgarte),
+        (0x1999c48, g.time_to_sleep),
+        (0x1999c4c, g.linear_sleep_tolerance),
+        (0x1999c50, g.angular_sleep_tolerance),
+    ]
+    .map(|(rva, v)| [rva, v.to_bits()])
+    .to_vec()
+}
 
 #[derive(Serialize)]
 struct Batch {
@@ -174,7 +188,7 @@ impl Random {
 }
 
 fn random_polygon(random: &mut Random, index: usize) -> Polygon {
-    let radius = [POLYGON_RADIUS, POLYGON_RADIUS + 0.1, POLYGON_RADIUS][index % 3];
+    let radius = [super::settings::globals().polygon_radius, super::settings::globals().polygon_radius + 0.1, super::settings::globals().polygon_radius][index % 3];
     if index % 4 == 0 {
         let size = Vec2::new(random.range(0.05, 1.5), random.range(0.05, 1.5));
         return Polygon::from_points(&box_corners(random.vec(0.3), size), radius);
@@ -530,7 +544,7 @@ fn compare_solver(executable: &std::path::Path) -> Result<(), String> {
         expected.push((solver_state(&solver, &positions, &velocities), ok));
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: SOLVER_GLOBALS.to_vec(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let words = |b: &[u8]| (0..b.len() / 4).map(|k| get(b, 4 * k)).collect::<Vec<u32>>();
     let mut bad = [0usize; 5];
     let mut first: [Option<String>; 5] = Default::default();
@@ -969,24 +983,6 @@ fn compare_broad_phase(executable: &std::path::Path) -> Result<(), String> {
 const ISLAND_SOLVE: u32 = 0xbba770;
 const ISLAND_SOLVE_TOI: u32 = 0xbbb360;
 const STACK_ALLOCATOR_SIZE: usize = 102_936;
-const DEG: f32 = f32::from_bits(0x3c8e_fa35);
-/// SOLVER_GLOBALS plus the Island::Solve limits and sleep tolerances.
-fn island_globals() -> Vec<[u32; 2]> {
-    let mut g = SOLVER_GLOBALS.to_vec();
-    let max_rotation = 360.0 * DEG;
-    g.extend([
-        [0x1999c38, 100.0f32.to_bits()],
-        [0x1a43874, 10000.0f32.to_bits()],
-        [0x1999c3c, max_rotation.to_bits()],
-        [0x1a43878, (max_rotation * max_rotation).to_bits()],
-        [0x1999c48, 0.5f32.to_bits()],
-        [0x1999c34, (8.0 * DEG).to_bits()],
-        [0x1999c4c, 0.01f32.to_bits()],
-        [0x1999c50, (2.0 * DEG).to_bits()],
-    ]);
-    g
-}
-
 fn body_bytes(b: &mut [u8], o: usize, body: &super::world::Body) {
     put(b, o, body.kind as u32);
     put(b, o + 4, body.flags as u32);
@@ -1074,7 +1070,7 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
         let mut world = World::default();
         let fixture = |shape, random: &mut Random| FixtureDef { shape, friction: random.range(0.0, 1.0), restitution: random.range(0.0, 0.5), density: random.range(0.5, 3.0), is_sensor: false, filter: Filter::default(), collider: Default::default() };
         let ground = world.create_body(&BodyDef::default());
-        let ground_box = Polygon::from_points(&box_corners(Vec2::ZERO, Vec2::new(30.0, 1.0)), POLYGON_RADIUS);
+        let ground_box = Polygon::from_points(&box_corners(Vec2::ZERO, Vec2::new(30.0, 1.0)), super::settings::globals().polygon_radius);
         world.create_fixture(ground, &fixture(Shape::Polygon(ground_box), &mut random), true);
         for i in 0..2 + random.next() as usize % 6 {
             let def = BodyDef {
@@ -1093,7 +1089,7 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
             let shape = if random.next() % 3 == 0 {
                 Shape::Circle(Circle { p: random.vec(0.1), radius: random.range(0.2, 0.5) })
             } else {
-                Shape::Polygon(Polygon::from_points(&box_corners(random.vec(0.1), Vec2::new(random.range(0.4, 1.2), random.range(0.4, 1.0))), POLYGON_RADIUS))
+                Shape::Polygon(Polygon::from_points(&box_corners(random.vec(0.1), Vec2::new(random.range(0.4, 1.2), random.range(0.4, 1.0))), super::settings::globals().polygon_radius))
             };
             world.create_fixture(id, &fixture(shape, &mut random), true);
         }
@@ -1152,7 +1148,7 @@ fn compare_island_solve(executable: &std::path::Path, toi: bool) -> Result<(), S
         expected.push((after, skip, contacts.len()));
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let (mut bad, mut first, mut touching) = (0, None, 0);
     for (i, reply) in replies.iter().enumerate() {
         let native = unhex(&reply.buffers[2]);
@@ -1294,7 +1290,7 @@ fn compare_revolute(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let (mut bad, mut first) = (0, None);
     for (i, reply) in replies.iter().enumerate() {
         let (op, joint, p, v) = &expected[i];
@@ -1412,7 +1408,7 @@ fn compare_distance_joint(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let (mut bad, mut first) = (0, None);
     for (i, reply) in replies.iter().enumerate() {
         let (op, joint, p, v) = &expected[i];
@@ -1538,7 +1534,7 @@ fn compare_weld(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let (mut bad, mut first) = (0, None);
     for (i, reply) in replies.iter().enumerate() {
         let (op, joint, p, v) = &expected[i];
@@ -1693,7 +1689,7 @@ fn compare_prismatic(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     let count = calls.len();
-    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
     let (mut bad, mut first) = (0, None);
     for (i, reply) in replies.iter().enumerate() {
         let (op, joint, p, v) = &expected[i];

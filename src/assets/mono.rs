@@ -6,7 +6,7 @@ use super::clr::{self, Assembly, Token};
 use super::serialized::Reader;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc as Rc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

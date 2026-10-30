@@ -325,6 +325,9 @@ pub enum PendingStart {
     BloodPuffSound,
     /// ExistifUnderwater.Start of a new BloodPuff's Extra decal emitter (Invert: off under water).
     BloodPuffEmitterWater(usize),
+    /// SerialiseInstructions.Start: the number of SerialisableIdentity components it adds (their Regenerate
+    /// takes a Guid, not Random).
+    SerialiseInstructions(usize),
 }
 
 impl Game {
@@ -610,6 +613,11 @@ impl Game {
                 // BoundingBoxBehaviour.Start: Global.main.CameraControlBehaviour.BoundingBox (Extend is camera only).
                 PendingStart::BoundingBox(b) => self.BoundingBox = b,
                 PendingStart::MapConfig(m) => self.map_config_start(&m),
+                PendingStart::SerialiseInstructions(n) => {
+                    for _ in 0..n {
+                        self.allocate_instance_id();
+                    }
+                }
                 PendingStart::BloodPuffEmitterWater(b) => {
                     let s = self.blood_puffs[b].splat;
                     let p = self.splats[s].parent_position;

@@ -230,7 +230,6 @@ mod tests {
         }
         let prefab = db.prefab(map.unwrap()).unwrap();
         let mut g = Game::load_main(&mut db, &game).unwrap();
-        g.world = crate::b2::world::World::new(crate::b2::math::Vec2::new(-0.0, -9.81));
         g.load_map(&mut db, &prefab).unwrap();
         g.run_pending_starts();
         let snap = |k: &str| first.snap.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()).unwrap();

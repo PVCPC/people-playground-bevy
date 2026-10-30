@@ -775,7 +775,7 @@ impl Game {
             };
             // Snapshot records name objects with spaces as underscores.
             if let Some(&id) = self.objects.get(&name.replace(' ', "_")) {
-                self.layers.insert(id, layer.parse().unwrap());
+                self.world.layers.insert(id, layer.parse().unwrap());
             }
         }
     }
@@ -830,7 +830,7 @@ impl Game {
         self.tool_fixed_update();
         self.ambient_grid_fixed_update();
         for p in 0..self.physicals.len() {
-            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
+            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated && self.physicals[p].in_world {
                 self.physical_fixed_update(p);
             }
         }
@@ -872,8 +872,11 @@ impl Game {
             self.play_audio_at_random_update(a);
         }
         self.tool_update();
+        // level1's order-0 behaviours update in load order (UndoControllerBehaviour, WORLD's PlayAudioAtRandom,
+        // ToolControllerBehaviour, then ResizeHandles), before the map's and the spawned ones.
+        self.resize_handles_update();
         for p in 0..self.physicals.len() {
-            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
+            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated && self.physicals[p].in_world {
                 self.physical_update(p);
             }
         }
@@ -908,6 +911,8 @@ impl Game {
         self.MousePosition = self.input.mouse;
         // The BloodPuff pool (made at runtime: after the scene's behaviours).
         self.blood_puff_pool_update();
+        // Execution order 1050, above every spawnable script's.
+        self.catalog_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
         self.gore_string_delayed_calls(true);

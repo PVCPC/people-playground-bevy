@@ -11,19 +11,11 @@ use super::distance_joint::{DistanceDef, DistanceJoint};
 use super::weld::{WeldDef, WeldJoint};
 use super::prismatic::{PrismaticDef, PrismaticJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
-use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
+use super::shape::{Circle, MassData, Polygon};
 use super::solver::*;
 use super::toi::{time_of_impact, Sweep, ToiState};
 
-const DEG_TO_RAD: f32 = f32::from_bits(0x3c8e_fa35);
-/// Physics2DSettings (m_MaxTranslationSpeed etc.) as PhysicsManager2D copies them into the b2_ globals.
-const MAX_TRANSLATION: f32 = 100.0;
-const MAX_TRANSLATION_SQUARED: f32 = MAX_TRANSLATION * MAX_TRANSLATION;
-const MAX_ROTATION: f32 = 360.0 * DEG_TO_RAD;
-const MAX_ROTATION_SQUARED: f32 = MAX_ROTATION * MAX_ROTATION;
-const TIME_TO_SLEEP: f32 = 0.5;
-const LINEAR_SLEEP_TOLERANCE: f32 = 0.01;
-const ANGULAR_SLEEP_TOLERANCE: f32 = 2.0 * DEG_TO_RAD;
+use super::settings::globals;
 /// b2_maxSubSteps; SolveTOI also stops when the earliest impact is past 1 - 10 FLT_EPSILON.
 const MAX_SUB_STEPS: i32 = 8;
 const ONE_MINUS_TEN_EPSILON: f32 = f32::from_bits(0x3f7f_ffec);
@@ -106,8 +98,8 @@ impl Shape {
                     if upper.y <= v.y { upper.y = v.y }
                 }
                 // Unity's ComputeAABB(includeRadius = true) adds GetEffectiveRadius (180bb3f20): the radius less
-                // b2_polygonRadius when it is larger.
-                let skin = f32::from_bits(0x3c23d70a);
+                // b2_polygonRadius (Physics2DSettings.m_DefaultContactOffset) when it is larger.
+                let skin = globals().polygon_radius;
                 let r = if skin >= polygon.radius { polygon.radius } else { polygon.radius - skin };
                 Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(upper.x + r, upper.y + r) }
             }
@@ -540,6 +532,10 @@ pub struct World {
     inv_dt0: f32,
     /// Physics2D.IgnoreCollision pairs (lower collider instance id first), checked where Unity's contact filter runs.
     pub ignored: std::collections::HashSet<(i32, i32)>,
+    /// Physics2DSettings.m_LayerCollisionMatrix (empty: every layer pair collides, as for a world built without
+    /// the game's data) and the layer of each GameObject (by instance id) it is looked up with.
+    pub layer_collision_matrix: Vec<u32>,
+    pub layers: std::collections::HashMap<i32, i32>,
     /// The contact listener's PhysicsContacts2D.
     pub contacts2d: Contacts2D,
     /// PhysicsScene2D's fixtureless static ground body (what a joint without connectedBody attaches to), made on first use.
@@ -577,6 +573,8 @@ impl World {
             step_complete: true,
             inv_dt0: 0.0,
             ignored: Default::default(),
+            layer_collision_matrix: Vec::new(),
+            layers: Default::default(),
             contacts2d: Contacts2D::default(),
             ground: None,
         }
@@ -1196,11 +1194,15 @@ impl World {
         }
     }
 
-    /// Unity's b2ContactFilter: the fixture filters, then Physics2D.IgnoreCollision.
-    // ponytail: Unity's layer collision matrix is not modelled yet (every shipped object is on a colliding layer).
+    /// Unity's b2ContactFilter (WorldContactFilter2D::ShouldCollide, 180c24400): the fixture filters, the layer
+    /// collision matrix on the colliders' GameObject layers, then Physics2D.IgnoreCollision.
     fn fixtures_should_collide(&self, fa: FixtureId, fb: FixtureId) -> bool {
-        let (ca, cb) = (self.fixture(fa).collider.id, self.fixture(fb).collider.id);
-        should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(ca.min(cb), ca.max(cb)))
+        let (ca, cb) = (self.fixture(fa).collider, self.fixture(fb).collider);
+        let layer = |c: ColliderRef| self.layers[&c.game_object] as usize;
+        if !self.layer_collision_matrix.is_empty() && self.layer_collision_matrix[layer(ca)] >> layer(cb) & 1 == 0 {
+            return false;
+        }
+        should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(ca.id.min(cb.id), ca.id.max(cb.id)))
     }
 
     /// b2ContactManager::OnContactCreate (180bb98f0).
@@ -1497,17 +1499,18 @@ impl World {
         for (&cid, m) in island_contacts.iter().zip(&manifolds) {
             self.contact_mut(cid).manifold = *m;
         }
+        let g = globals();
         for (i, &id) in island_bodies.iter().enumerate() {
             let Velocity { mut v, mut w } = velocities[i];
             let (tx, ty) = (v.x * h, v.y * h);
             let t2 = ty * ty + tx * tx;
-            if MAX_TRANSLATION_SQUARED < t2 {
-                let ratio = MAX_TRANSLATION / t2.sqrt();
+            if g.max_translation_squared < t2 {
+                let ratio = g.max_translation / t2.sqrt();
                 v = Vec2::new(v.x * ratio, v.y * ratio);
             }
             let rotation = w * h;
-            if MAX_ROTATION_SQUARED < rotation * rotation {
-                w = w * (MAX_ROTATION / rotation.abs());
+            if g.max_rotation_squared < rotation * rotation {
+                w = w * (g.max_rotation / rotation.abs());
             }
             let axis = self.body(id).axis;
             let p = &mut positions[i];
@@ -1548,8 +1551,8 @@ impl World {
             return;
         }
         let mut min_sleep_time = f32::MAX;
-        let linear = LINEAR_SLEEP_TOLERANCE * LINEAR_SLEEP_TOLERANCE;
-        let angular = ANGULAR_SLEEP_TOLERANCE * ANGULAR_SLEEP_TOLERANCE;
+        let linear = g.linear_sleep_tolerance * g.linear_sleep_tolerance;
+        let angular = g.angular_sleep_tolerance * g.angular_sleep_tolerance;
         for &id in island_bodies {
             let b = self.body_mut(id);
             if b.kind == BodyType::Static {
@@ -1566,7 +1569,7 @@ impl World {
                 }
             }
         }
-        if TIME_TO_SLEEP <= min_sleep_time && position_solved {
+        if g.time_to_sleep <= min_sleep_time && position_solved {
             for &id in island_bodies {
                 let b = self.body_mut(id);
                 b.flags &= !BODY_AWAKE;
@@ -1804,17 +1807,18 @@ impl World {
             solver.solve_velocity_constraints(&mut velocities);
         }
         let h = step.dt;
+        let g = globals();
         for (i, &id) in island_bodies.iter().enumerate() {
             let Velocity { mut v, mut w } = velocities[i];
             let (tx, ty) = (v.x * h, v.y * h);
             let t2 = ty * ty + tx * tx;
-            if MAX_TRANSLATION_SQUARED < t2 {
+            if g.max_translation_squared < t2 {
                 let length = t2.sqrt();
-                v = Vec2::new(v.x * (MAX_TRANSLATION / length), v.y * (MAX_TRANSLATION / length));
+                v = Vec2::new(v.x * (g.max_translation / length), v.y * (g.max_translation / length));
             }
             let rotation = w * h;
-            if MAX_ROTATION_SQUARED < rotation * rotation {
-                w = w * (MAX_ROTATION / rotation.abs());
+            if g.max_rotation_squared < rotation * rotation {
+                w = w * (g.max_rotation / rotation.abs());
             }
             let b = self.body_mut(id);
             b.sweep.c = Vec2::new(positions[i].c.x + v.x * h, positions[i].c.y + v.y * h);
@@ -1855,7 +1859,7 @@ fn should_collide(a: &Filter, b: &Filter) -> bool {
 /// The b2*Contact::Evaluate natives: polygons with a rounded radius take the radial path.
 fn evaluate(manifold: &mut Manifold, a: &Shape, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
     match (a, b) {
-        (Shape::Polygon(a), Shape::Polygon(b)) if a.radius <= POLYGON_RADIUS && b.radius <= POLYGON_RADIUS => collide_polygons(manifold, a, xf_a, b, xf_b),
+        (Shape::Polygon(a), Shape::Polygon(b)) if a.radius <= globals().polygon_radius && b.radius <= globals().polygon_radius => collide_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Polygon(b)) => collide_radial_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Circle(b)) => collide_polygon_and_circle(manifold, a, xf_a, b, xf_b),
         (Shape::Circle(a), Shape::Circle(b)) => collide_circles(manifold, a, xf_a, b, xf_b),
@@ -1875,7 +1879,7 @@ mod tests {
     use crate::b2::shape::{box_corners, Circle, Polygon};
 
     fn box_fixture(size: Vec2) -> FixtureDef {
-        let shape = Shape::Polygon(Polygon::from_points(&box_corners(Vec2::ZERO, size), POLYGON_RADIUS));
+        let shape = Shape::Polygon(Polygon::from_points(&box_corners(Vec2::ZERO, size), globals().polygon_radius));
         FixtureDef { shape, friction: 0.4, restitution: 0.0, density: 1.0, is_sensor: false, filter: Filter::default(), collider: ColliderRef::default() }
     }
 

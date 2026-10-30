@@ -5,9 +5,6 @@ use super::math::{Rot, Vec2};
 use super::solver::{Position, TimeStep, Velocity};
 use crate::hinge;
 
-/// b2_maxAngularCorrection as PhysicsManager2D sets it: 8 degrees.
-const MAX_ANGULAR_CORRECTION: f32 = 8.0 * f32::from_bits(0x3c8e_fa35);
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RevoluteDef {
     pub local_anchor_a: Vec2,
@@ -124,7 +121,7 @@ impl RevoluteJoint {
             limits: [self.def.lower_angle, self.def.upper_angle],
             limit_enabled: self.def.enable_limit,
             limit_state: self.limit_state,
-            max_angular_correction: MAX_ANGULAR_CORRECTION,
+            max_angular_correction: super::settings::globals().max_angular_correction,
         };
         let solved = c.solve();
         positions[self.a.index] = Position { c: Vec2::new(c.position_a[0], c.position_a[1]), a: c.position_a[2] };

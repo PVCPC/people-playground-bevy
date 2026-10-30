@@ -10,6 +10,7 @@ pub mod math;
 pub mod prismatic;
 pub mod probe;
 pub mod revolute;
+pub mod settings;
 pub mod shape;
 pub mod solver;
 pub mod toi;

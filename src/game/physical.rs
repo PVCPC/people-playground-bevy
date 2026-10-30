@@ -161,7 +161,8 @@ script! {
         beingStabbedBy: Vec<usize> = Vec::new(),
         StabReleaseSpeedModifier: f32 = 1.0,
         StabWoundSizeMultiplier: f32 = 1.0,
-        /// The collider's GameObject is active (Collider.gameObject.activeSelf).
+        /// The GameObject is active in the hierarchy (a recording's activeSelf: its physicals have no inactive
+        /// parents).
         active: bool = true,
         enabled: bool = true,
         /// The GameObject was destroyed (Object.Destroy ran): removed from PhysicalObjectsInWorld.
@@ -246,7 +247,9 @@ impl Game {
     /// GetComponentInParent<AudioSourceTimeScaleBehaviour>(): on the object or any ancestor (the root carries it).
     fn has_audio_time_scale_above(&self, p: usize) -> bool {
         let root = self.transform_root(p);
-        self.physicals[p].audio_time_scale || root.is_some() && (0..self.physicals.len()).any(|q| self.physicals[q].audio_time_scale && self.transform_root(q) == root)
+        self.physicals[p].audio_time_scale
+            || root.is_some_and(|r| self.audio_time_scale_roots.contains(&r))
+            || root.is_some() && (0..self.physicals.len()).any(|q| self.physicals[q].audio_time_scale && self.transform_root(q) == root)
     }
 
     /// PhysicalBehaviour.Start, run in Start order (`physicals` is Global.PhysicalObjectsInWorld, which Start

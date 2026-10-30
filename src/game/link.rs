@@ -12,7 +12,7 @@ use super::spawn::{load_values, Instance};
 use super::*;
 use crate::assets::classes::PPtr;
 use crate::assets::components::{JointKind, PhysicsMaterial2D, Sprite};
-use crate::assets::db::{AssetDb, Component, ObjRef, Prefab};
+use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
 use crate::assets::mono::Value;
 use crate::game_assets::{Curve, CurveCache};
 use crate::unity::transform::Node as TransformNode;
@@ -243,6 +243,8 @@ impl Game {
             }).collect();
             p.all_colliders = p.colliders.clone();
             p.all_colliders.sort_by(|a, b| b.cmp(a));
+            // Start adds it to Global.PhysicalObjectsInWorld (an inactive object never starts).
+            p.in_world = false;
             p.Properties = match db.resolve(file, field(v, "Properties")?.pptr().ok_or("Properties")?) {
                 Some(asset) => self.physical_properties(db, asset)?,
                 None => unimplemented!("{}: PhysicalBehaviour without Properties", p.name),
@@ -501,6 +503,70 @@ impl Game {
         Ok((inst, linked))
     }
 
+    /// CatalogBehaviour.Update (no pause menu, dialog or UI block; no contraption is ever selected): releasing
+    /// "spawnRight" spawns SelectedItem facing right, else releasing "spawnLeft" spawns it flipped.
+    pub fn catalog_update(&mut self) {
+        let Some(item) = self.catalog_selected.clone() else { return };
+        let up = |k: &str| self.input.controls.get(k).is_some_and(|c| c.up);
+        let flipped = match (up("spawnRight"), up("spawnLeft")) {
+            (true, _) => false,
+            (false, true) => true,
+            _ => return,
+        };
+        let mut db = self.assets.take().expect("CatalogBehaviour.Update without the game's data");
+        let spawned = self.catalog_spawn(&mut db, &item, self.MousePosition, flipped);
+        self.assets = Some(db);
+        if let Err(e) = spawned {
+            panic!("CatalogBehaviour.Spawn({item}): {e}");
+        }
+    }
+
+    /// CatalogBehaviour.Spawn(SelectedItem, flipped) at Global.MousePosition: PerformInstantiation (no
+    /// InstantiateOverride without mods), then AddComponent DeregisterBehaviour, TexturePackApplier,
+    /// AudioSourceTimeScaleBehaviour and SerialiseInstructions, and the asset's name. SpawnedGameObjects, the undo
+    /// action and the stats are not simulation state; DeregisterBehaviour and TexturePackApplier have no messages
+    /// and AudioSourceTimeScaleBehaviour.Start only registers audio.
+    pub fn catalog_spawn(&mut self, db: &mut AssetDb, asset: &str, position: [f32; 3], flipped: bool) -> Result<(Instance, Linked), String> {
+        let catalog = *db.find_scripts("CatalogData")?.first().ok_or("no CatalogData")?;
+        let (_, _, items) = db.mono(catalog)?.ok_or("CatalogData")?;
+        let mut prefab = None;
+        for item in items.get("Items").and_then(Value::array).ok_or("CatalogData.Items")?.to_vec() {
+            let r = db.resolve(catalog.file, item.pptr().ok_or("CatalogData.Items")?).ok_or("a SpawnableAsset outside the data")?;
+            let (_, mb, v) = db.mono(r)?.ok_or("SpawnableAsset")?;
+            if mb.name == asset {
+                prefab = Some(db.resolve(r.file, v.get("Prefab").and_then(Value::pptr).ok_or("SpawnableAsset.Prefab")?).ok_or("SpawnableAsset.Prefab")?);
+                break;
+            }
+        }
+        let prefab = db.prefab(prefab.ok_or_else(|| format!("no catalog item {asset:?}"))?)?;
+        let (inst, linked) = self.spawn(db, &prefab, position, [0.0, 0.0, 0.0, 1.0], None)?;
+        if flipped {
+            unimplemented!("CatalogBehaviour.Spawn flipped: localScale.x *= -1");
+        }
+        for _ in 0..4 {
+            self.allocate_instance_id();
+        }
+        // The root's AudioSourceTimeScaleBehaviour, which PhysicalBehaviour.Start's GetComponentInParent finds.
+        match (linked.physicals.get(&0), linked.nodes.get(&0)) {
+            (Some(&p), _) => self.physicals[p].audio_time_scale = true,
+            (None, Some(&n)) => self.audio_time_scale_roots.push(n),
+            (None, None) => unimplemented!("a catalog item whose root is neither physical nor a parent of physicals"),
+        }
+        // gameObject.name = e.name
+        if let Some(&p) = linked.physicals.get(&0) {
+            self.physicals[p].name = asset.to_string();
+        }
+        if let Some(p) = linked.person {
+            self.people[p].name = asset.to_string();
+        }
+        // SerialiseInstructions.Start: a SerialisableIdentity on the root and on every Transform below without an
+        // Optout, unless one is there (what Starts add first, the outlines and particles, all carry Optout).
+        let has = |o: &PrefabObject, class: &str| o.components.iter().any(|(_, c)| matches!(c, Component::Script { class: k, .. } if k == class));
+        let identities = prefab.objects.iter().enumerate().filter(|&(o, ob)| !has(ob, "SerialisableIdentity") && (o == 0 || !has(ob, "Optout"))).count();
+        self.pending_starts.push(super::misc::PendingStart::SerialiseInstructions(identities));
+        Ok((inst, linked))
+    }
+
     /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order, skipping objects inactive by then.
     /// The classes left out have no Awake that touches simulation state (ConnectedNodeBehaviour, GripBehaviour
     /// and GoreStringBehaviour only read components; MapConfig, MapLightBehaviour and WindControllerBehaviour
@@ -572,11 +638,7 @@ impl Game {
                 "PersonBehaviour" => PendingStart::Person(linked.person.unwrap()),
                 "HingeJointLimitAutofixBehaviour" => PendingStart::HingeJointLimitAutofix(linked.person.unwrap()),
                 "CirculationBehaviour" => PendingStart::Circulation(limb()),
-                "PhysicalBehaviour" => {
-                    let p = linked.physicals[&o];
-                    self.physicals[p].in_world = false;
-                    PendingStart::Physical(p)
-                }
+                "PhysicalBehaviour" => PendingStart::Physical(linked.physicals[&o]),
                 "LimbBehaviour" => PendingStart::Limb(limb()),
                 "ConnectedNodeBehaviour" => PendingStart::Node(limb(), v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect())),
                 "GripBehaviour" => PendingStart::Grip(self.limbs[limb()].GripBehaviour.unwrap()),

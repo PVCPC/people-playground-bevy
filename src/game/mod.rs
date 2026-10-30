@@ -828,17 +828,23 @@ pub struct Game {
     pub vital_parts: std::collections::HashMap<usize, Vec<[f32; 6]>>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
+    /// The game's data, for what scripts instantiate at run time (the catalog); None when loaded from a recording.
+    pub assets: Option<Box<crate::assets::db::AssetDb>>,
+    /// CatalogBehaviour.SelectedItem: the SpawnableAsset's name (the catalog UI is not rewritten).
+    pub catalog_selected: Option<String>,
+    /// The `transform_nodes` roots carrying an AudioSourceTimeScaleBehaviour (the catalog adds one).
+    pub audio_time_scale_roots: Vec<usize>,
     /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.
     pub last_simulation: (f64, f32),
     /// PhysicsScene2D m_RigidbodyHierarchyChanged: the movement-state list is rebuilt after the next step.
     pub rigidbody_hierarchy_changed: bool,
     /// The ToolController (recordings before the drag tool lack it).
     pub tool: Option<tool::Tool>,
+    /// The scene's "Resizing handles" clone and the object its ResizeHandles sits on, while it is active.
+    pub resize_handles: Option<(spawn::Instance, usize)>,
     pub input: tool::Input,
     /// Global.main.MousePosition
     pub MousePosition: [f32; 3],
-    /// GameObject layers by the restore's object ids.
-    pub layers: HashMap<i32, i32>,
     /// The restore's GameObject ids by name.
     pub objects: HashMap<String, i32>,
     /// The id Object.Instantiate gives its next clone (ids go down by 2).
