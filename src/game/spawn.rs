@@ -722,7 +722,7 @@ impl Game {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::assets::db::AssetDb;
     use crate::assets::mono::Value;
@@ -769,14 +769,13 @@ mod tests {
         assert_eq!(runtime.len(), 7);
     }
 
-    /// The Person prefab instantiated natively against dump26stabhead2's first snapshot: every limb body's words,
-    /// its fixture proxies and its hinge's b2 definition, after PersonBehaviour.Awake's rescale and the recorder's
-    /// Physics2D.SyncTransforms.
-    #[test]
-    fn person_spawn_matches_game() {
-        let Ok(game) = crate::game_assets::find_game(None) else { return };
-        let dump = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("reference-probe/game/dump26stabhead2.txt");
-        let Ok(mut snaps) = dump::snapshots(&dump) else { return };
+    /// The Person prefab spawned as a recording spawned it: the recorder's spawn point and original ids, the
+    /// clone ids from its Human, PersonBehaviour.Awake's recorded root scale, then the recorder's
+    /// Physics2D.SyncTransforms. Also returns the asset database and the first snapshot.
+    pub(crate) fn spawn_recorded(name: &str) -> Option<(Game, Instance, Prefab, AssetDb, dump::Snapshot)> {
+        let game = crate::game_assets::find_game(None).ok()?;
+        let dump = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("reference-probe/game/{name}.txt"));
+        let mut snaps = dump::snapshots(&dump).ok()?;
         let first = snaps.next().unwrap();
         let mut db = AssetDb::open(&game).unwrap();
         let catalog = db.find_scripts("CatalogData").unwrap()[0];
@@ -792,7 +791,6 @@ mod tests {
             }
         }
         let prefab = db.prefab(person.unwrap()).unwrap();
-        // The recorder's spawn point, and the root scale PersonBehaviour.Awake drew.
         let root = first.of("TransformChain").find(|r| r.name == "Human").unwrap();
         let hex3 = |k: &str| -> [f32; 3] {
             let w: Vec<f32> = root.get(k).unwrap().split(',').map(|w| f32::from_bits(u32::from_str_radix(w, 16).unwrap())).collect();
@@ -824,14 +822,22 @@ mod tests {
                 ci += 1;
             }
         }
-        let human_go = first.of("TransformChain").find(|r| r.name == "Human").unwrap().id + 2;
+        let human_go = root.id + 2;
         let mut g = Game::default();
         g.world = World::new(V::new(-0.0, -9.81));
         g.next_instance_id = human_go;
         let (mut inst, _) = g.instantiate_native(&prefab, spawn, [0.0, 0.0, 0.0, 1.0], &original_ids);
-        // PersonBehaviour.Awake's transform.localScale, then the recorder's Physics2D.SyncTransforms.
         inst.set_local_scale(0, hex3("lscale"));
         g.sync_transforms(&mut inst, &prefab);
+        Some((g, inst, prefab, db, first))
+    }
+
+    /// The Person prefab instantiated natively against dump26stabhead2's first snapshot: every limb body's words,
+    /// its fixture proxies and its hinge's b2 definition, after PersonBehaviour.Awake's rescale and the recorder's
+    /// Physics2D.SyncTransforms.
+    #[test]
+    fn person_spawn_matches_game() {
+        let Some((g, inst, prefab, _, first)) = spawn_recorded("dump26stabhead2") else { return };
         let mut out = Vec::new();
         // Body creation order: the game's list (head newest) restricted to the person.
         let name_of = |b: BodyId| {

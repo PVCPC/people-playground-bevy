@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub mod circulation;
 pub mod dump;
 pub mod limb;
+pub mod link;
 pub mod map;
 pub mod misc;
 pub mod person;
