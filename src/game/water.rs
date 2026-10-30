@@ -67,9 +67,9 @@ const POOLABLE_TAG: u16 = 20008;
 #[derive(Clone, Debug)]
 pub struct SplashItem {
     pub active: bool,
-    /// The root ParticleSystem (lengthInSec 5, not looping, one burst at 0 whose particles and sub-emitter particles
-    /// live at most 2 s) stops when its time reaches 5 s (stopAction Callback: PoolableParticleSystemHelper returns the
-    /// clone). The clock is a double, as BloodPuff's.
+    /// The root ParticleSystem (not looping, its particles and sub-emitter particles outlived by its lengthInSec)
+    /// stops when its time reaches `SplashPool::duration` (stopAction Callback: PoolableParticleSystemHelper returns
+    /// the clone). The clock is a double, as BloodPuff's.
     pub particle_time: f64,
     /// Destroyed by ObjectPoolBehaviour.Clear.
     pub destroyed: bool,
@@ -89,6 +89,10 @@ pub struct SplashPool {
     pub sound: Option<usize>,
     /// GetComponentsInChildren<ParticleSystem>().Count: each gets a Random.Range in DoSplash.
     pub particle_systems: usize,
+    /// The root ParticleSystem's lengthInSec (a poolable prefab's).
+    pub duration: f64,
+    /// The ActivateIfFancyEffects on active objects: each Awake of a clone draws Random.value.
+    pub fancy: usize,
     /// PoolGenerator.Ensure ran.
     pub ensured: bool,
     pub pool: ObjectPool,
@@ -121,11 +125,35 @@ impl Game {
             _ => None,
         });
         let particle_systems = prefab.objects.iter().enumerate().filter(|(o, _)| self.prefab_object_active(&prefab, *o)).map(|(_, ob)| ob.components.iter().filter(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))).count()).sum();
+        let mut fancy = 0;
+        for (o, ob) in prefab.objects.iter().enumerate() {
+            let aife = ob.components.iter().any(|(_, c)| matches!(c, Component::Script { class, .. } if class == "ActivateIfFancyEffects"));
+            if aife && self.prefab_object_active(&prefab, o) {
+                // SetActive(false) on an object with children would skip their Awakes.
+                if !ob.children.is_empty() {
+                    unimplemented!("{}: ActivateIfFancyEffects on an object with children", ob.name);
+                }
+                fancy += 1;
+            }
+        }
+        let poolable = root.tag == POOLABLE_TAG;
+        let duration = match root.components.iter().find(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))) {
+            Some(&(r, _)) if poolable => {
+                let ps = crate::assets::components::ParticleSystemHead::read(db.data(r)).map_err(|e| format!("ParticleSystem: {e}"))?;
+                if ps.stop_action != 3 || ps.looping || ps.simulation_speed != 1.0 {
+                    unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback", root.name);
+                }
+                ps.length_in_sec as f64
+            }
+            _ => 0.0,
+        };
         self.splash_pools.push(SplashPool {
             source,
-            poolable: root.tag == POOLABLE_TAG,
+            poolable,
             sound,
             particle_systems,
+            duration,
+            fancy,
             original_ids: Arc::new(db.resource_load_order()?),
             prefab: Arc::new(prefab),
             ensured: false,
@@ -149,7 +177,7 @@ impl Game {
     }
 
     /// PoolGenerator.RequestPrefab(Splash, position): ObjectPoolBehaviour.Request, returning the item.
-    fn splash_request(&mut self, s: usize) -> Option<usize> {
+    pub(super) fn splash_request(&mut self, s: usize) -> Option<usize> {
         if !self.splash_pools[s].ensured {
             // Ensure: new GameObject(name + " pool").AddComponent<ObjectPoolBehaviour>() takes the GameObject's,
             // its Transform's and the behaviour's instance ids.
@@ -179,6 +207,10 @@ impl Game {
         // Instantiate(Prefab, position, identity); the position and rotation only place the particles and the sound.
         let (prefab, ids, sound) = (pool.prefab.clone(), pool.original_ids.clone(), pool.sound);
         self.instantiate_native(&prefab, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
+        // Awake: each active ActivateIfFancyEffects' `Chance(1) > Random.value` before it reads FancyEffects.
+        for _ in 0..self.splash_pools[s].fancy {
+            self.random.value();
+        }
         let pool = &mut self.splash_pools[s];
         pool.items.push(SplashItem { active: true, particle_time: 0.0, destroyed: false });
         let i = pool.items.len() - 1;
@@ -238,7 +270,7 @@ impl Game {
                     continue;
                 }
                 item.particle_time += dt as f64;
-                if item.particle_time >= 5.0 {
+                if item.particle_time >= pool.duration {
                     item.active = false;
                     pool.pool.available.add(i);
                 }
@@ -359,6 +391,7 @@ impl Game {
             let id = inst.objects[d].components[k];
             // Deactivation stops its coroutines.
             self.coroutines.retain(|c| c.owner != id);
+            self.end_of_frame.retain(|c| c.owner != id);
             // Behaviour::RemoveFromManager with the OnDisable.
             if let Some(&(_, b)) = self.behaviour_of.get(&id) {
                 self.behaviours.remove(b);
@@ -370,6 +403,10 @@ impl Game {
                     if *enabled {
                         self.physical_on_disable(p);
                     }
+                }
+                "CarBehaviour" => {
+                    let car = self.cars.iter().position(|c| c.id == id).expect("a CarBehaviour in the arena");
+                    self.car_on_disable(car, inst);
                 }
                 c if !super::declares(c, "OnDisable") => {}
                 _ => unimplemented!("{class}.OnDisable"),

@@ -49,6 +49,8 @@ pub struct Instance {
     pub anchored: HashMap<(usize, usize), AnchoredState>,
     /// The Collider2Ds' native state by (object, component).
     pub colliders: HashMap<(usize, usize), ColliderState>,
+    /// The CircleCollider2Ds whose radius or offset a script set at run time, by (object, component): (radius, offset).
+    pub circles: HashMap<(usize, usize), (f32, [f32; 2])>,
     /// Each object's TransformChangeDispatch interest in the Physics2D systems (the CHANGE_* bits).
     pub interest: Vec<u8>,
     /// Each object's changed bits for those systems, cleared by SyncTransforms.
@@ -548,7 +550,7 @@ impl Game {
         });
         for &(d, c) in &scripts {
             let Component::Script { class, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
-            super::link::check_rewritten(class, false);
+            super::link::check_rewritten_at(&prefab, d, class);
             if !inst.objects[d].activated {
                 unimplemented!("{}: GameObject.SetActive(true) on an object whose scripts never ran Awake and Start", prefab.objects[d].name);
             }
@@ -910,7 +912,7 @@ impl Game {
     /// Collider2D::RecreateCollider(null) (180c14750) outside a composite: the body's contacts wake their bodies,
     /// Cleanup(kColliderRecreate) (180c0d940) keeps the collider's collisions and destroys its fixtures (last
     /// first) and resets the body mass, then CreateFixtures, and the attached Rigidbody2D is woken.
-    fn collider2d_recreate(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
+    pub(super) fn collider2d_recreate(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
         let id = inst.objects[o].components[c];
         let fixtures = inst.fixtures.remove(&(o, c)).unwrap_or_default();
         if let Some(&first) = fixtures.first() {
@@ -1019,11 +1021,12 @@ impl Game {
             // CircleCollider2D::PrepareShapes (180c13210): the offset through the matrix, and the radius times the
             // larger absolute lossy scale axis, clamped to 0.0001..1e6.
             ColliderShape::Circle { radius } => {
+                let (radius, offset) = inst.circles.get(&(o, c)).copied().unwrap_or((*radius, col.offset));
                 let s = inst.lossy_scale(o);
                 let scale = if s[1].abs() > s[0].abs() { s[1].abs() } else { s[0].abs() };
                 let r = scale * radius;
                 let r = if r <= 0.0001 { 0.0001 } else { f32::min(1e6, r) };
-                vec![Shape::Circle(Circle { radius: r, p: matrix.apply(V::new(col.offset[0], col.offset[1])) })]
+                vec![Shape::Circle(Circle { radius: r, p: matrix.apply(V::new(offset[0], offset[1])) })]
             }
             ColliderShape::Polygon { tiling, auto_tiling, paths } => {
                 // ColliderTilingExtension::IsTilingOn (180bfd370)
@@ -1179,7 +1182,7 @@ impl Game {
         // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
         let st = inst.hinges.get_mut(&(o, c)).unwrap();
         let slot = *st.slot.get_or_insert_with(|| {
-            self.anchored_joints.push(AnchoredJoint { break_force: j.break_force, break_torque: j.break_torque, joint: None, hinge: None });
+            self.anchored_joints.push(AnchoredJoint { break_force: j.break_force, break_torque: j.break_torque, joint: None, hinge: None, component: inst.objects[o].components[c] });
             self.anchored_joints.len() - 1
         });
         // The world is playing.
@@ -1289,7 +1292,7 @@ impl Game {
             inst.joints.insert((o, c), id);
             // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
             let slot = *slot.get_or_insert_with(|| {
-                self.anchored_joints.push(AnchoredJoint { break_force: base.break_force, break_torque: base.break_torque, joint: None, hinge: None });
+                self.anchored_joints.push(AnchoredJoint { break_force: base.break_force, break_torque: base.break_torque, joint: None, hinge: None, component: inst.objects[o].components[c] });
                 self.anchored_joints.len() - 1
             });
             self.anchored_joints[slot].joint = Some(id);

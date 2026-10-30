@@ -4,13 +4,18 @@
 #![allow(non_snake_case, dead_code)]
 
 use std::collections::HashMap;
+pub mod ballistics;
 pub mod circulation;
 pub mod acts;
+pub mod car;
+pub mod tyre;
+pub mod flask;
 pub mod dump;
 pub mod explosion;
 pub mod lifecycle;
 pub mod destroyable;
 pub mod fire;
+pub mod firearm;
 pub mod limb;
 pub mod machinery;
 pub mod link;
@@ -371,6 +376,10 @@ pub struct Prefs {
     pub PhysicsIterations: i32,
     pub ShowTutorial: bool,
     pub DistantSoundEffects: bool,
+    pub TracerBullets: bool,
+    pub BulletCrackWhiz: bool,
+    pub ChunkyShotParticles: bool,
+    pub ShakeIntensity: f32,
 }
 
 /// CollisionQuality.Dynamic
@@ -398,6 +407,10 @@ impl Default for Prefs {
             PhysicsIterations: 32,
             ShowTutorial: true,
             DistantSoundEffects: true,
+            TracerBullets: true,
+            BulletCrackWhiz: true,
+            ChunkyShotParticles: true,
+            ShakeIntensity: 1.0,
         }
     }
 }
@@ -446,6 +459,10 @@ impl Prefs {
                 "PhysicsIterations" => p.PhysicsIterations = int()?,
                 "ShowTutorial" => p.ShowTutorial = bool()?,
                 "DistantSoundEffects" => p.DistantSoundEffects = bool()?,
+                "TracerBullets" => p.TracerBullets = bool()?,
+                "BulletCrackWhiz" => p.BulletCrackWhiz = bool()?,
+                "ChunkyShotParticles" => p.ChunkyShotParticles = bool()?,
+                "ShakeIntensity" => p.ShakeIntensity = float()?,
                 _ => {}
             }
         }
@@ -847,6 +864,8 @@ pub struct Renderer {
     pub anchor: BareAnchor,
     pub chain: Vec<crate::unity::transform::Trs>,
     pub sprite: (crate::assets::db::ObjRef, [f32; 4], i16),
+    /// The SpriteRenderer component's instance id.
+    pub id: i32,
     /// flipX/flipY, drawMode, size.
     pub draw: ([bool; 2], i32, [f32; 2]),
     /// GameObject.activeInHierarchy and Renderer.enabled at instantiation.
@@ -879,6 +898,8 @@ pub struct AnchoredJoint {
     pub joint: Option<crate::b2::world::JointId>,
     /// The `Game::hinges` entry that took a spawned hinge's slot over: its break limit is `BreakJoint::Hinge` from then on.
     pub hinge: Option<usize>,
+    /// The joint component's instance id.
+    pub component: i32,
 }
 
 /// A Transform as the scripts read it: world position and rotation, local scale, and the hierarchy's stored
@@ -920,7 +941,12 @@ pub enum Behaviour {
     Explosive(usize),
     DeleteAfter(usize),
     FireMap(usize),
+    Firearm(usize),
     PointToVelocity(usize),
+    Car(usize),
+    Tyre(usize),
+    Flask(usize),
+    TruckDoor(usize),
 }
 
 impl Behaviour {
@@ -942,7 +968,12 @@ impl Behaviour {
             Behaviour::Explosive(_) => "ExplosiveBehaviour",
             Behaviour::DeleteAfter(_) => "DeleteAfterTime",
             Behaviour::PointToVelocity(_) => "PointToVelocityBehaviour",
+            Behaviour::Car(_) => "CarBehaviour",
+            Behaviour::Tyre(_) => "TyreDeflationBehaviour",
+            Behaviour::Flask(_) => "GasTankBehaviour",
+            Behaviour::TruckDoor(_) => "TruckDoorBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
+            Behaviour::Firearm(_) => "FirearmBehaviour",
         }
     }
 }
@@ -1035,14 +1066,30 @@ pub struct Game {
     pub random_sprites: Vec<misc::RandomSprite>,
     pub destroyables: Vec<destroyable::Destroyable>,
     pub fire_maps: Vec<fire::FireMap>,
+    pub firearms: Vec<firearm::Firearm>,
     pub explosives: Vec<explosion::Explosive>,
     pub act_on_collides: Vec<acts::ActOnCollide>,
     pub no_collides: Vec<acts::NoCollide>,
+    pub disintegration_counters: Vec<acts::DisintegrationCounter>,
     pub sticky_grenades: Vec<acts::StickyGrenade>,
     pub point_to_velocities: Vec<acts::PointToVelocity>,
+    pub cars: Vec<car::CarBehaviour>,
+    pub tyres: Vec<tyre::TyreDeflationBehaviour>,
+    pub flasks: Vec<flask::Flask>,
+    /// Each TruckDoorBehaviour with its component's instance id.
+    pub truck_doors: Vec<(i32, car::TruckDoor)>,
+    pub joint_helpers: Vec<car::JointHelper>,
+    pub no_collide_gms: Vec<car::NoCollideGm>,
+    pub random_car_textures: Vec<car::RandomCarTexture>,
     pub delete_afters: Vec<explosion::DeleteAfter>,
-    /// Explode coroutines past WaitForSeconds, waiting for the end of the frame: (explosive, coroutine sequence).
-    pub explosive_end_of_frame_queue: Vec<(usize, u64)>,
+    /// Coroutines in WaitForEndOfFrame, in the order they got there.
+    pub end_of_frame: Vec<destroyable::Coroutine>,
+    /// BallisticsEmitter.BallisticIteration coroutines in a wait (`Step::Bullet`); None once resumed or stopped.
+    pub bullets: Vec<Option<(ballistics::Bullet, Option<ballistics::BulletHit>)>>,
+    pub tracer_pool: ballistics::TracerPool,
+    pub camera: ballistics::CameraState,
+    /// Global.BulletCrackClips length.
+    pub bullet_crack_clips: usize,
     pub coroutine_seq: u64,
     /// The components of destroyed GameObjects (they read null).
     pub destroyed_components: std::collections::HashSet<i32>,

@@ -710,3 +710,61 @@ mod tests {
         }
     }
 }
+
+/// Camera (class 20): the projection the simulation reads.
+#[derive(Clone, Debug)]
+pub struct Camera {
+    pub orthographic: bool,
+    pub orthographic_size: f32,
+}
+
+impl Camera {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        PPtr::read(r)?;
+        flag(r)?; // m_Enabled
+        r.i32()?; // m_ClearFlags
+        floats::<4>(r)?; // m_BackGroundColor
+        r.i32()?; // m_projectionMatrixMode
+        r.i32()?; // m_GateFitMode (this build has no m_FOVAxisMode)
+        floats::<5>(r)?; // m_SensorSize, m_LensShift, m_FocalLength
+        floats::<7>(r)?; // m_NormalizedViewPortRect, near/far clip plane, field of view
+        let orthographic = flag(r)?;
+        let orthographic_size = r.f32()?;
+        r.f32()?; // m_Depth
+        r.i32()?; // m_CullingMask
+        r.i32()?; // m_RenderingPath
+        PPtr::read(r)?; // m_TargetTexture
+        r.i32()?; // m_TargetDisplay
+        r.i32()?; // m_TargetEye
+        for _ in 0..4 {
+            r.bool()?; // m_HDR, m_AllowMSAA, m_AllowDynamicResolution, m_ForceIntoRT
+        }
+        flag(r)?; // m_OcclusionCulling
+        floats::<2>(r)?; // m_StereoConvergence, m_StereoSeparation
+        done(r, "Camera", Self { orthographic, orthographic_size })
+    }
+}
+
+/// The head of a ParticleSystem (class 198): its main module's timing (the modules after are not read).
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleSystemHead {
+    pub length_in_sec: f32,
+    pub simulation_speed: f32,
+    /// ParticleSystemStopAction: 0 None, 1 Disable, 2 Destroy, 3 Callback.
+    pub stop_action: i32,
+    pub looping: bool,
+}
+
+impl ParticleSystemHead {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        PPtr::read(r)?;
+        let (length_in_sec, simulation_speed, stop_action) = (r.f32()?, r.f32()?, r.i32()?);
+        r.i32()?; // cullingMode
+        r.i32()?; // ringBufferMode
+        vec2(r)?; // ringBufferLoopRange
+        let looping = r.bool()?;
+        Ok(Self { length_in_sec, simulation_speed, stop_action, looping })
+    }
+}

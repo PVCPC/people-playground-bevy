@@ -171,9 +171,14 @@ impl Game {
 
     /// Physics2D.OverlapPoint(point, mask): the lowest-z collider at the point.
     pub fn overlap_point_first(&mut self, point: [f32; 2], mask: u32) -> Option<(Option<usize>, i32)> {
+        self.overlap_point_depth(point, mask, f32::NEG_INFINITY, f32::INFINITY)
+    }
+
+    /// Physics2D.OverlapPoint(point, mask, minDepth, maxDepth): the lowest-z collider at the point in the range.
+    pub fn overlap_point_depth(&mut self, point: [f32; 2], mask: u32, min_depth: f32, max_depth: f32) -> Option<(Option<usize>, i32)> {
         self.sync_pending();
         let p = V::new(point[0], point[1]);
-        self.overlap_query(self.world.query_point(p), mask, f32::NEG_INFINITY, f32::INFINITY, |shape, _, xf| test_point(shape, xf, p)).first().copied()
+        self.overlap_query(self.world.query_point(p), mask, min_depth, max_depth, |shape, _, xf| test_point(shape, xf, p)).first().copied()
     }
 
     /// Physics2D.OverlapAreaAll(a, b, mask): OverlapAreaAllToBox_Internal's OverlapBoxAll at the midpoint, size

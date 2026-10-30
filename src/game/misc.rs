@@ -301,6 +301,8 @@ pub struct JointBreakSound {
     pub joints: Vec<BreakJoint>,
     /// OnBreak's ExplosiveBehaviour.ForceImmediateExplosion targets (`Game::explosives`).
     pub explosives: Vec<usize>,
+    /// OnBreak's CarBehaviour calls, by component id.
+    pub cars: Vec<(i32, super::car::CarCall)>,
     pub enabled: bool,
     /// Clips.Length
     pub clips: usize,
@@ -439,8 +441,23 @@ pub enum PendingStart {
     Explosive(usize),
     /// NoCollide.Start: the component's instance id.
     NoCollide(i32),
+    /// DisintegrationCounterBehaviour.Start: the component's instance id.
+    DisintegrationCounter(i32),
+    /// CarBehaviour.Start: the `Game::cars` index.
+    Car(usize),
+    /// TyreDeflationBehaviour.Start: the `Game::tyres` index.
+    Tyre(usize),
+    Firearm(usize),
+    /// FlaskBehaviour.Start: the `Game::flasks` index.
+    Flask(usize),
+    /// RandomCarTextureBehaviour.Start: the `Game::random_car_textures` index.
+    CarTexture(usize),
     /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
     ExistInDetailView(i32),
+    /// FirearmAttachmentPointBehaviour.Start without an attachment: CreateDetailViewBlob's new GameObject(name,
+    /// ExistInDetailView, Optout) (GameObject, Transform, both scripts) and its SpriteRenderer. The blob has no physics,
+    /// and its ExistInDetailView.Start only deactivates it.
+    FirearmAttachmentPoint,
     IgnoreParentSize(i32),
     RandomSprite(usize),
     /// BoundingBoxBehaviour with its serialized box.
@@ -750,10 +767,13 @@ impl Game {
         for s in 0..self.joint_break_sounds.len() {
             let sound = &self.joint_break_sounds[s];
             if sound.enabled && sound.joints.contains(&j) {
-                let (clips, explosives) = (sound.clips, sound.explosives.clone());
+                let (clips, explosives, cars) = (sound.clips, sound.explosives.clone(), sound.cars.clone());
                 self.pick_random(clips);
                 for e in explosives {
                     self.explosive_force_immediate(e);
+                }
+                for (id, call) in cars {
+                    self.car_invoke(id, call);
                 }
             }
         }
@@ -781,7 +801,7 @@ impl Game {
         }
         if let Some(slot) = a.slot {
             self.anchored_joints[slot].joint = None;
-            for k in self.joint_break_limits.iter_mut().chain(self.joint_break_sounds.iter_mut().flat_map(|s| &mut s.joints)).filter(|k| **k == BreakJoint::Anchored(slot)) {
+            for k in self.joint_break_limits.iter_mut().chain(self.joint_break_sounds.iter_mut().flat_map(|s| &mut s.joints)).chain(self.joint_helpers.iter_mut().flat_map(|h| h.joints.iter_mut().flatten())).filter(|k| **k == BreakJoint::Anchored(slot)) {
                 *k = BreakJoint::Fixed(f);
             }
         }
@@ -881,7 +901,18 @@ impl Game {
                 PendingStart::ExistByChance(id, chance) => self.exist_by_chance_start(id, chance),
                 PendingStart::Explosive(e) => self.explosive_start(e),
                 PendingStart::NoCollide(id) => self.no_collide_start(id),
+                PendingStart::DisintegrationCounter(id) => self.disintegration_counter_start(id),
+                PendingStart::Car(c) => self.car_start(c),
+                PendingStart::Tyre(t) => self.tyre_start(t),
+                PendingStart::Firearm(f) => self.firearm_start(f),
+                PendingStart::Flask(f) => self.flask_start(f),
+                PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),
                 PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
+                PendingStart::FirearmAttachmentPoint => {
+                    for _ in 0..5 {
+                        self.allocate_instance_id();
+                    }
+                }
                 PendingStart::IgnoreParentSize(id) => self.ignore_parent_size_start(id),
                 PendingStart::RandomSprite(r) => self.random_sprite_set_to_index(r),
                 PendingStart::Limb(l) => self.limb_start(l),

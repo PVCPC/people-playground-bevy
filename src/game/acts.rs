@@ -16,8 +16,8 @@ script! {
         /// GetComponent<PhysicalBehaviour>() (the collision messages reach the object's physical).
         physical: Option<usize> = None,
         enabled: bool = true,
-        /// Actions: the ExplosiveBehaviours (`Game::explosives`) it activates.
-        targets: Vec<usize> = Vec::new(),
+        /// Actions: what it calls, in order.
+        targets: Vec<ActTarget> = Vec::new(),
         after_physical: bool = true,
         /// The component's index on its GameObject.
         index: usize = 0,
@@ -33,6 +33,15 @@ script! {
         /// The physical whose Rigidbody2D is GetComponent<Rigidbody2D>().
         physical: usize = 0,
     }
+}
+
+/// A persistent call of ActOnCollide.Actions.
+#[derive(Clone, Copy, Debug)]
+pub enum ActTarget {
+    /// ExplosiveBehaviour.Activate (`Game::explosives`)
+    Activate(usize),
+    /// FirearmBehaviour.Shoot (`Game::firearms`)
+    Shoot(usize),
 }
 
 /// A script that takes a physical object's collision messages besides the PhysicalBehaviour and LimbBehaviour.
@@ -71,8 +80,11 @@ impl Game {
         buffer[..contacts].copy_from_slice(&c.contacts[..contacts]);
         let s = &self.act_on_collides[a];
         if s.Collider.is_none_or(|x| c.other_collider == x) && get_average_impulse_remove_outliers(&buffer, contacts) > s.ImpactForceThreshold {
-            for e in s.targets.clone() {
-                self.explosive_activate(e);
+            for t in s.targets.clone() {
+                match t {
+                    ActTarget::Activate(e) => self.explosive_activate(e),
+                    ActTarget::Shoot(f) => self.firearm_shoot(f),
+                }
             }
         }
     }
@@ -170,5 +182,70 @@ impl Game {
             let _ = p;
             unimplemented!("StickyGrenadeBehaviour.CreateJoint: GameObject.layer = Debris (Collider2D re-filter) and a runtime FixedJoint2D");
         }
+    }
+}
+
+/// DisintegrationCounterBehaviour on a root that is not a person's: the root's top object (component 0 id) and the
+/// PhysicalBehaviours (`Game::physicals`) Start subscribed OnChildDisintegrated to.
+#[derive(Clone, Debug)]
+pub struct DisintegrationCounter {
+    pub id: i32,
+    pub root: i32,
+    pub DisintegrationCount: i32,
+    pub children: Vec<usize>,
+}
+
+impl Game {
+    /// DisintegrationCounterBehaviour.Start: GetComponentsInChildren<PhysicalBehaviour>() (the active objects below,
+    /// depth first, each object's components in order).
+    pub fn disintegration_counter_start(&mut self, id: i32) {
+        let (root, ids) = self.with_component_instance(id, |_, inst, o| {
+            fn collect(inst: &super::spawn::Instance, x: usize, out: &mut Vec<i32>) {
+                if !inst.objects[x].active {
+                    return;
+                }
+                for (k, (_, c)) in inst.prefab.objects[x].components.iter().enumerate() {
+                    if matches!(c, crate::assets::db::Component::Script { class, .. } if class == "PhysicalBehaviour") {
+                        out.push(inst.objects[x].components[k]);
+                    }
+                }
+                for &child in &inst.prefab.objects[x].children {
+                    collect(inst, child, out);
+                }
+            }
+            let mut ids = Vec::new();
+            collect(inst, o, &mut ids);
+            let mut top = o;
+            while let Some(parent) = inst.objects[top].parent {
+                top = parent;
+            }
+            (inst.objects[top].components[0], ids)
+        });
+        let children = ids.iter().map(|&cid| self.physicals.iter().position(|p| p.id == cid).expect("a PhysicalBehaviour in the arena")).collect();
+        self.disintegration_counters.push(DisintegrationCounter { id, root, DisintegrationCount: 0, children });
+    }
+
+    /// The OnDisintegration of physical `p` reaches the counters subscribed to it.
+    pub fn disintegration_counters_on_disintegration(&mut self, p: usize) {
+        for i in 0..self.disintegration_counters.len() {
+            if self.disintegration_counters[i].children.contains(&p) {
+                self.disintegration_counter_on_child_disintegrated(i);
+            }
+        }
+    }
+
+    /// DisintegrationCounterBehaviour.OnChildDisintegrated
+    fn disintegration_counter_on_child_disintegrated(&mut self, i: usize) {
+        self.disintegration_counters[i].DisintegrationCount += 1;
+        let alive = self.disintegration_counters[i].children.iter().filter(|&&c| !self.physicals[c].destroyed).count() as i32;
+        if self.disintegration_counters[i].DisintegrationCount >= alive {
+            let root = self.disintegration_counters[i].root;
+            self.destroy_object(root);
+        }
+    }
+
+    /// DisintegrationCounterBehaviour.OnDestroy: the handlers go with it.
+    pub fn disintegration_counter_destroy(&mut self, id: i32) {
+        self.disintegration_counters.retain(|c| c.id != id);
     }
 }

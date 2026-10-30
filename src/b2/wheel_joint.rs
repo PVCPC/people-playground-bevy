@@ -6,6 +6,7 @@
 use super::math::{Rot, Vec2};
 use super::revolute::JointBody;
 use super::solver::{Position, TimeStep, Velocity};
+use super::world::{JointId, JointKind, World};
 
 /// b2_linearSlop as the position solve's final comparison loads it.
 const LINEAR_SLOP: f32 = f32::from_bits(0x3ba3_d70a);
@@ -237,6 +238,46 @@ impl WheelJoint {
         positions[a.index] = Position { c: ca, a: aa };
         positions[b.index] = Position { c: cb, a: ab };
         LINEAR_SLOP >= c.abs()
+    }
+}
+
+// The live b2 setters WheelJoint2D calls on an existing joint: each wakes both bodies (b2Body::SetAwake(true)).
+
+fn wheel_mut(world: &mut World, id: JointId) -> &mut WheelJoint {
+    match &mut world.joints[id].as_mut().unwrap().kind {
+        JointKind::Wheel(w) => w,
+        _ => unreachable!("not a b2WheelJoint"),
+    }
+}
+
+fn wake_ends(world: &mut World, id: JointId) {
+    let j = world.joints[id].as_ref().unwrap();
+    let (a, b) = (j.body_a, j.body_b);
+    world.wake_body(a);
+    world.wake_body(b);
+}
+
+/// b2WheelJoint::EnableMotor (180bc6d70)
+pub fn enable_motor(world: &mut World, id: JointId, flag: bool) {
+    if flag != wheel_mut(world, id).def.enable_motor {
+        wake_ends(world, id);
+        wheel_mut(world, id).def.enable_motor = flag;
+    }
+}
+
+/// b2WheelJoint::SetMotorSpeed (180bc91c0)
+pub fn set_motor_speed(world: &mut World, id: JointId, speed: f32) {
+    if speed != wheel_mut(world, id).def.motor_speed {
+        wake_ends(world, id);
+        wheel_mut(world, id).def.motor_speed = speed;
+    }
+}
+
+/// b2WheelJoint::SetMaxMotorTorque (180bc9130)
+pub fn set_max_motor_torque(world: &mut World, id: JointId, torque: f32) {
+    if torque != wheel_mut(world, id).def.max_motor_torque {
+        wake_ends(world, id);
+        wheel_mut(world, id).def.max_motor_torque = torque;
     }
 }
 

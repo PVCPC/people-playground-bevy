@@ -45,6 +45,11 @@ pub struct PhysicalProperties {
     pub LodgeStrengthMultiplier: f32,
     /// StabSound length; None when the array is null.
     pub StabSound: Option<usize>,
+    pub Brittleness: f32,
+    pub BulletSpeedAbsorptionPower: f32,
+    /// The ShotImpact prefab (None from a recording, which only names it) and whether it is "BloodPuff poolable"
+    /// (`create_blood_puff`); None when null.
+    pub ShotImpact: Option<(Option<crate::assets::db::ObjRef>, bool)>,
 }
 
 /// Instance ids of the components and objects PhysicalBehaviour.Awake/Start add (0 = none). A NodeBehaviour or
@@ -136,6 +141,12 @@ script! {
         InitialBounds: ([f32; 3], [f32; 3]) = ([0.0; 3], [0.0; 3]),
         name: String = String::new(),
         id: i32 = 0,
+        /// The GameObject's Transform instance id (0 for physicals loaded from a recording).
+        transform_id: i32 = 0,
+        BulletPenetration: bool = true,
+        BulletDeflectChanceOverride: f32 = f32::NAN,
+        /// OverrideShotSounds length.
+        OverrideShotSounds: usize = 0,
         /// The Lodged/Dislodged receiver component on the GameObject (ExcaliburBehaviour, a SyringeBehaviour), if any.
         lodge_receiver: String = String::new(),
         /// PhysicalBehaviour.colliders: the GameObject's non-trigger Collider2D instance ids, in component order.
@@ -988,11 +999,39 @@ impl Game {
             return;
         }
         let z = (d((direction[1] as f64).atan2(direction[0] as f64) as f32) * 57.29578f32 - 90.0f32).f();
-        let props = &self.properties[self.physicals[p].Properties].name;
-        if props != "Human" {
-            unimplemented!("PhysicalBehaviour.CreateImpactEffect: the ShotImpact of {props}");
+        let props = &self.properties[self.physicals[p].Properties];
+        let Some((source, blood_puff)) = props.ShotImpact else { unimplemented!("PhysicalBehaviour.CreateImpactEffect: a null ShotImpact on {} (NullReferenceException)", props.name) };
+        if blood_puff {
+            self.create_blood_puff(p, position, z, size);
+            return;
         }
-        self.create_blood_puff(p, position, z, size);
+        // The rotation, the scale and OnImpactCreated (only a BloodImpactBehaviour on the clone has a receiver) are
+        // presentation for these.
+        let source = source.expect("CreateImpactEffect: a recording names the ShotImpact but holds no game data");
+        let mut db = self.assets.take().expect("CreateImpactEffect without the game's data");
+        let pool = self.splash_pool_for(&mut db, source);
+        self.assets = Some(db);
+        let pool = pool.unwrap_or_else(|e| panic!("PhysicalProperties.ShotImpact: {e}"));
+        if self.splash_pools[pool].poolable {
+            for ob in &self.splash_pools[pool].prefab.objects {
+                for (_, c) in &ob.components {
+                    if let crate::assets::db::Component::Script { class, .. } = c {
+                        if !matches!(class.as_str(), "ExplosionSoundBehviour" | "PoolableParticleSystemHelper" | "PoolableSizeHelper" | "ActivateIfFancyEffects" | "Optout") {
+                            unimplemented!("PhysicalBehaviour.CreateImpactEffect: a pooled ShotImpact with a {class}");
+                        }
+                    }
+                }
+            }
+            // PoolGenerator.RequestPrefab(ShotImpact, position)
+            self.splash_request(pool);
+        } else {
+            // Object.Instantiate(ShotImpact, position, identity)
+            let colliding = self.splash_pools[pool].prefab.objects.iter().any(|ob| ob.components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Collider2D(_) | crate::assets::db::Component::Rigidbody2D(_))));
+            if colliding {
+                unimplemented!("PhysicalBehaviour.CreateImpactEffect: a ShotImpact with physics (its scale and rotation)");
+            }
+            self.spawn_prefab(source, [position[0], position[1], 0.0]);
+        }
     }
 
     /// Transform.TransformPoint for a 2D point of a physical object's transform.
@@ -1328,6 +1367,7 @@ impl Game {
             self.limb_on_disintegration(l);
             self.person_on_child_disintegrated(self.limbs[l].Person);
         }
+        self.disintegration_counters_on_disintegration(p);
         // GetComponentsInChildren<Collider2D>().enabled = false: the object's own collider. Renderers are presentation.
         self.collider_disable(p);
         // Rigidbody2D.simulated = false (Rigidbody2D::SetSimulated -> b2Body::SetActive(false)). Limbs have no

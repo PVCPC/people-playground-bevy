@@ -48,6 +48,8 @@ script! {
         BlockingLayers: u32 = 0,
         /// OnExplode's and OnArm's persistent calls reach only audio and particle components.
         OnExplodePresentation: bool = true,
+        /// OnExplode's CarBehaviour calls, by component id.
+        OnExplodeCars: Vec<(i32, super::car::CarCall)> = Vec::new(),
         OnArmPresentation: bool = true,
         VFXOverride: Option<ObjRef> = None,
         /// The Killzone clone's instance id.
@@ -109,13 +111,14 @@ pub struct ExplosionParameters {
 
 /// A fixture a ray crossed, as Raycast2DQuery::ReportFixture records it.
 #[derive(Clone, Copy, Debug)]
-struct RayHit2D {
-    collider: i32,
-    game_object: i32,
-    body: BodyId,
-    point: V,
-    distance: f32,
-    fraction: f32,
+pub(super) struct RayHit2D {
+    pub collider: i32,
+    pub game_object: i32,
+    pub body: BodyId,
+    pub point: V,
+    pub normal: V,
+    pub distance: f32,
+    pub fraction: f32,
 }
 
 /// Vector3.normalized: the magnitude is (float)Math.Sqrt(x * x + y * y + z * z), in double.
@@ -127,15 +130,35 @@ fn normalized3(v: [f32; 3]) -> [f32; 3] {
 impl Game {
     /// Raycast2DQuery::RunQuery (180bf8250) from `p1` to `p2` (QueriesStartInColliders is off): b2World::RayCast with
     /// ReportFixture's filters. Sensors are skipped (QueriesHitTriggers is off), then the layer mask on the collider's
-    /// GameObject; a collider is recorded once, at its nearest fraction; the ray never clips. The hits go by fraction.
-    fn ray_query(&mut self, p1: V, p2: V, mask: u32) -> Vec<RayHit2D> {
+    /// GameObject and the depth range on its Transform's z; a collider is recorded once, at its nearest fraction; the
+    /// ray never clips. The hits go by fraction.
+    fn ray_query(&mut self, p1: V, p2: V, mask: u32, min_depth: f32, max_depth: f32) -> Vec<RayHit2D> {
         self.sync_pending();
         let (dx, dy) = (p2.x - p1.x, p2.y - p1.y);
         let mut hits: Vec<RayHit2D> = Vec::new();
         if !(dy * dy + dx * dx > 1.4210855e-14_f32) {
             return hits;
         }
-        self.world.ray_cast(p1, p2, |(f, _, point, _, fraction)| {
+        let depths = (min_depth, max_depth) != (f32::NEG_INFINITY, f32::INFINITY);
+        let mut z_of: Vec<(i32, f32)> = Vec::new();
+        if depths {
+            // The colliders' Transform z, read outside the world's callback.
+            let mut ids = Vec::new();
+            self.world.ray_cast(p1, p2, |(f, _, _, _, _)| {
+                ids.push(self.world.fixture(f).collider.id);
+                1.0
+            });
+            for c in ids {
+                if !z_of.iter().any(|&(x, _)| x == c) {
+                    let z = match self.physical_of_collider(c) {
+                        Some(ph) => self.physicals[ph].transform.position[2],
+                        None => self.bare_position(c)[2],
+                    };
+                    z_of.push((c, z));
+                }
+            }
+        }
+        self.world.ray_cast(p1, p2, |(f, _, point, normal, fraction)| {
             let fx = self.world.fixture(f);
             if fx.is_sensor {
                 return -1.0;
@@ -146,13 +169,19 @@ impl Game {
             if mask & (1 << layer) == 0 {
                 return -1.0;
             }
+            if depths {
+                let z = z_of.iter().find(|&&(x, _)| x == fx.collider.id).unwrap().1;
+                if z < min_depth || max_depth < z {
+                    return -1.0;
+                }
+            }
             let distance = if fraction > 0.0 {
                 let (px, py) = (point.x - p1.x, point.y - p1.y);
                 (py * py + px * px).sqrt()
             } else {
                 0.0
             };
-            let hit = RayHit2D { collider: fx.collider.id, game_object: fx.collider.game_object, body: fx.body, point, distance, fraction };
+            let hit = RayHit2D { collider: fx.collider.id, game_object: fx.collider.game_object, body: fx.body, point, normal, distance, fraction };
             match hits.iter_mut().find(|h| h.collider == hit.collider) {
                 Some(old) if old.fraction > fraction => *old = hit,
                 Some(_) => {}
@@ -167,6 +196,11 @@ impl Game {
     /// Physics2D.Raycast(origin, direction, distance): PhysicsQuery2D::Raycast (180bf6290) scales the direction by the
     /// reciprocal of its length and casts to origin + distance * direction; the nearest hit.
     fn raycast_first(&mut self, origin: V, direction: [f32; 2], distance: f32) -> Option<RayHit2D> {
+        self.raycast(origin, direction, distance, DEFAULT_RAYCAST_LAYERS, f32::NEG_INFINITY, f32::INFINITY)
+    }
+
+    /// Physics2D.Raycast(origin, direction, distance, layerMask, minDepth, maxDepth).
+    pub(super) fn raycast(&mut self, origin: V, direction: [f32; 2], distance: f32, mask: u32, min_depth: f32, max_depth: f32) -> Option<RayHit2D> {
         if distance == f32::INFINITY {
             unimplemented!("Physics2D.Raycast with an infinite distance");
         }
@@ -178,7 +212,7 @@ impl Game {
             direction
         };
         let end = V::new(origin.x + distance * dir[0], origin.y + distance * dir[1]);
-        let hits = self.ray_query(origin, end, DEFAULT_RAYCAST_LAYERS);
+        let hits = self.ray_query(origin, end, mask, min_depth, max_depth);
         if hits.len() > 32 {
             unimplemented!("Physics2D.Raycast with more than 32 hits (std::sort is not a stable insertion sort)");
         }
@@ -187,13 +221,13 @@ impl Game {
 
     /// Physics2D.LinecastNonAlloc(start, end, buffer[8], layerMask): the number of hits.
     fn linecast_count(&mut self, start: V, end: V, mask: u32) -> usize {
-        self.ray_query(start, end, mask).len().min(8)
+        self.ray_query(start, end, mask, f32::NEG_INFINITY, f32::INFINITY).len().min(8)
     }
 
     /// Physics2D.OverlapCircleAll / OverlapCircleNonAlloc (OverlapCircleQuery2D, 180bf11a0): AutoSyncTransforms, a
     /// b2CircleShape at `center` against the fixtures in its AABB (b2TestOverlap), ReportFixture's filters as
     /// `overlap_query`. The hits as (the collider's physical, the Collider2D id).
-    fn overlap_circle(&mut self, center: V, radius: f32, mask: u32) -> Vec<(Option<usize>, i32)> {
+    pub(super) fn overlap_circle(&mut self, center: V, radius: f32, mask: u32) -> Vec<(Option<usize>, i32)> {
         if radius < 1e-5 {
             unimplemented!("Physics2D.OverlapCircle with a point radius");
         }
@@ -214,7 +248,7 @@ impl Game {
     }
 
     /// Transform.position of a collider's GameObject.
-    fn collider_position(&self, collider: i32) -> [f32; 3] {
+    pub(super) fn collider_position(&self, collider: i32) -> [f32; 3] {
         match self.physical_of_collider(collider) {
             Some(p) => self.physicals[p].transform.position,
             None => self.bare_position(collider),
@@ -249,7 +283,7 @@ impl Game {
     }
 
     /// StartCoroutine(Explode(delay, forceDoubleCheck)) up to its first yield (WaitForSeconds).
-    fn explosive_start_explode(&mut self, e: usize, delay: f32, force_double_check: bool) {
+    pub(super) fn explosive_start_explode(&mut self, e: usize, delay: f32, force_double_check: bool) {
         let s = &self.explosives[e];
         if (!s.CanExplodeMultipleTimes && s.hasExploded) || (force_double_check && s.hasExploded) {
             return;
@@ -336,19 +370,27 @@ impl Game {
                 continue;
             }
             self.explosives[e].coroutines.iter_mut().find(|c| c.seq == seq).unwrap().end_of_frame = true;
-            self.explosive_end_of_frame_queue.push((e, seq));
+            let owner = self.explosives[e].id;
+            self.end_of_frame.push(super::destroyable::Coroutine { seq, at: now, owner, step: super::destroyable::Step::ExplosiveEndOfFrame(e, seq) });
         }
     }
 
-    /// WaitForEndOfFrame: the Explode coroutines that reached it run on, in the order they got there.
+    /// WaitForEndOfFrame: the coroutines that reached it run on, in the order they got there; one that waits for
+    /// the end of a frame again here waits for the next.
     pub fn end_of_frame_calls(&mut self) {
-        for (e, seq) in std::mem::take(&mut self.explosive_end_of_frame_queue) {
-            // StopAllCoroutines removed it.
-            let Some(i) = self.explosives[e].coroutines.iter().position(|c| c.seq == seq) else { continue };
-            self.explosives[e].coroutines.remove(i);
-            if self.explosive_alive(e) {
-                self.explosive_explode(e);
-            }
+        for c in std::mem::take(&mut self.end_of_frame) {
+            // A coroutine stopped since is gone from the list.
+            self.resume_coroutine(c);
+        }
+    }
+
+    /// The rest of an Explode coroutine after WaitForEndOfFrame.
+    pub(super) fn explosive_end_of_frame(&mut self, e: usize, seq: u64) {
+        // StopAllCoroutines removed it.
+        let Some(i) = self.explosives[e].coroutines.iter().position(|c| c.seq == seq) else { return };
+        self.explosives[e].coroutines.remove(i);
+        if self.explosive_alive(e) {
+            self.explosive_explode(e);
         }
     }
 
@@ -360,7 +402,10 @@ impl Game {
         }
         let (id, p) = (s.id, s.physical);
         let disintegrate = s.DisintegrateOnExplode;
-        if s.DestroyOnExplode {
+        for (car, call) in s.OnExplodeCars.clone() {
+            self.car_invoke(car, call);
+        }
+        if self.explosives[e].DestroyOnExplode {
             self.explosive_disable_colliders(e);
         }
         // TryGetComponent<LimbBehaviour> is always false: an ExplosiveBehaviour on a limb stops at link time.
@@ -481,6 +526,31 @@ impl Game {
         self.create_fragmentation_explosion(ex);
     }
 
+    /// ExplosionCreator.CreatePulseExplosion(position, force, range, soundAndEffects: false, breakObjects: false)
+    pub(super) fn create_pulse_explosion(&mut self, position: [f32; 3], force: f32, range: f32) {
+        self.camera_shake((d(force) * range * 2.0f32).f(), [position[0], position[1]]);
+        // OverlapCircleNonAlloc into the 64-entry hitBuffer: Objects, Debris, CollidingDebris.
+        let hits = self.overlap_circle(V::new(position[0], position[1]), range, (1 << 9) | (1 << 10) | (1 << 13));
+        if hits.len() > 64 {
+            unimplemented!("ExplosionCreator.CreatePulseExplosion: more colliders than its buffer");
+        }
+        for (_, collider) in hits {
+            let Some(body) = self.world.collider_body(collider) else { continue };
+            let Some(rb) = self.rigidbody_of_body(body) else { continue };
+            let at = self.collider_position(collider);
+            let v = [at[0] - position[0], at[1] - position[1], at[2] - position[2]];
+            let sqr = (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).f();
+            if sqr < mathf::EPSILON {
+                continue;
+            }
+            let num2 = mathf::sqrt(sqr);
+            let dir = [v[0] / num2, v[1] / num2];
+            let num3 = (d(force) / mathf::max(1.0, (d(sqr) / (d(range) * range)).f()) * 3.0f32).f();
+            let num4 = mathf::min(rb.mass(&self.world), 1.0);
+            rb.add_force_impulse(&mut self.world, [num3 * dir[0] * num4, num3 * dir[1] * num4]);
+        }
+    }
+
     /// ExplosionCreator.CreateFragmentationExplosion; the camera shake is presentation.
     fn create_fragmentation_explosion(&mut self, ex: ExplosionParameters) {
         if ex.CreateParticlesAndSound {
@@ -552,7 +622,7 @@ impl Game {
     /// receivers among the rewritten scripts).
     fn broadcast_on_fragment_hit(&mut self, collider: i32, game_object: i32, force: f32) {
         let Some(p) = self.physical_of_collider(collider) else {
-            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour"]) {
+            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour"]) {
                 unimplemented!("BroadcastMessage OnFragmentHit to the scripts of a collider without a PhysicalBehaviour");
             }
             return;
@@ -567,7 +637,7 @@ impl Game {
                 }
                 for k in 0..inst.objects[x].components.len() {
                     if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_)) {
+                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_)) {
                             out.push(b);
                         }
                     }
@@ -580,13 +650,14 @@ impl Game {
                 Behaviour::Destroyable(x) => self.destroyable_on_fragment_hit(x, force),
                 Behaviour::Machinery(m) => self.machinery_on_fragment_hit(m, force),
                 Behaviour::Explosive(e) => self.explosive_on_fragment_hit(e),
+                Behaviour::Tyre(t) => self.tyre_on_fragment_hit(t, force),
                 _ => unreachable!(),
             }
         }
     }
 
     /// Instantiate(Resources.Load<GameObject>(path), position, identity); the clone's first component id.
-    fn spawn_resource(&mut self, path: &str, position: [f32; 3]) -> i32 {
+    pub(super) fn spawn_resource(&mut self, path: &str, position: [f32; 3]) -> i32 {
         let db = self.assets.take().expect("Instantiate without the game's data");
         let source = db.resource(path, 1).ok().flatten().unwrap_or_else(|| panic!("Resources.Load({path}) found no GameObject"));
         self.assets = Some(db);
@@ -594,7 +665,7 @@ impl Game {
     }
 
     /// Object.Instantiate(prefab, position, identity). Returns the clone root's Transform id.
-    fn spawn_prefab(&mut self, source: ObjRef, position: [f32; 3]) -> i32 {
+    pub(super) fn spawn_prefab(&mut self, source: ObjRef, position: [f32; 3]) -> i32 {
         let mut db = self.assets.take().expect("Instantiate without the game's data");
         let spawned = db.prefab(source).and_then(|prefab| self.spawn(&mut db, &prefab, position, [0.0, 0.0, 0.0, 1.0], None));
         self.assets = Some(db);

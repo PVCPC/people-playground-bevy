@@ -91,7 +91,7 @@ script! {
 
 impl Game {
     /// Trigger.OverlapPoint (Collider2D::OverlapPoint starts with the AutoSyncTransforms).
-    fn lava_is_point_inside(&mut self, lv: usize, point: [f32; 2]) -> bool {
+    pub(super) fn lava_is_point_inside(&mut self, lv: usize, point: [f32; 2]) -> bool {
         self.sync_pending();
         let p = V::new(point[0], point[1]);
         self.lavas[lv].trigger_fixtures.iter().map(|&f| self.world.fixture(f)).any(|fx| super::tool::test_point(&fx.shape, &self.world.body(fx.body).xf, p))

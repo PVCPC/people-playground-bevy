@@ -460,6 +460,8 @@ impl Game {
                         if let Some(id) = self.anchored_joints[a].joint.take() {
                             self.world.destroy_joint(id);
                         }
+                        // The component is gone: `(bool)joint` reads false.
+                        self.destroyed_components.insert(self.anchored_joints[a].component);
                     }
                     BreakJoint::Fixed(f) => {
                         // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares
@@ -475,6 +477,7 @@ impl Game {
                 // The JointBreakSoundBehaviours on the joint's GameObject come after the scripts above in component
                 // order, and the destroy draws nothing.
                 self.joint_break_sound_on_break(j);
+                self.joint_helpers_on_break(j);
                 self.joint_break_limits.retain(|&k| k != j);
             }
             if next.is_some_and(|n| !self.joint_break_limits.contains(&n)) {
@@ -493,8 +496,8 @@ impl Game {
     fn send_callback_reports(&mut self, reports: &[Report]) {
         for r in reports {
             let Some(col) = &r.collision else {
-                // OnTriggerEnter2D/OnTriggerExit2D(other) of the WaterBehaviour on the trigger's GameObject; no other
-                // rewritten script has OnTrigger*2D.
+                // OnTriggerEnter2D/OnTriggerExit2D(other) of the WaterBehaviour on the trigger's GameObject; the other
+                // rewritten OnTrigger*2D (FirearmAttachmentPointBehaviour) does nothing without attachments.
                 if matches!(r.message, Message::TriggerEnter | Message::TriggerExit) {
                     for (own, other) in [(r.collider_a, r.collider_b), (r.collider_b, r.collider_a)] {
                         if let Some(w) = self.waters.iter().position(|w| w.trigger == own.id) {

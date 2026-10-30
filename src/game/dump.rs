@@ -300,6 +300,15 @@ impl Game {
                 "null" => 0.0,
                 m => material_value(&m[1..m.find('#').unwrap()], "bounciness")?,
             };
+            // Older recordings lack these (only the ballistics read them).
+            if let Some(bits) = r.get("Brittleness") {
+                p.Brittleness = f(bits);
+                p.BulletSpeedAbsorptionPower = f(r.req("BulletSpeedAbsorptionPower")?);
+                p.ShotImpact = match r.req("ShotImpact")? {
+                    "null" => None,
+                    m => Some((None, &m[1..m.find('#').unwrap()] == "BloodPuff_poolable")),
+                };
+            }
             g.properties.push(p);
         }
 
@@ -851,6 +860,7 @@ impl Game {
 
     /// The FixedUpdate scripts between CameraShakeBehaviour (FS) and CameraControlBehaviour (FM).
     pub fn fixed_update_scripts(&mut self) {
+        self.camera_shake_fixed_update();
         self.run_pending_starts();
         self.tool_fixed_update();
         self.ambient_grid_fixed_update();
@@ -891,9 +901,17 @@ impl Game {
                 (Phase::Update, B::Destroyable(x)) => self.destroyable_update(x),
                 (Phase::Fixed, B::Explosive(e)) => self.explosive_fixed_update(e),
                 (Phase::Fixed, B::PointToVelocity(i)) => self.point_to_velocity_fixed_update(i),
+                (Phase::Update, B::Car(i)) => self.car_update(i),
+                (_, B::Tyre(t)) if { let p = &self.physicals[self.tyres[t].Phys]; !p.active || p.destroyed } => {}
+                (Phase::Fixed, B::Tyre(t)) => self.tyre_fixed_update(t),
+                // Update is the sag of a deflated tyre's material (rendering).
+                (Phase::Update, B::Tyre(_)) => {}
+                (Phase::Update, B::Flask(f)) => self.flask_update(f),
+                (Phase::Fixed, B::TruckDoor(t)) => self.truck_door_fixed_update(t, self.truck_doors[t].0),
                 (Phase::Update, B::DeleteAfter(i)) => self.delete_after_update(i),
                 (_, B::FireMap(f)) if { let p = &self.physicals[self.fire_maps[f].physical]; !p.active || p.destroyed } => {}
                 (Phase::Fixed, B::FireMap(f)) => self.fire_map_fixed_update(f),
+                (Phase::Update, B::Firearm(f)) => self.firearm_update(f),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),
@@ -923,6 +941,7 @@ impl Game {
     /// in the recorded call order.
     pub fn update_scripts(&mut self) {
         self.run_pending_starts();
+        self.camera_shake_update();
         // UndoControllerBehaviour.Update, then the map's ambience emitter.
         for a in 0..self.ambient_audio.len() {
             self.play_audio_at_random_update(a);
@@ -948,6 +967,7 @@ impl Game {
         // The BloodPuff pool (made at runtime: after the scene's behaviours).
         self.blood_puff_pool_update();
         self.splash_pool_update();
+        self.tracer_pool_update();
         // Execution order 1050, above every spawnable script's.
         self.catalog_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.

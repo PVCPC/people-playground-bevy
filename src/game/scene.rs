@@ -244,11 +244,42 @@ impl Game {
                         }
                     }
                     g.metal_scrape = Some((prefab.objects.iter().map(|o| 1 + o.components.len()).sum(), draws));
+                    g.bullet_crack_clips = v.get("BulletCrackClips").and_then(Value::array).ok_or("Global.BulletCrackClips")?.len();
                 }
                 // VideoSettingsInitBehaviour.Start: Sync.
                 "VideoSettingsInitBehaviour" if s.runs => {
                     found[1] = true;
                     (g.positionIterations, g.velocityIterations) = (g.prefs.PhysicsIterations, g.prefs.PhysicsIterations);
+                }
+                // Global.Awake: camera = Camera.main, the MainCamera-tagged camera this one shakes.
+                "CameraShakeBehaviour" => {
+                    let go = db.game_object(s.game_object)?;
+                    if go.tag != 5 {
+                        unimplemented!("CameraShakeBehaviour off the MainCamera");
+                    }
+                    let camera = go.components.iter().filter_map(|&p| db.resolve(s.game_object.file, p)).find(|&r| db.class(r) == 20).ok_or("the main camera's Camera")?;
+                    let camera = crate::assets::components::Camera::read(db.data(camera)).map_err(|e| format!("Camera: {e}"))?;
+                    if !camera.orthographic {
+                        unimplemented!("a perspective main camera");
+                    }
+                    g.camera.orthographic_size = camera.orthographic_size;
+                }
+                // Awake only sets Instance.
+                "BulletTracerPool" => {
+                    let prefab = v.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(s.game_object.file, p)).ok_or("BulletTracerPool.Prefab")?;
+                    let prefab = db.prefab(prefab)?;
+                    for o in &prefab.objects {
+                        for (_, c) in &o.components {
+                            if let crate::assets::db::Component::Script { class, .. } = c {
+                                if class != "PoolableSizeHelper" {
+                                    unimplemented!("a {class} on the BulletTracerPool prefab");
+                                }
+                            }
+                        }
+                    }
+                    g.tracer_pool.clone_ids = prefab.objects.iter().map(|o| 1 + o.components.len()).sum();
+                    g.tracer_pool.MaxPoolSize = v.get("MaxPoolSize").and_then(Value::i64).ok_or("BulletTracerPool.MaxPoolSize")? as usize;
+                    g.tracer_pool.InactivityThresholdInSeconds = v.get("InactivityThresholdInSeconds").and_then(Value::f32).ok_or("BulletTracerPool.InactivityThresholdInSeconds")?;
                 }
                 // Awake only sets Instance; Play draws from these.
                 "DistantSoundBehaviour" => {

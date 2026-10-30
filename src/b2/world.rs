@@ -938,6 +938,16 @@ impl World {
     /// Collider2D.ClosestPoint (PhysicsQuery2D::ClosestPoint 180bea0c0): b2Distance (with radii) from a zero-radius
     /// point to each fixture of the collider; the nearest surface point wins, and a point inside any shape (or a
     /// non-finite one, or a collider without fixtures) comes back unchanged.
+    /// The b2 body of a collider's fixtures.
+    pub fn collider_body(&self, collider: i32) -> Option<BodyId> {
+        self.fixtures.iter().flatten().find(|f| f.collider.id == collider).map(|f| f.body)
+    }
+
+    /// The GameObject of a collider with fixtures.
+    pub fn collider_game_object(&self, collider: i32) -> Option<i32> {
+        self.fixtures.iter().flatten().find(|f| f.collider.id == collider).map(|f| f.collider.game_object)
+    }
+
     pub fn collider_closest_point(&self, collider: i32, point: Vec2) -> Vec2 {
         let finite = |v: f32| v.to_bits() & 0x7f80_0000 != 0x7f80_0000;
         if !finite(point.x) || !finite(point.y) {

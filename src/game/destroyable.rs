@@ -62,7 +62,7 @@ impl Game {
     }
 
     /// The ExplosiveBehaviour on the destroyable's object (TryGetComponent<ExplosiveBehaviour>).
-    fn destroyable_explosive(&self, x: usize) -> Option<usize> {
+    pub(super) fn destroyable_explosive(&self, x: usize) -> Option<usize> {
         let p = self.destroyables[x].PhysicalBehaviour;
         self.explosives.iter().position(|e| e.physical == Some(p))
     }
@@ -143,10 +143,9 @@ impl Game {
         }
         let s = &self.destroyables[x];
         let p = s.PhysicalBehaviour;
-        if self.physicals[p].parent.is_some() {
-            unimplemented!("DestroyableBehaviour: lossyScale of a parented object");
-        }
-        inst.set_local_scale(0, self.physicals[p].transform.localScale);
+        // createdDebris.transform.localScale = base.transform.lossyScale
+        let scale = if self.physicals[p].parent.is_some() { self.lossy_scale(p) } else { self.physicals[p].transform.localScale };
+        inst.set_local_scale(0, scale);
         self.refresh_transforms(&inst, &linked);
         self.unsynced.push(inst);
         if let Some(a) = self.destroyables[x].VelocityAncestor {
@@ -244,6 +243,7 @@ impl Game {
             // Its coroutines stop.
             let gone = &g.destroyed_components;
             g.coroutines.retain(|c| !gone.contains(&c.owner));
+            g.end_of_frame.retain(|c| !gone.contains(&c.owner));
             g.set_active_scripts(inst, o, false);
             for &x in &objects {
                 let key = inst.objects[x].components[0];
@@ -261,10 +261,16 @@ impl Game {
                         }
                         "ActOnDestroy" => g.act_on_destroy_run(key),
                         "NoCollide" => g.no_collide_destroy(cid),
+                        "NoCollideGm" => g.no_collide_gm_destroy(cid, inst),
+                        "TyreDeflationBehaviour" => g.tyre_destroy(cid),
                         // Global.RemoveAudioSource; DeregisterBehaviour drops the object's undo entry (UI).
                         "ExplosionSoundBehviour" | "DeregisterBehaviour" | "ExistInDetailView" => {}
                         // GetComponentsInChildren on the destroyed (inactive) GameObject finds no collider.
                         "NoChildrenCollide" => {}
+                        "FirearmBehaviour" => {
+                            let f = g.firearms.iter().position(|x| x.id == cid).expect("the FirearmBehaviour");
+                            g.emitter_dispose(f);
+                        }
                         c if !super::declares(c, "OnDestroy") => {}
                         c => unimplemented!("{c}.OnDestroy"),
                     }
@@ -413,6 +419,9 @@ impl Game {
                     self.pick_random(count);
                 }
             }
+            Step::ExplosiveEndOfFrame(e, seq) => self.explosive_end_of_frame(e, seq),
+            Step::DestroyableShotBreak(x, normal) => self.destroyable_shot_break(x, normal),
+            Step::Bullet(b) => self.bullet_resume(b),
             Step::DoAtTimeOnceInvoke(d, k) => {
                 // action.Event.Invoke(): a destroyed target's call is skipped.
                 for target in self.do_at_time_onces[d].actions[k].instantiates.clone() {
@@ -455,6 +464,12 @@ pub enum Step {
     DoAtTimeOnceInvoke(usize, usize),
     /// DoAtTimeOnce.StartSequence after an action's Duration, going on from action i.
     DoAtTimeOnceNext(usize, usize),
+    /// ExplosiveBehaviour.Explode after WaitForEndOfFrame: (explosive, its coroutine sequence).
+    ExplosiveEndOfFrame(usize, u64),
+    /// DestroyableBehaviour.Shot's WaitAFrame: (destroyable, shot.normal).
+    DestroyableShotBreak(usize, [f32; 2]),
+    /// A BallisticIteration coroutine (`Game::bullets`).
+    Bullet(usize),
 }
 
 #[derive(Clone, Debug)]

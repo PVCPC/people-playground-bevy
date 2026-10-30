@@ -538,14 +538,17 @@ impl Game {
         }
     }
 
-    /// victim.SendMessage("Unstabbed", stabbing): CirculationBehaviour (LiquidContainerLeaking and TyreDeflation are
-    /// not on a Person).
+    /// victim.SendMessage("Unstabbed", stabbing): CirculationBehaviour and TyreDeflationBehaviour (LiquidContainerLeaking
+    /// is not on a Person).
     pub fn send_unstabbed(&mut self, s: Stabbing) {
         if !self.physicals[s.victim].active || self.physicals[s.victim].destroyed {
             return;
         }
         if let Some(l) = self.limbs.iter().position(|l| l.PhysicalBehaviour == s.victim) {
             self.circulation_unstabbed(l, s);
+        }
+        if let Some(t) = self.tyres.iter().position(|t| t.Phys == s.victim) {
+            self.tyre_pop(t, Some(s.point));
         }
     }
 

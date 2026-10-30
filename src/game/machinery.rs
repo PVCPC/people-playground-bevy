@@ -103,7 +103,7 @@ impl Game {
     }
 
     /// DamagableMachineryBehaviour.ActOnDamage
-    fn machinery_act_on_damage(&mut self, m: usize) {
+    pub(super) fn machinery_act_on_damage(&mut self, m: usize) {
         let mc = &self.machinery[m];
         if !(mc.Health > 0.0) && !mc.Destroyed {
             self.machinery_set_as_broken(m, true);
