@@ -229,10 +229,10 @@ impl Game {
         g.DynamicSqrdVelocityThreshold = 2500.0;
         (g.velocityIterations, g.positionIterations) = (32, 32);
         g.load_time(s);
-        g.world = World::new(V::new(0.0, -9.81));
+        g.world = World::new(V::new(-0.0, -9.81));
         // The whole b2 world when the dump has it (the map's colliders, contacts and listener records too).
         let mut restored = match s.of("b2World").next() {
-            Some(_) => Some(physics::restore(s, V::new(0.0, -9.81))?),
+            Some(_) => Some(physics::restore(s, V::new(-0.0, -9.81))?),
             None => None,
         };
         if let Some(r) = restored.as_mut() {
@@ -356,9 +356,19 @@ impl Game {
                 let [cx, cy, cz, ex, ey, ez]: [f32; 6] = floats(b);
                 p.sprite_bounds = Some(([cx, cy, cz], [ex, ey, ez]));
             }
+            // PhysicalBehaviour.colliders, in component order (the recorder dumps the field).
+            p.colliders = list(r.req("colliders")?).into_iter().map(|c| c.rsplit_once('#').unwrap().1.parse().unwrap()).collect();
+            p.all_colliders = p.colliders.clone();
             if let Some(rs) = &restored {
                 let collider = |k: &String| k.split(':').next()?.rsplit_once('#').filter(|(o, _)| *o == r.name).map(|(_, id)| id.parse::<i32>().unwrap());
-                p.collider = rs.fixtures.keys().find_map(collider).unwrap_or(0);
+                p.all_colliders = rs.fixtures.keys().filter_map(collider).fold(Vec::new(), |mut v, c| {
+                    if !v.contains(&c) {
+                        v.push(c);
+                    }
+                    v
+                });
+                // Instance ids fall in creation (= component) order.
+                p.all_colliders.sort_by(|a, b| b.cmp(a));
             }
             // A limb, or a PPG_STAB item (ItemRigidbody2D/ItemB2Body records: a dynamic body of its own).
             let owner: Option<(&Record, Option<&Record>, crate::b2::world::BodyId)> = match limb_by_name(&r.name) {
@@ -720,6 +730,23 @@ impl Game {
     /// `body <name> ... layer=<n>`.
     pub fn load_layers(&mut self, header: &[String]) {
         for line in header {
+            // `stab item=<name> ... comps=<Type>:<enabled>;...`: the item's components, for the Lodged/Dislodged messages.
+            if let Some(rest) = line.strip_prefix("stab item=") {
+                let name = rest.split(' ').next().unwrap().replace(' ', "_");
+                let comps = rest.split(" comps=").nth(1).unwrap_or("");
+                for c in comps.split(';').filter(|c| !c.is_empty()) {
+                    let (ty, enabled) = c.rsplit_once(':').unwrap();
+                    if ty == "SharpOnAllSidesBehaviour" && enabled == "1" {
+                        unimplemented!("SharpOnAllSidesBehaviour.FixedUpdate: enabled on {name}");
+                    }
+                    if ty == "ExcaliburBehaviour" || ty.contains("Syringe") {
+                        if let Some(p) = self.physicals.iter().position(|p| p.name == name) {
+                            self.physicals[p].lodge_receiver = ty.to_string();
+                        }
+                    }
+                }
+                continue;
+            }
             let (name, layer) = if let Some(rest) = line.strip_prefix("collider ") {
                 let Some((name, tail)) = rest.split_once(" layer=") else { continue };
                 (name, tail.split(' ').next().unwrap())
@@ -1407,7 +1434,7 @@ fn compare_transforms(g: &Game, chained: &Snapshot, to: &Snapshot) -> Result<Vec
 fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
     // A second restore of the snapshot names its bodies and fixtures; ours are found by the same Rigidbody2D
     // (ground: none), their fixtures in list order (ids drift once something was destroyed).
-    let mut r = physics::restore(from, V::new(0.0, -9.81))?;
+    let mut r = physics::restore(from, V::new(-0.0, -9.81))?;
     let ours: HashMap<Option<i32>, crate::b2::world::BodyId> = g.world.body_list.iter().map(|&b| (g.world.body(b).user.map(|u| u.id), b)).collect();
     let fixture_name: HashMap<_, _> = r.fixtures.iter().map(|(n, &f)| (f, n.clone())).collect();
     let (mut bodies, mut fixtures) = (HashMap::new(), HashMap::new());
@@ -1436,7 +1463,9 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
         return Err("--loop-test needs a recording with Contacts2D (dump12 on)".into());
     }
     let mut g = Game::from_snapshot(&first, rig)?;
-    g.load_layers(&header(dump)?);
+    let header = header(dump)?;
+    g.load_layers(&header);
+    let item = header.iter().find_map(|l| l.strip_prefix("stab item=")).map(|r| r.split(' ').next().unwrap().replace(' ', "_"));
     g.load_input(&first);
     g.MousePosition = g.input.mouse;
     let mut prev = first.clone();
@@ -1457,6 +1486,13 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 if let Some((_, limb)) = prev.snap.iter().find(|(k, _)| k == "crush") {
                     let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
                     g.limb_crush(l);
+                }
+                // The recorder's scripted pull on the PPG_STAB item (PPG_STAB_PULL): its velocity set before the step.
+                if let Some((_, v)) = prev.snap.iter().find(|(k, _)| k == "pull") {
+                    let p = g.physicals.iter().position(|p| Some(&p.name) == item.as_ref()).ok_or("pull without a stab item")?;
+                    let [vx, vy]: [f32; 2] = floats(v);
+                    let rb = g.physicals[p].rigidbody.clone();
+                    rb.set_velocity(&mut g.world, [vx, vy]);
                 }
                 g.simulate_physics();
                 diffs = compare_physics(&mut g, &prev, &cur)?;

@@ -1149,6 +1149,26 @@ impl World {
         ids
     }
 
+    /// The dumped broadphase tree as it was: root, free list, counts and every node (leaves' user data is their
+    /// fixture, found through the dumped proxies (proxy id, fixture, AABB)). Proxy ids stay the game's.
+    pub(crate) fn restore_tree(&mut self, root: i32, node_count: i32, free_list: i32, insertion_count: i32, nodes: Vec<super::broadphase::TreeNode>, proxies: &[(i32, FixtureId, Aabb)]) {
+        let mut bp = BroadPhase::default();
+        bp.tree.root = root;
+        bp.tree.node_count = node_count;
+        bp.tree.free_list = free_list;
+        bp.tree.insertion_count = insertion_count;
+        bp.tree.nodes = nodes;
+        bp.proxy_count = proxies.len() as i32;
+        self.broad_phase = bp;
+        for f in self.fixtures.iter_mut().flatten() {
+            f.proxies.clear();
+        }
+        for &(id, f, aabb) in proxies {
+            self.broad_phase.tree.nodes[id as usize].user_data = f;
+            self.fixtures[f].as_mut().unwrap().proxies.push((aabb, id));
+        }
+    }
+
     /// Unity's b2ContactFilter: the fixture filters, then Physics2D.IgnoreCollision.
     // ponytail: Unity's layer collision matrix is not modelled yet (every shipped object is on a colliding layer).
     fn fixtures_should_collide(&self, fa: FixtureId, fb: FixtureId) -> bool {

@@ -239,7 +239,7 @@ impl Game {
         let point = [closest.x, closest.y];
         let stabbing = Stabbing { stabber: p, victim, normal: [contact.normal.x, contact.normal.y], point };
         self.send_stabbed(stabbing);
-        // gameObject.SendMessage("Lodged"): Excalibur, OldSyringe and Syringe only.
+        self.send_lodged(p);
         let local = self.inverse_transform_point(victim, [point[0], point[1], 0.0]);
         self.penetration_arena[pen].CurrentConnectedAnchor = [local[0], local[1]];
         self.do_stab(p, victim, axis, pen);
@@ -275,11 +275,11 @@ impl Game {
         self.penetration_arena[pen].Joint = Some(f);
         // colliders[0], then other.transform.root.GetComponentsInChildren<Collider2D>(): the active objects under the
         // victim's root, in object order.
-        let own = self.physicals[p].collider;
+        let own = self.physicals[p].colliders[0];
         let root = self.root_of(other);
         let children: Vec<i32> = (0..self.physicals.len())
             .filter(|&q| !self.physicals[q].destroyed && self.physicals[q].active && self.root_of(q) == root)
-            .map(|q| self.physicals[q].collider)
+            .flat_map(|q| self.physicals[q].all_colliders.clone())
             .collect();
         for c in children {
             self.ignore_collision_substitute(c, own, true);
@@ -291,7 +291,7 @@ impl Game {
 
     /// PhysicalBehaviour.UndoPenetrationNoCollision
     fn undo_penetration_no_collision(&mut self, pen: usize) {
-        let b = self.physicals[self.penetration_arena[pen].Stabber].collider;
+        let b = self.physicals[self.penetration_arena[pen].Stabber].colliders[0];
         for rc in self.penetration_arena[pen].RelevantColliders.clone() {
             if self.collider_alive(rc) {
                 self.ignore_collision_substitute(rc, b, false);
@@ -361,7 +361,7 @@ impl Game {
 
     /// PhysicalBehaviour.DestroyStabJoint
     pub fn destroy_stab_joint(&mut self, pen: usize) {
-        // gameObject.SendMessage("Dislodged"): SyringeBehaviour only.
+        self.send_dislodged(self.penetration_arena[pen].Stabber);
         if self.penetration_victim_alive(pen) {
             let (stabber, victim) = (self.penetration_arena[pen].Stabber, self.penetration_arena[pen].Victim.unwrap());
             let point = self.penetration_point(pen);
@@ -505,6 +505,21 @@ impl Game {
 
     // ---- The victim's Stabbed / Unstabbed receivers --------------------------------------------------------------
 
+    /// gameObject.SendMessage("Lodged", stabbing): ExcaliburBehaviour, OldSyringeBehaviour and SyringeBehaviour are the
+    /// only receivers; an item without one (Knife, Sword) does nothing.
+    fn send_lodged(&self, p: usize) {
+        if self.physicals[p].active && !self.physicals[p].lodge_receiver.is_empty() {
+            unimplemented!("{}.Lodged", self.physicals[p].lodge_receiver);
+        }
+    }
+
+    /// gameObject.SendMessage("Dislodged", penetration): SyringeBehaviour is the only receiver.
+    fn send_dislodged(&self, p: usize) {
+        if self.physicals[p].active && { let r = &self.physicals[p].lodge_receiver; r.contains("Syringe") && !r.starts_with("Old") } {
+            unimplemented!("{}.Dislodged", self.physicals[p].lodge_receiver);
+        }
+    }
+
     /// victim.SendMessage("Stabbed", stabbing): the components of a Person limb, in component order. (SendMessage
     /// skips an inactive object.)
     pub fn send_stabbed(&mut self, s: Stabbing) {
@@ -622,7 +637,8 @@ mod tests {
             let body = g.world.create_body(&BodyDef { kind: BodyType::Dynamic, position: Vec2::new(x, 1.0), ..Default::default() });
             let mut p = super::super::Physical::default();
             p.rigidbody.body = body;
-            p.collider = 10 + i as i32;
+            p.colliders = vec![10 + i as i32];
+            p.all_colliders = p.colliders.clone();
             p.parent = parent;
             p.transform.localScale = [1.0, 1.0, 1.0];
             p.transform.rotation = [0.0, 0.0, 0.0, 1.0];

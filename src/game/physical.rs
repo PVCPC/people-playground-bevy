@@ -102,8 +102,12 @@ script! {
     links {
         name: String = String::new(),
         id: i32 = 0,
-        /// The GameObject's Collider2D instance id (each physical object has one collider).
-        collider: i32 = 0,
+        /// The Lodged/Dislodged receiver component on the GameObject (ExcaliburBehaviour, a SyringeBehaviour), if any.
+        lodge_receiver: String = String::new(),
+        /// PhysicalBehaviour.colliders: the GameObject's non-trigger Collider2D instance ids, in component order.
+        colliders: Vec<i32> = Vec::new(),
+        /// Every Collider2D on the GameObject (triggers too), as GetComponentsInChildren<Collider2D> sees them.
+        all_colliders: Vec<i32> = Vec::new(),
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
@@ -144,7 +148,7 @@ script! {
 impl Game {
     /// Global.PhysicalObjectsInWorldByTransform looked up by a collider (the collider's transform).
     pub fn physical_of_collider(&self, collider: i32) -> Option<usize> {
-        self.physicals.iter().position(|p| !p.destroyed && p.collider == collider)
+        self.physicals.iter().position(|p| !p.destroyed && p.all_colliders.contains(&collider))
     }
 }
 
@@ -920,28 +924,31 @@ impl Game {
         // InvokeOnItemRemoved: the modding event only.
     }
 
-    /// Collider2D::SetEnabled(false) (180c15670): Collider2D::Cleanup (180c0d940) with ColliderCleanupOperation 2
-    /// destroys the shapes last first, resets the body's mass and, with Physics2D.callbacksOnDisable off, drops
-    /// the collider's contact records without callbacks.
+    /// Collider2D::SetEnabled(false) (180c15670), for each collider in turn: Collider2D::Cleanup (180c0d940) with
+    /// ColliderCleanupOperation 2 destroys the shapes last first, resets the body's mass and, with
+    /// Physics2D.callbacksOnDisable off, drops the collider's contact records without callbacks.
     fn collider_disable(&mut self, p: usize) {
-        let (body, collider) = (self.physicals[p].rigidbody.body, self.physicals[p].collider);
-        let shapes: Vec<_> = self.world.body(body).fixtures.iter().copied().filter(|&f| self.world.fixture(f).collider.id == collider).collect();
-        for &f in shapes.iter().rev() {
-            self.world.destroy_fixture(body, f);
+        let body = self.physicals[p].rigidbody.body;
+        for collider in self.physicals[p].all_colliders.clone() {
+            let shapes: Vec<_> = self.world.body(body).fixtures.iter().copied().filter(|&f| self.world.fixture(f).collider.id == collider).collect();
+            for &f in shapes.iter().rev() {
+                self.world.destroy_fixture(body, f);
+            }
+            if !shapes.is_empty() {
+                self.world.reset_mass_data(body);
+            }
+            self.world.contacts2d.destroy_contacts(collider);
         }
-        if !shapes.is_empty() {
-            self.world.reset_mass_data(body);
-        }
-        self.world.contacts2d.destroy_contacts(collider);
     }
 
     /// GameObject.SetActive(false) on a physical object, component by component.
     fn deactivate(&mut self, p: usize) {
         // Collider2D::Deactivate (180c0fc00): its Physics2D.IgnoreCollision pairs go; the cleanup finds no shapes.
-        let collider = self.physicals[p].collider;
         let w = &mut self.world;
-        w.ignored.retain(|&(a, b)| a != collider && b != collider);
-        w.contacts2d.destroy_contacts(collider);
+        for &collider in &self.physicals[p].all_colliders {
+            w.ignored.retain(|&(a, b)| a != collider && b != collider);
+            w.contacts2d.destroy_contacts(collider);
+        }
         self.rigidbody_cleanup(p);
         self.physicals[p].active = false;
         // GForceMeasureBehaviour.OnDisable on a limb.

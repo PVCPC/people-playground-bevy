@@ -161,9 +161,27 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         }
     }
     proxies.sort_by_key(|p| p.0);
-    let ours = world.restore_proxies(&proxies.iter().map(|&(_, f, a, fat)| (f, a, fat)).collect::<Vec<_>>());
-    let proxy_ids: HashMap<i32, i32> = proxies.iter().map(|p| p.0).zip(ours).collect();
     let state = s.of("b2World").next().unwrap();
+    // From dump29 on the game's whole b2DynamicTree is dumped, so tree order (queries, pairs) is the game's own;
+    // before, a fresh tree of the dumped leaves (ids renumbered).
+    let proxy_ids: HashMap<i32, i32> = if let (Some(tree), Some(nodes)) = (state.get("tree"), state.get("nodes")) {
+        let t = words(tree);
+        let nodes = nodes
+            .split(';')
+            .map(|n| {
+                let w = words(n);
+                let aabb = Aabb { lower: V::new(f32::from_bits(w[0]), f32::from_bits(w[1])), upper: V::new(f32::from_bits(w[2]), f32::from_bits(w[3])) };
+                crate::b2::broadphase::TreeNode { aabb, user_data: 0, parent: w[4] as i32, child1: w[5] as i32, child2: w[6] as i32, height: w[7] as i32 }
+            })
+            .collect();
+        // Words: root +0, nodeCount +0x10, capacity +0x14, freeList +0x18, insertionCount +0x20.
+        let leaves: Vec<_> = proxies.iter().map(|&(id, f, a, _)| (id, f, a)).collect();
+        world.restore_tree(t[0] as i32, t[4] as i32, t[6] as i32, t[8] as i32, nodes, &leaves);
+        proxies.iter().map(|p| (p.0, p.0)).collect()
+    } else {
+        let ours = world.restore_proxies(&proxies.iter().map(|&(_, f, a, fat)| (f, a, fat)).collect::<Vec<_>>());
+        proxies.iter().map(|p| p.0).zip(ours).collect()
+    };
     let moves = names(state.req("moves")?).iter().map(|m| proxy_ids.get(&m.parse::<i32>().unwrap()).copied().ok_or(format!("move of unknown proxy {m}"))).collect::<Result<Vec<_>, _>>()?;
     let world_flags = words(state.req("flags")?)[0];
     let inv_dt0 = f(state.req("invDt0")?);

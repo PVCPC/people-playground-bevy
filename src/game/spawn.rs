@@ -488,7 +488,7 @@ mod tests {
         }
         let human_go = first.of("TransformChain").find(|r| r.name == "Human").unwrap().id + 2;
         let mut g = Game::default();
-        g.world = World::new(V::new(0.0, -9.81));
+        g.world = World::new(V::new(-0.0, -9.81));
         g.next_instance_id = human_go;
         let (inst, _) = g.instantiate_native(&prefab, spawn, [0.0, 0.0, 0.0, 1.0], &original_ids);
         let mut out = Vec::new();

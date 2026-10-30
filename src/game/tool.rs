@@ -203,7 +203,7 @@ impl Game {
             if mask & (1 << layer) == 0 {
                 continue;
             }
-            let Some(ph) = self.physicals.iter().position(|ph| ph.collider == fx.collider.id) else {
+            let Some(ph) = self.physical_of_collider(fx.collider.id) else {
                 unimplemented!("OverlapPoint: a selectable collider without a PhysicalBehaviour");
             };
             let z = self.physicals[ph].transform.position[2];
