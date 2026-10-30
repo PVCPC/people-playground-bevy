@@ -451,7 +451,15 @@ impl Game {
     /// see PersonBehaviour.Awake's rescale at the next SyncTransforms.
     pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Result<(Instance, Linked, Vec<(usize, usize)>), String> {
         let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, original_ids);
+        let first = self.physicals.len();
         let linked = self.link_instance(db, prefab, &inst)?;
+        // GetHashCode (Random.InitState in PhysicalBehaviour.Start) is Mono's object hash, (address >> 3) *
+        // 0x9e3779b1 (mono_object_hash, 180116520), of a managed heap address that differs per run in the game too.
+        // A PhysicalBehaviour is a Boehm large object, 2048-aligned (every recorded hash has a zero low byte).
+        for p in first..self.physicals.len() {
+            let address = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), p) << 11;
+            self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
+        }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
         Ok((inst, linked, behaviours))
     }
