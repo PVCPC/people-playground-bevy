@@ -181,6 +181,8 @@ pub mod mathf {
 pub trait Field {
     fn parse(&mut self, text: &str) -> Result<(), String>;
     fn show(&self) -> String;
+    /// Loads the field's serialized value from game data (a prefab's MonoBehaviour).
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String>;
 }
 
 fn bits(text: &str) -> Result<f32, String> {
@@ -195,6 +197,10 @@ impl Field for f32 {
     fn show(&self) -> String {
         format!("{:08x}", self.to_bits())
     }
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+        *self = v.f32().ok_or(format!("not a float: {v:?}"))?;
+        Ok(())
+    }
 }
 impl Field for bool {
     fn parse(&mut self, text: &str) -> Result<(), String> {
@@ -208,6 +214,10 @@ impl Field for bool {
     fn show(&self) -> String {
         (if *self { "1" } else { "0" }).into()
     }
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+        *self = v.bool().ok_or(format!("not a bool: {v:?}"))?;
+        Ok(())
+    }
 }
 macro_rules! int_field {
     ($($t:ty),*) => {$(
@@ -218,6 +228,10 @@ macro_rules! int_field {
             }
             fn show(&self) -> String {
                 self.to_string()
+            }
+            fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+                *self = v.i64().and_then(|i| <$t>::try_from(i).ok()).ok_or(format!("not a {}: {v:?}", stringify!($t)))?;
+                Ok(())
             }
         }
     )*};
@@ -237,6 +251,17 @@ impl<const N: usize> Field for [f32; N] {
     fn show(&self) -> String {
         self.iter().map(Field::show).collect::<Vec<_>>().join(",")
     }
+    /// Vector2/3/4, Quaternion and Color: the struct's float members in order.
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+        let crate::assets::mono::Value::Struct(members) = v else { return Err(format!("not a struct: {v:?}")) };
+        if members.len() != N {
+            return Err(format!("expected {N} members: {v:?}"));
+        }
+        for (x, (_, m)) in self.iter_mut().zip(members) {
+            x.set(m)?;
+        }
+        Ok(())
+    }
 }
 impl Field for Option<f32> {
     fn parse(&mut self, text: &str) -> Result<(), String> {
@@ -245,6 +270,9 @@ impl Field for Option<f32> {
     }
     fn show(&self) -> String {
         self.map_or("null".into(), |v| v.show())
+    }
+    fn set(&mut self, v: &crate::assets::mono::Value) -> Result<(), String> {
+        Err(format!("Option<f32> has no serialized form: {v:?}"))
     }
 }
 

@@ -114,6 +114,19 @@ fn collider_product(m: &[f32; 16], r: &[f32; 16]) -> [f32; 16] {
     out
 }
 
+/// Loads a rewritten script's fields from its serialized MonoBehaviour. Returns the fields the data lacks: the
+/// C# runtime state, which keeps its field initializer.
+pub fn load_values(fields: Vec<(&'static str, &mut dyn Field)>, data: &crate::assets::mono::Value) -> Result<Vec<&'static str>, String> {
+    let mut runtime = Vec::new();
+    for (name, field) in fields {
+        match data.get(name) {
+            Some(v) => field.set(v).map_err(|e| format!("{name}: {e}"))?,
+            None => runtime.push(name),
+        }
+    }
+    Ok(runtime)
+}
+
 impl Game {
     /// Object.Instantiate(prefab, position, rotation): the clone ids go down from `next_instance_id` by 2 in
     /// prefab pre-order, each GameObject before its components. `original_ids` are the prefab objects' own
@@ -427,6 +440,48 @@ mod tests {
     use super::*;
     use crate::assets::db::AssetDb;
     use crate::assets::mono::Value;
+
+    /// Every rewritten script on the Person prefab loads its serialized fields; prints the runtime-only ones.
+    #[test]
+    fn person_scripts_load_from_prefab() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, cat) = db.mono(catalog).unwrap().unwrap();
+        let mut person = None;
+        for item in cat.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, sp) = db.mono(asset).unwrap().unwrap();
+            if let Some(p) = sp.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) {
+                if db.game_object(p).unwrap().name == "Person" {
+                    person = Some(p);
+                }
+            }
+        }
+        let prefab = db.prefab(person.unwrap()).unwrap();
+        let mut runtime: std::collections::BTreeMap<String, Vec<&str>> = Default::default();
+        for o in &prefab.objects {
+            for (_, c) in &o.components {
+                let Component::Script { class, fields, .. } = c else { continue };
+                let r = match class.as_str() {
+                    "PhysicalBehaviour" => load_values(Physical::default().fields(), fields),
+                    "LimbBehaviour" => load_values(Limb::default().fields(), fields),
+                    "CirculationBehaviour" => load_values(Circulation::default().fields(), fields),
+                    "ConnectedNodeBehaviour" => load_values(Node::default().fields(), fields),
+                    "SkinMaterialHandler" => load_values(Skin::default().fields(), fields),
+                    "PersonBehaviour" => load_values(Person::default().fields(), fields),
+                    "GripBehaviour" => load_values(Grip::default().fields(), fields),
+                    _ => continue,
+                };
+                let names = r.unwrap_or_else(|e| panic!("{} {class}: {e}", o.name));
+                runtime.insert(class.clone(), names);
+            }
+        }
+        for (class, names) in &runtime {
+            eprintln!("{class} runtime: {}", names.join(" "));
+        }
+        assert_eq!(runtime.len(), 7);
+    }
 
     /// The Person prefab instantiated natively against dump26stabhead2's first snapshot: every limb body's words,
     /// its fixture proxies and its hinge's b2 definition.
