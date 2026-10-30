@@ -106,7 +106,8 @@ fn capsule_ray_cast(radius: f32, vertices: [Vec2; 2], input: &RayInput, xf: &Tra
     let near0 = {
         let d1 = (p1.y - input.p1.y) * (p1.y - input.p1.y) + (p1.x - input.p1.x) * (p1.x - input.p1.x);
         let d0 = (p0.y - input.p1.y) * (p0.y - input.p1.y) + (p0.x - input.p1.x) * (p0.x - input.p1.x);
-        d0 <= d1
+        // comiss + cmovbe (180bb4230): an unordered compare (a NaN) picks p0 first.
+        !(d0 > d1)
     };
     let centers = if near0 { [p0, p1] } else { [p1, p0] };
     for center in centers {
@@ -119,7 +120,8 @@ fn capsule_ray_cast(radius: f32, vertices: [Vec2; 2], input: &RayInput, xf: &Tra
             continue;
         }
         let a = -(sigma.sqrt() + c);
-        if a < 0.0 || rr * input.max_fraction < a {
+        // comiss + jb (180bb42b0) and comiss + jae (180bb42be): an unordered compare rejects.
+        if !(a >= 0.0) || !(rr * input.max_fraction >= a) {
             continue;
         }
         let a = a / rr;

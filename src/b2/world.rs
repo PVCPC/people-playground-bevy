@@ -87,7 +87,7 @@ fn effective_radius(radius: f32) -> f32 {
 impl Shape {
     /// Which of a pair b2Contact::Create (180bbcce0) puts first, by its register table: a chain before a polygon
     /// before a capsule before a circle.
-    fn contact_order(&self) -> usize {
+    pub(super) fn contact_order(&self) -> usize {
         match self {
             Shape::Circle(_) => 0,
             Shape::Capsule(_) => 1,
@@ -169,7 +169,7 @@ impl Shape {
     }
 
     /// b2DistanceProxy::Set (180baeb10).
-    fn proxy(&self, child: usize) -> DistanceProxy<'_> {
+    pub(super) fn proxy(&self, child: usize) -> DistanceProxy<'_> {
         match self {
             Shape::Circle(c) => DistanceProxy { vertices: std::slice::from_ref(&c.p), radius: c.radius },
             Shape::Polygon(p) => DistanceProxy { vertices: &p.vertices[..p.count], radius: p.radius },
@@ -2015,7 +2015,7 @@ fn should_collide(a: &Filter, b: &Filter) -> bool {
 /// The b2*Contact::Evaluate natives: polygons with a rounded radius take the radial path; a chain's child
 /// (`child_a`) collides as its edge, or against a polygon with either radius above b2_polygonRadius as a rounded
 /// two-sided segment (b2ChainAndPolygonContact::Evaluate, 180bbd400).
-fn evaluate(manifold: &mut Manifold, a: &Shape, child_a: usize, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
+pub(super) fn evaluate(manifold: &mut Manifold, a: &Shape, child_a: usize, xf_a: &Transform, b: &Shape, xf_b: &Transform) {
     match (a, b) {
         (Shape::Chain(a), Shape::Polygon(b)) if globals().polygon_radius >= a.radius && globals().polygon_radius >= b.radius => collide_edge_and_polygon(manifold, &a.child_edge(child_a), xf_a, b, xf_b),
         (Shape::Chain(a), Shape::Polygon(b)) => {

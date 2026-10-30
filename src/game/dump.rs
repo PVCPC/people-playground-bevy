@@ -930,6 +930,7 @@ impl Game {
                 (Phase::Fixed, B::Bulb(i)) => self.bulb_fixed_update(i),
                 (Phase::Update, B::Bulb(i)) => self.bulb_update(i),
                 (Phase::Fixed, B::Thrusterbed(i)) => self.thrusterbed_fixed_update(i),
+                (Phase::Fixed, B::PointLiquid(i)) => self.point_liquid_fixed_update(i),
                 (Phase::Fixed, B::Piston(i)) => self.piston_fixed_update(i),
                 (Phase::Update, B::Flamethrower(i)) => self.flamethrower_update(i),
                 (Phase::Update, B::Piston(i)) => self.piston_update(i),

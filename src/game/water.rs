@@ -406,7 +406,7 @@ impl Game {
                             self.tr_on_enable(t);
                         }
                     }
-                    _ => unimplemented!("{class}: Awake on its GameObject's first activation"),
+                    _ => unreachable!("{class}: OnEnable of a script SetActive did not wake"),
                 },
                 c if !super::declares(c, "OnEnable") => {}
                     _ => unimplemented!("{class}.OnEnable"),

@@ -315,7 +315,13 @@ impl Instance {
     /// world position and rotation and the inverse world rotation times CalculateGlobalRS (the lossy scale), which
     /// marks the object's and its children's global T, R and S.
     pub fn set_parent_null(&mut self, o: usize) {
-        let (t, q, s) = (self.position(o), self.rotation(o), self.lossy_scale(o));
+        let world = (self.position(o), self.rotation(o), self.lossy_scale(o));
+        self.set_parent_null_at(o, world);
+    }
+
+    /// `set_parent_null` with the world pose and lossy scale given (read from the live Transforms when the clone's
+    /// are stale).
+    pub fn set_parent_null_at(&mut self, o: usize, (t, q, s): ([f32; 3], [f32; 4], [f32; 3])) {
         let below = self.descendants(o);
         let x = &mut self.objects[o];
         x.parent = None;
@@ -566,11 +572,30 @@ impl Game {
         for &(d, c) in &scripts {
             let Component::Script { class, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
             super::link::check_rewritten_at(&prefab, d, class);
-            if !inst.objects[d].activated {
-                unimplemented!("{}: GameObject.SetActive(true) on an object whose scripts never ran Awake and Start", prefab.objects[d].name);
+        }
+        let first = scripts.iter().filter(|&&(d, _)| !inst.objects[d].activated).count();
+        for &(d, _) in &queued {
+            inst.objects[d].activated = true;
+        }
+        if first == 0 {
+            return scripts;
+        }
+        if first != scripts.len() {
+            unimplemented!("GameObject.SetActive(true) on a subtree with both awoken and never awoken scripts (one queue interleaves their Awake and OnEnable)");
+        }
+        // The scripts never ran Awake: Awake and OnEnable in this order (AddToManager), then Start queued.
+        let linked = self.first_activation.get(&inst.objects[0].components[0]).cloned().unwrap_or_else(|| unimplemented!("GameObject.SetActive(true) on a first activation of a clone without its spawn's links"));
+        for &(d, c) in &scripts {
+            let Component::Script { class, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
+            match class.as_str() {
+                "PhysicalBehaviour" => self.physicals[linked.physicals[&d]].active = true,
+                "WaterBehaviour" => self.waters[linked.waters[&d]].active = true,
+                _ => {}
             }
         }
-        scripts
+        self.awake_behaviours(&prefab, inst, &linked, &scripts);
+        self.queue_starts(None, &prefab, inst, &linked, &scripts).unwrap_or_else(|e| panic!("GameObject.SetActive(true): {e}"));
+        Vec::new()
     }
 
     fn activate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, queued: &mut Vec<(usize, usize)>) {
@@ -752,7 +777,7 @@ impl Game {
         }
     }
 
-    fn set_driven_by(&mut self, o: BodyOwner, driven_by: Option<BodyId>) {
+    pub(super) fn set_driven_by(&mut self, o: BodyOwner, driven_by: Option<BodyId>) {
         match o {
             BodyOwner::Physical(p) => self.physicals[p].driven_by = driven_by,
             BodyOwner::Node(k) => self.node_rigidbodies[k].driven_by = driven_by,
@@ -769,7 +794,7 @@ impl Game {
 
     /// Rigidbody2D::CheckForDrivenByParentRigidbody(null) (180c1dc80): unless static, the nearest ancestor with a
     /// Rigidbody2D drives it.
-    fn rigidbody2d_driven_by(&self, inst: &Instance, prefab: &Prefab, o: usize, body_type: i32) -> Option<BodyId> {
+    pub(super) fn rigidbody2d_driven_by(&self, inst: &Instance, prefab: &Prefab, o: usize, body_type: i32) -> Option<BodyId> {
         if body_type == 2 {
             return None;
         }

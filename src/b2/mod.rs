@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod broadphase;
+pub mod cast;
 pub mod collide;
 pub mod contacts2d;
 pub mod distance;

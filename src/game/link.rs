@@ -35,6 +35,7 @@ struct Arenas {
 
 /// What `link_instance` built: the Person's index (a root PersonBehaviour), and the arena index of each limb,
 /// PhysicalBehaviour and MapLightBehaviour object and of each Rigidbody-less Transform above a body.
+#[derive(Clone)]
 pub struct Linked {
     pub person: Option<usize>,
     pub limbs: HashMap<usize, usize>,
@@ -75,6 +76,7 @@ pub struct Linked {
     pub thrusterbeds: HashMap<usize, usize>,
     pub pistons: HashMap<usize, usize>,
     pub flamethrowers: HashMap<usize, usize>,
+    pub point_liquids: HashMap<usize, usize>,
     pub act_on_collides: HashMap<usize, usize>,
     pub spawners: HashMap<usize, usize>,
     pub heat_rects: HashMap<usize, usize>,
@@ -1039,6 +1041,7 @@ impl Game {
         let (mut act_on_collides, mut point_to_velocities, mut cars, mut tyres, mut flasks, mut truck_doors) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut glowtubes, mut leds, mut detectors, mut sticky_grenades) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let mut liquid_containers = HashMap::new();
+        let mut point_liquids = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "LiquidContainerController") {
                 let mut x = super::flask::LiquidContainer::default();
@@ -1171,8 +1174,18 @@ impl Game {
                 let start = field(v, "StartLiquid")?;
                 x.StartLiquid = string(start, "LiquidID")?;
                 x.StartAmount = float(start, "Amount")?;
+                x.Phys = l.arenas.physical.get(&o).copied();
                 flasks.insert(o, self.flasks.len());
                 self.flasks.push(x);
+            }
+            if let Some((_, _, v)) = script(prefab, o, "PointLiquidTransferBehaviour") {
+                let mut x = super::flask::PointLiquidTransfer::default();
+                load_values(x.fields(), v)?;
+                x.Phys = *l.arenas.physical.get(&o).ok_or("PointLiquidTransferBehaviour without a PhysicalBehaviour")?;
+                x.Flask = *flasks.get(&o).ok_or("PointLiquidTransferBehaviour without a flask BloodContainer")?;
+                x.Layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("Layers.m_Bits")? as u32;
+                point_liquids.insert(o, self.point_liquids.len());
+                self.point_liquids.push(x);
             }
             if let Some((c, _, v)) = script(prefab, o, "GlowtubeBehaviour") {
                 let mut x = super::light::Glowtube::default();
@@ -1313,6 +1326,26 @@ impl Game {
                 x.id = inst.objects[o].components[c];
                 x.Phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("BulbBehaviour.PhysicalBehaviour is null")?;
                 x.OtherPart = l.object(field(v, "OtherPart")?)?;
+                // Explosion.GetComponentInChildren<ExplosionSoundBehviour>(): the object, then its children depth first.
+                let explosion = l.object(field(v, "Explosion")?)?.ok_or("BulbBehaviour.Explosion is null")?;
+                let mut stack = vec![explosion];
+                while let Some(e) = stack.pop() {
+                    if let Some((sc, senabled, sv)) = script(prefab, e, "ExplosionSoundBehviour") {
+                        let set = field(sv, "audioSource")?.pptr().is_some_and(|p| !p.is_null());
+                        let has = set || prefab.objects[e].components.iter().any(|(_, x)| matches!(x, Component::Other(82)));
+                        let near = (senabled && has).then(|| array(sv, "Near").map(<[_]>::len)).transpose()?;
+                        x.sound = Some((inst.objects[e].components[sc], near, field(sv, "DistantSound")?.i64().ok_or("DistantSound")?));
+                        break;
+                    }
+                    stack.extend(prefab.objects[e].children.iter().rev());
+                }
+                if let Some(p) = field(v, "ColliderToDisable")?.pptr().filter(|p| !p.is_null()) {
+                    let (co, cc) = prefab.index[&ObjRef { file: l.file, path_id: p.path_id }];
+                    if co != o {
+                        unimplemented!("BulbBehaviour.ColliderToDisable on another object");
+                    }
+                    x.collider = Some(inst.objects[co].components[cc]);
+                }
                 x.index = c;
                 x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
                 bulbs.insert(o, self.bulbs.len());
@@ -1641,7 +1674,7 @@ impl Game {
                 self.tr_link(b, name, val);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -1664,7 +1697,10 @@ impl Game {
             self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
-        self.queue_starts(db, prefab, &inst, &linked, &behaviours)?;
+        self.queue_starts(Some(&mut *db), prefab, &inst, &linked, &behaviours)?;
+        if inst.objects.iter().any(|x| !x.activated) {
+            self.first_activation.insert(inst.objects[0].components[0], linked.clone());
+        }
         Ok((inst, linked))
     }
 
@@ -1701,7 +1737,7 @@ impl Game {
 
     /// Transform.SetParent(null) of the clone object holding component `id`, when it has a parent; `before` runs
     /// first with the parent.
-    fn set_parent_null_of(&mut self, id: i32, before: impl FnOnce(&mut Game, &mut Instance, usize)) {
+    pub(super) fn set_parent_null_of(&mut self, id: i32, before: impl FnOnce(&mut Game, &mut Instance, usize)) {
         let moved = self.with_component_instance(id, |g, inst, o| {
             let Some(parent) = inst.objects[o].parent else { return false };
             before(g, inst, parent);
@@ -1737,10 +1773,17 @@ impl Game {
         let prefab = inst.prefab.clone();
         let subtree: Vec<usize> = std::iter::once(o).chain(inst.descendants(o)).collect();
         // The clone's Transforms are the pose only until the bodies first move.
+        // A PhysicalBehaviour's Transform is kept live (write-back, refresh_nested), so it gives the world pose then.
+        let mut live = None;
         if let Some(&b) = inst.bodies.get(&o) {
             let (pos, xf) = (inst.position(o), self.world.body(b).xf.p);
             if pos[0] != xf.x || pos[1] != xf.y {
-                unimplemented!("{}: Transform.SetParent after its body moved (the clone's Transforms are stale)", prefab.objects[o].name);
+                let p = self.physicals.iter().position(|p| inst.objects[o].components.contains(&p.id)).filter(|&p| self.physicals[p].transform.local.is_some());
+                let Some(p) = p else {
+                    unimplemented!("{}: Transform.SetParent after its body moved (the clone's Transforms are stale)", prefab.objects[o].name);
+                };
+                let t = &self.physicals[p].transform;
+                live = Some((t.position, t.rotation, self.lossy_scale(p)));
             }
         }
         let bodies: Vec<_> = subtree.iter().filter_map(|x| inst.bodies.get(x).copied()).collect();
@@ -1749,7 +1792,10 @@ impl Game {
                 unimplemented!("{}: SetParent(null) moves a Collider2D off its Rigidbody2D (Collider2D::ParentChanged)", prefab.objects[x].name);
             }
         }
-        inst.set_parent_null(o);
+        match live {
+            Some(world) => inst.set_parent_null_at(o, world),
+            None => inst.set_parent_null(o),
+        }
         let transform = inst.objects[o].components[0];
         let physical = self.physicals.iter().position(|p| inst.objects[o].components.contains(&p.id));
         let node = self.transform_nodes.iter().position(|n| n.id == transform);
@@ -1770,21 +1816,11 @@ impl Game {
                 continue;
             }
             let id = inst.objects[x].components[k];
-            let (rb, driven_by) = match self.physicals.iter().position(|p| p.rigidbody.component == id) {
-                Some(p) => {
-                    let ph = &mut self.physicals[p];
-                    (&mut ph.rigidbody, ph.driven_by)
-                }
-                None => {
-                    let n = self.node_rigidbodies.iter().position(|n| n.rigidbody.component == id).expect("a Rigidbody2D outside the arenas");
-                    let nb = &mut self.node_rigidbodies[n];
-                    (&mut nb.rigidbody, nb.driven_by)
-                }
-            };
-            if driven_by.is_some_and(|b| !bodies.contains(&b)) {
-                unimplemented!("{}: SetParent(null) of a Rigidbody2D driven by a body above it", prefab.objects[x].name);
-            }
-            rb.movement.interpolating = false;
+            let owner = self.rigidbody_owner(id).expect("a Rigidbody2D outside the arenas");
+            // CheckForDrivenByParentRigidbody(null): the nearest ancestor Rigidbody2D drives a non-static one.
+            let driven_by = self.rigidbody2d_driven_by(inst, &prefab, x, self.owner_rigidbody(owner).bodyType);
+            self.set_driven_by(owner, driven_by);
+            self.owner_rigidbody_mut(owner).movement.interpolating = false;
             self.rigidbody_hierarchy_changed = true;
         }
     }
@@ -2076,6 +2112,7 @@ impl Game {
                 "ThrusterbedBehaviour" => Some(Behaviour::Thrusterbed(linked.thrusterbeds[&o])),
                 "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
                 "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
+                "PointLiquidTransferBehaviour" => Some(Behaviour::PointLiquid(linked.point_liquids[&o])),
                 name if super::translated::CLASSES.contains(&name) => Some(Behaviour::Translated(linked.translated[&(o, c)])),
                 _ => None,
             };
@@ -2143,7 +2180,7 @@ impl Game {
     /// LateUpdate). Each PhysicalBehaviour's `hash_code` must be set by then: Random.InitState(GetHashCode()) takes
     /// Mono's object hash. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts only
     /// touch rendering, event subscriptions and the stat manager.
-    pub fn queue_starts(&mut self, db: &mut AssetDb, prefab: &Prefab, inst: &Instance, linked: &Linked, order: &[(usize, usize)]) -> Result<(), String> {
+    pub fn queue_starts(&mut self, mut db: Option<&mut AssetDb>, prefab: &Prefab, inst: &Instance, linked: &Linked, order: &[(usize, usize)]) -> Result<(), String> {
         use super::misc::PendingStart;
         for &(o, c) in order {
             let Component::Script { class, fields: v, enabled, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
@@ -2245,6 +2282,7 @@ impl Game {
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {
+                    let db = db.as_deref_mut().unwrap_or_else(|| unimplemented!("MapConfig.Start on a first GameObject.SetActive(true)"));
                     let file = prefab.objects[o].game_object.file;
                     let mut weather = Vec::new();
                     for prefab_field in ["SnowPrefab", "RainPrefab", "FogPrefab", "LightningCreatorPrefab"] {
@@ -2389,7 +2427,7 @@ mod tests {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
-        g.queue_starts(&mut db, &prefab, &inst, &linked, &order).unwrap();
+        g.queue_starts(Some(&mut db), &prefab, &inst, &linked, &order).unwrap();
         g.run_pending_starts();
         assert!(g.physicals.iter().all(|p| p.in_world));
         // The first frame's render: OnWillRenderObject fills the blood colour caches.

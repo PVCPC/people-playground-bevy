@@ -123,6 +123,11 @@ script! {
         Phys: usize = 0,
         /// OtherPart: the clone's object index.
         OtherPart: Option<usize> = None,
+        /// Explosion's ExplosionSoundBehviour (GetComponentInChildren): its instance id, the Near count when Play
+        /// draws (enabled, with an AudioSource) and its DistantSound.
+        sound: Option<(i32, Option<usize>, i64)> = None,
+        /// ColliderToDisable's instance id (a collider on the bulb's own object).
+        collider: Option<i32> = None,
         /// private flicker
         flicker: bool = false,
         /// The component's index on its GameObject, and whether the PhysicalBehaviour precedes it.
@@ -471,14 +476,48 @@ impl Game {
         self.bulb_break(i);
     }
 
-    /// BulbBehaviour.Break(velocity): the velocity is unused. The explosion and its sound, the sprites and the
-    /// Filament and LightSprite renderers are presentation.
+    /// BulbBehaviour.Break(velocity): the velocity is unused. The explosion's particles, the sprites and the Filament
+    /// and LightSprite renderers are presentation.
     pub fn bulb_break(&mut self, i: usize) {
-        self.bulbs[i].Broken = true;
-        if self.bulbs[i].OtherPart.is_some() {
-            unimplemented!("BulbBehaviour.Break: OtherPart.SetActive(true) on an object that never ran Awake and Start (its PhysicalBehaviour), SetParent(null) and the DebrisComponents");
+        if !self.bulbs[i].Broken {
+            // Explosion.GetComponentInChildren<ExplosionSoundBehviour>().Play(): Near.PickRandom(), then the delayed
+            // distant sound (audio is not simulated).
+            let (id, near, distant) = self.bulbs[i].sound.unwrap_or_else(|| unimplemented!("BulbBehaviour.Break: an Explosion without an ExplosionSoundBehviour (NullReferenceException)"));
+            if let Some(n) = near {
+                self.pick_random(n);
+                if self.prefs.DistantSoundEffects && distant != 0 {
+                    self.start_wait(id, 0.0, Step::DistantSound(distant));
+                }
+            }
+            self.bulbs[i].Broken = true;
         }
-        unimplemented!("BulbBehaviour.Break: ColliderToDisable.enabled = false");
+        if let Some(other) = self.bulbs[i].OtherPart {
+            let id = self.bulbs[i].id;
+            // OtherPart.SetActive(true): its first activation wakes the scripts it carries.
+            let other_id = self.with_component_instance(id, |g, inst, _| {
+                g.set_active_scripts(inst, other, true);
+                inst.objects[other].components[0]
+            });
+            // OtherPart.transform.SetParent(null)
+            self.set_parent_null_of(other_id, |_, _, _| {});
+            // OtherPart.GetOrAddComponent<DebrisComponent>() and this GameObject's.
+            self.with_component_instance(id, |g, inst, o| {
+                g.get_or_add_debris(inst, other);
+                g.get_or_add_debris(inst, o);
+            });
+        }
+        // ColliderToDisable.enabled = false (Collider2D::SetEnabled).
+        let collider = self.bulbs[i].collider.unwrap_or_else(|| unimplemented!("BulbBehaviour.Break: ColliderToDisable is null (NullReferenceException)"));
+        let body = self.physicals[self.bulbs[i].Phys].rigidbody.body;
+        self.collider_disable_one(collider, body);
+    }
+
+    /// GetOrAddComponent<DebrisComponent> on clone object `o`: a new one takes an instance id (it has no messages).
+    fn get_or_add_debris(&mut self, inst: &super::spawn::Instance, o: usize) {
+        let has = inst.prefab.objects[o].components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "DebrisComponent"));
+        if !has && self.debris_added.insert(inst.objects[o].components[0]) {
+            self.allocate_instance_id();
+        }
     }
 
     /// LineRenderer.transform's position and rotation: its local TRS up to the gun's object, then the gun's chain.

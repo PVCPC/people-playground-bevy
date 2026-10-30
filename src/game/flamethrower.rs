@@ -103,8 +103,29 @@ impl Game {
     }
 
     /// Physics2D.CircleCast(origin, radius, direction, distance, layerMask): the point of the nearest hit.
-    fn circle_cast_first(&mut self, _origin: [f32; 2], _radius: f32, _direction: [f32; 2], _distance: f32, _mask: u32) -> Option<[f32; 2]> {
-        unimplemented!("Physics2D.CircleCast: Cast2DQueryBase::RunQuery (ShapeCast2DQuery, 180bf7af0) is not rewritten")
+    /// PhysicsQuery2D::CircleCast (180be9100) normalizes the direction (a zero one stays zero), casts to
+    /// origin + distance * direction and keeps the first hit of Cast2DQueryBase::RunQuery's sorted contacts.
+    fn circle_cast_first(&mut self, origin: [f32; 2], radius: f32, direction: [f32; 2], distance: f32, mask: u32) -> Option<[f32; 2]> {
+        if 0.0001f32 >= radius {
+            return None;
+        }
+        if distance == f32::INFINITY {
+            unimplemented!("Physics2D.CircleCast with an infinite distance (it casts 100000 and scales the fractions back)");
+        }
+        self.sync_pending();
+        let sqr = direction[0] * direction[0] + direction[1] * direction[1];
+        let dir = if sqr != 0.0 {
+            let inv = 1.0f32 / sqr.sqrt();
+            [direction[0] * inv, direction[1] * inv]
+        } else {
+            [0.0, 0.0]
+        };
+        let end = V::new(origin[0] + dir[0] * distance, origin[1] + dir[1] * distance);
+        let mut candidates = self.world.circle_cast_candidates(V::new(origin[0], origin[1]), end, radius, mask);
+        super::sort::msvc_sort(&mut candidates, |a, b| a.fraction < b.fraction);
+        let mut r = radius;
+        // RaycastHit2D.transform is the collider's (or its Rigidbody2D's) Transform: never null here.
+        candidates.iter().find_map(|c| self.world.circle_cast_hit(c, &mut r)).map(|h| [h.point.x, h.point.y])
     }
 
     /// FlamethrowerBehaviour.AffectPoint: Physics2D.OverlapCircleNonAlloc(worldPoint, 0.1f, buffer[32]).

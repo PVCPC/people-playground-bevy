@@ -988,6 +988,7 @@ pub enum Behaviour {
     HeatingElement(usize),
     RayGun(usize),
     Bulb(usize),
+    PointLiquid(usize),
     Thrusterbed(usize),
     Piston(usize),
     Flamethrower(usize),
@@ -1027,6 +1028,7 @@ impl Behaviour {
             Behaviour::HeatingElement(_) => "HeatingElementBehaviour",
             Behaviour::RayGun(_) => "TemperatureRayGunBehaviour",
             Behaviour::Bulb(_) => "BulbBehaviour",
+            Behaviour::PointLiquid(_) => "PointLiquidTransferBehaviour",
             Behaviour::Thrusterbed(_) => "ThrusterbedBehaviour",
             Behaviour::Piston(_) => "PistonBehaviour",
             Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
@@ -1144,6 +1146,7 @@ pub struct Game {
     pub cars: Vec<car::CarBehaviour>,
     pub tyres: Vec<tyre::TyreDeflationBehaviour>,
     pub flasks: Vec<flask::Flask>,
+    pub point_liquids: Vec<flask::PointLiquidTransfer>,
     pub liquid_containers: Vec<flask::LiquidContainer>,
     pub glowtubes: Vec<light::Glowtube>,
     pub leds: Vec<light::LedBulb>,
@@ -1183,6 +1186,11 @@ pub struct Game {
     /// The components of destroyed GameObjects (they read null).
     pub destroyed_components: std::collections::HashSet<i32>,
     pub act_on_destroy: HashMap<i32, destroyable::ActOnDestroy>,
+    /// What `spawn` linked of each clone with an object that was inactive when it spawned (by the id of the root
+    /// Transform): the first GameObject.SetActive(true) of such an object runs its scripts' Awake with it.
+    pub first_activation: HashMap<i32, link::Linked>,
+    /// The GameObjects (by the id of their Transform) that GetOrAddComponent<DebrisComponent> added one to.
+    pub debris_added: std::collections::HashSet<i32>,
     pub dwacds: Vec<destroyable::DestroyWhenAllChildrenDestroyed>,
     /// level1's DistantSoundBehaviour clip counts, by SoundType - 1 (SmallExplosion .. LargeFirearm).
     pub distant_sounds: [usize; 6],

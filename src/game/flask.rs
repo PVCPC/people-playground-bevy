@@ -1,7 +1,7 @@
 //! FlaskBehaviour and GasTankBehaviour (a BloodContainer outside a limb), and the LiquidContainerController of a flask.
 //! Only liquids whose container hooks are empty outside a CirculationBehaviour (OIL, BLOOD, GORSE BLOOD) can enter
 //! one; any other liquid stops at its hook. The flasks' PointLiquidTransferBehaviour acts only while the object is being used
-//! continuously, which nothing can start yet (ToolController.UseContinuous is unimplemented), so it has no code.
+//! continuously (FixedUpdate).
 #![allow(non_snake_case)]
 
 use super::circulation::{mix_instructions, RefFloat, LIQUIDS};
@@ -28,7 +28,39 @@ script! {
         LiquidDistribution: CsDict<usize, RefFloat> = CsDict::default(),
         /// LiquidContainer, the LiquidContainerController whose fill Update sets.
         LiquidContainer: Option<usize> = None,
+        /// GetComponent<PhysicalBehaviour>()
+        Phys: Option<usize> = None,
     }
+}
+
+script! {
+    PointLiquidTransfer {
+        Point: [f32; 2] = [0.0, 0.0],
+        /// UnityEngine.Space: World 0, Self 1.
+        Space: i32 = 0,
+        UnitsPerSecond: f32 = 0.56,
+    }
+    links {
+        /// GetComponent<PhysicalBehaviour>()
+        Phys: usize = 0,
+        /// GetComponent<BloodContainer>(): the `Game::flasks` index (the prefabs put it on a flask).
+        Flask: usize = 0,
+        /// Layers (LayerMask bits)
+        Layers: u32 = 0,
+    }
+}
+
+/// BloodContainer's subclasses.
+const BLOOD_CONTAINERS: &[&str] = &[
+    "BloodTankBehaviour", "CentrifugeBehaviour", "CirculationBehaviour", "FlaskBehaviour", "GasTankBehaviour", "InspectorLiquidContainer",
+    "LiquidCanisterBehaviour", "LiquidDuplicatorBehaviour", "LiquidFilterBehaviour", "LiquidOutletBehaviour", "LiquidPumpBehaviour",
+    "LiquidentifierBehaviour", "ReactorConduitBehaviour", "SyringeBehaviour", "ValveBehaviour",
+];
+
+/// The BloodContainer a collider's GameObject carries.
+enum Container {
+    Limb(usize),
+    Flask(usize),
 }
 
 /// LiquidContainerController: its particles, colour and sound are rendering and audio; the Random draws and the
@@ -142,6 +174,123 @@ impl Game {
             let scaled = mathf::map_range(0.0, s.limit, 0.0, 1.0, s.TotalLiquidAmount);
             self.liquid_containers[c].FillPercentage = mathf::clamp(scaled, 0.0, 1.0);
         }
+    }
+
+    /// BloodContainer.RemoveLiquid in a flask: UpperLimit is Limits.y (it does not allow overflow).
+    fn flask_remove_liquid(&mut self, f: usize, liquid: usize, amount: f32) -> f32 {
+        if amount <= mathf::EPSILON {
+            return 0.0;
+        }
+        let s = &mut self.flasks[f];
+        let mut num = mathf::clamp(s.TotalLiquidAmount - amount, 0.0, s.limit) - s.TotalLiquidAmount;
+        if num.is_nan() || num >= -1e-45 {
+            return 0.0;
+        }
+        if let Some(r) = s.LiquidDistribution.get_mut(liquid) {
+            if r.raw + num < 0.0 {
+                num = 0.0 - r.raw;
+            }
+            s.TotalLiquidAmount += num;
+            let v = r.raw + num;
+            r.set_raw(v);
+        }
+        s.isComputedColourCached = false;
+        s.shouldDeleteEmptyEntries = true;
+        num
+    }
+
+    /// BloodContainer.TransferTo(float, BloodContainer, proportional = true) from a flask. Neither behaviour is ever
+    /// disabled (the flask scripts have no code that does it); a limb's `enabled` is read.
+    fn flask_transfer_to(&mut self, f: usize, amount: f32, to: &Container) -> f32 {
+        if let Container::Limb(l) = *to {
+            if !self.circulations[l].enabled {
+                return 0.0;
+            }
+        }
+        if amount <= mathf::EPSILON {
+            return 0.0;
+        }
+        let total = self.flasks[f].TotalLiquidAmount;
+        let mut num = 0.0;
+        // The enumerator throws if the dictionary changes; a removal only changes values.
+        let keys: Vec<usize> = self.flasks[f].LiquidDistribution.iter().map(|(k, _)| *k).collect();
+        for key in keys {
+            let raw = self.flasks[f].LiquidDistribution.get(key).unwrap().raw;
+            // Evaluated in double, rounded at the store.
+            let amount2 = (super::d(amount) * (super::d(raw) / total)).f();
+            // TransferTo(Liquid, float, BloodContainer)
+            if amount2 <= mathf::EPSILON {
+                continue;
+            }
+            let removed = self.flask_remove_liquid(f, key, amount2).abs();
+            if removed > mathf::EPSILON {
+                match *to {
+                    Container::Limb(l) => {
+                        self.add_liquid(l, key, removed);
+                    }
+                    Container::Flask(t) => {
+                        self.flask_add_liquid(t, key, removed);
+                    }
+                }
+            }
+            num += removed;
+        }
+        num
+    }
+
+    /// PointLiquidTransferBehaviour.FixedUpdate
+    pub fn point_liquid_fixed_update(&mut self, i: usize) {
+        let phys = self.point_liquids[i].Phys;
+        if !self.used_continuously(phys) {
+            return;
+        }
+        // Transfer(Time.fixedDeltaTime)
+        let s = &self.point_liquids[i];
+        let (flask, units, point, space, mask) = (s.Flask, s.UnitsPerSecond, s.Point, s.Space, s.Layers);
+        let amount = units * self.time.fixedDeltaTime;
+        // GetPoint: Space.World is the point, anything else base.transform.TransformPoint(Point).
+        let at = if space == 0 {
+            point
+        } else {
+            let w = self.transform_point3(phys, [point[0], point[1], 0.0]);
+            [w[0], w[1]]
+        };
+        // Physics2D.OverlapPoint(point, Layers); the lowest-z collider, whose GameObject must not be this one and must
+        // carry a BloodContainer (a limb's CirculationBehaviour or a flask).
+        let Some((hit, collider)) = self.overlap_point_first(at, mask) else { return };
+        let Some(q) = hit else {
+            if self.bare_colliders[&collider].scripts.iter().any(|s| BLOOD_CONTAINERS.contains(&s.as_str())) {
+                unimplemented!("PointLiquidTransferBehaviour: a BloodContainer on a collider without a PhysicalBehaviour");
+            }
+            return;
+        };
+        if q == phys {
+            return;
+        }
+        let target = if let Some(l) = self.limbs.iter().position(|x| x.PhysicalBehaviour == q) {
+            Container::Limb(l)
+        } else if let Some(t) = self.flasks.iter().position(|x| x.Phys == Some(q)) {
+            Container::Flask(t)
+        } else {
+            let other = self.with_component_instance(self.physicals[q].id, |_, inst, o| {
+                inst.prefab.objects[o].components.iter().find_map(|(_, c)| match c {
+                    crate::assets::db::Component::Script { class, .. } if BLOOD_CONTAINERS.contains(&class.as_str()) => Some(class.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(class) = other {
+                unimplemented!("PointLiquidTransferBehaviour into a {class}");
+            }
+            return;
+        };
+        // !component.IsFull() || component.AllowsOverflow: a limb allows overflow, a flask does not.
+        if let Container::Flask(t) = target {
+            let s = &self.flasks[t];
+            if mathf::map_range(0.0, s.limit, 0.0, 1.0, s.TotalLiquidAmount) >= 0.999 {
+                return;
+            }
+        }
+        self.flask_transfer_to(flask, amount, &target);
     }
 
     /// LiquidContainerController.Awake: with FancyEffects the 16 particles take a random position each, x then y.

@@ -129,10 +129,6 @@ impl Game {
                     let cid = inst.objects[x].components[k];
                     if class == "PhysicalBehaviour" {
                         let q = g.physicals.iter().position(|ph| ph.id == cid).expect("a PhysicalBehaviour in the arena");
-                        // PointLiquidTransferBehaviour.FixedUpdate transfers while its PhysicalBehaviour is being used.
-                        if inst.prefab.objects[x].components.iter().any(|(_, c)| matches!(c, Component::Script { class, .. } if class == "PointLiquidTransferBehaviour")) {
-                            unimplemented!("PointLiquidTransferBehaviour.FixedUpdate: IsBeingUsedContinuously");
-                        }
                         out.push(Receiver::Physical(q));
                         continue;
                     }
