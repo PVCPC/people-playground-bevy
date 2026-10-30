@@ -101,7 +101,7 @@ fn manifold_words(m: &Manifold) -> Vec<u32> {
 }
 
 /// load_body's words back from a body (b2Body 0x00-0x58).
-fn body_words(b: &Body) -> Vec<u32> {
+pub(crate) fn body_words(b: &Body) -> Vec<u32> {
     let kind = match b.kind {
         BodyType::Static => 0,
         BodyType::Kinematic => 1,

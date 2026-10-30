@@ -12,6 +12,7 @@ pub mod misc;
 pub mod person;
 pub mod physical;
 pub mod shatter;
+pub mod spawn;
 pub mod simulate;
 pub mod stab;
 pub mod temperature;
@@ -756,6 +757,10 @@ pub struct Game {
     pub layers: HashMap<i32, i32>,
     /// The restore's GameObject ids by name.
     pub objects: HashMap<String, i32>,
+    /// The id Object.Instantiate gives its next clone (ids go down by 2).
+    pub next_instance_id: i32,
+    /// Physics2DSettings.m_DefaultMaterial's (friction, bounciness); None without one.
+    pub default_material2d: Option<(f32, f32)>,
 }
 
 impl Default for Random {
