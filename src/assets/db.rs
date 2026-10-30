@@ -49,7 +49,7 @@ pub struct PrefabObject {
 }
 
 /// A GameObject hierarchy, root first, children in Transform order (depth first).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Prefab {
     pub objects: Vec<PrefabObject>,
     /// Component or GameObject -> (object index, component index; usize::MAX for the GameObject itself).

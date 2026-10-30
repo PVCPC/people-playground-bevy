@@ -48,7 +48,7 @@ impl Record {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
     }
-    fn req(&self, key: &str) -> Result<&str, String> {
+    pub(crate) fn req(&self, key: &str) -> Result<&str, String> {
         self.get(key).ok_or_else(|| format!("{} {}: no field {key}", self.ty, self.name))
     }
 }

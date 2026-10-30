@@ -933,6 +933,19 @@ impl World {
 
     /// b2Body::ResetMassData (180bb9e80): Unity takes the mass, inertia and centre from the Rigidbody2D.
     pub fn reset_mass_data(&mut self, body_id: BodyId) {
+        let b = self.body_mut(body_id);
+        b.mass = 0.0;
+        b.inv_mass = 0.0;
+        b.i = 0.0;
+        b.inv_i = 0.0;
+        b.sweep.local_center = Vec2::ZERO;
+        if b.kind < BodyType::Dynamic {
+            b.sweep.c0 = b.xf.p;
+            b.sweep.c = b.xf.p;
+            b.sweep.a0 = b.sweep.a;
+            return;
+        }
+        // Only a dynamic body's fixtures cache their mass data.
         let masses: Vec<(FixtureId, MassData)> = self
             .body(body_id)
             .fixtures
@@ -946,17 +959,6 @@ impl World {
             self.fixtures[f].as_mut().unwrap().mass_data = md;
         }
         let b = self.body_mut(body_id);
-        b.mass = 0.0;
-        b.inv_mass = 0.0;
-        b.i = 0.0;
-        b.inv_i = 0.0;
-        b.sweep.local_center = Vec2::ZERO;
-        if b.kind < BodyType::Dynamic {
-            b.sweep.c0 = b.xf.p;
-            b.sweep.c = b.xf.p;
-            b.sweep.a0 = b.sweep.a;
-            return;
-        }
         let mut center = Vec2::ZERO;
         for (_, md) in &masses {
             b.mass = md.mass + b.mass;

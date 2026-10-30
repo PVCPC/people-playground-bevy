@@ -1,7 +1,8 @@
 //! The Main scene (level1) as SceneManager loads it: the serialized state of the scene objects the simulation
 //! reads, with the Awake/Start effects that touch it. A scene object's instance id is the scene's base id plus
 //! twice its index in the file (traced under cdb), so the file order is the id order.
-use super::{temperature::AmbientTemperatureGridBehaviour, Game, PlayAudioAtRandom, Prefs};
+use super::{temperature::AmbientTemperatureGridBehaviour, tool::Tool, Game, PlayAudioAtRandom, Prefs};
+use crate::b2::world::BodyId;
 use crate::assets::classes::{MonoBehaviour, Transform};
 use crate::assets::db::{AssetDb, ObjRef};
 use crate::assets::mono::Value;
@@ -14,6 +15,7 @@ struct SceneScript {
     class: String,
     runs: bool,
     fields: Value,
+    game_object: ObjRef,
 }
 
 /// Every MonoBehaviour of a scene file, in file order.
@@ -25,7 +27,8 @@ fn scene_scripts(db: &mut AssetDb, scene: &str) -> Result<Vec<SceneScript>, Stri
         let r = ObjRef { file, path_id };
         let Some((script, mb, fields)) = db.mono(r)? else { continue };
         let runs = mb.enabled && active_in_hierarchy(db, file, &mb)?;
-        out.push(SceneScript { class: script.class_name, runs, fields });
+        let game_object = db.resolve(file, mb.game_object).ok_or("a behaviour without its GameObject")?;
+        out.push(SceneScript { class: script.class_name, runs, fields, game_object });
     }
     Ok(out)
 }
@@ -61,6 +64,55 @@ impl Game {
         self.time.maximumDeltaTime = super::mathf::max(r.f32()?, self.time.fixedDeltaTime);
         self.time.timeScale = r.f32()?;
         Ok(())
+    }
+
+    /// The scene's ToolController after ToolControllerBehaviour.Start (`body` is its Rigidbody2D). SetTool(0)
+    /// adds ToolLibrary.Tools[0]'s component and calls OnToolChosen: the DragTool starts at its field
+    /// initializers (rotationSpeed 1) with isActive set, and its Awake only subscribes to
+    /// ContinuousActivationBehaviour. The SelectionController's selection starts empty.
+    pub fn scene_tool(db: &mut AssetDb, body: BodyId) -> Result<Tool, String> {
+        let scripts = scene_scripts(db, "level1")?;
+        let running = |class: &str| scripts.iter().find(|s| s.runs && s.class == class).ok_or_else(|| format!("level1 has no running {class}"));
+        let library = running("ToolLibrary")?;
+        let first = library.fields.get("Tools").and_then(Value::array).and_then(|t| t.first()).ok_or("ToolLibrary.Tools is empty")?;
+        let Some(Value::Str(ty)) = first.get("Type") else { return Err("ToolLibrary.Tool.Type".into()) };
+        if ty != "DragTool" {
+            unimplemented!("ToolControllerBehaviour.SetTool(0) of a {ty}");
+        }
+        let controller = running("ToolControllerBehaviour")?;
+        let mask = controller.fields.get("SelectionLayer").and_then(|m| m.get("m_Bits")).and_then(Value::i64).ok_or("SelectionLayer")?;
+        let g = db.game_object(controller.game_object)?;
+        let t = g.components.iter().filter_map(|&c| db.resolve(controller.game_object.file, c)).find(|&c| db.class(c) == 4).ok_or("ToolController without a Transform")?;
+        let t = Transform::read(db.data(t))?;
+        if !t.father.is_null() {
+            return Err("ToolController is not a root object".into());
+        }
+        Ok(Tool {
+            body,
+            position: t.local_position,
+            rotation: t.local_rotation,
+            SelectionLayer: mask as u32,
+            isCurrentlyHolding: false,
+            currentlyHovering: None,
+            isSelecting: false,
+            selectionDragStart: [0.0; 2],
+            rawSelection: Vec::new(),
+            hover: None,
+            offset: [0.0; 2],
+            dragJoint: None,
+            destroying: Vec::new(),
+            controlRotation: false,
+            selectedRigidbody: None,
+            rotationSpeed: 1.0,
+            currentRotation: 0.0,
+            snappedMouseDelta: [0.0; 3],
+            prevMousePos: [0.0; 3],
+            initialSnappingFinished: false,
+            isActive: true,
+            shouldSendContinuousUseMessage: false,
+            initialTranslationSnapOffset: [0.0; 3],
+            ActiveSingleSelected: None,
+        })
     }
 
     /// SceneManager.LoadScene("Main"): the scene objects' serialized state and the Awake/Start effects the
@@ -137,5 +189,21 @@ mod tests {
         let d = AmbientTemperatureGridBehaviour::default();
         let x = &g.ambient_grid;
         assert_eq!((x.ObjectToAirTransferRate, x.AirToObjectTransferRate, x.AmbientTemperatureTransferRate, x.GridSize), (d.ObjectToAirTransferRate, d.AirToObjectTransferRate, d.AmbientTemperatureTransferRate, d.GridSize));
+    }
+
+    /// ToolControllerBehaviour.Start's state against the first snapshot of a recording that dumps the tool.
+    #[test]
+    fn scene_tool_matches_recording() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let dump = Path::new(env!("CARGO_MANIFEST_DIR")).join("reference-probe/game/dump22drag.txt");
+        let Ok(mut snaps) = super::super::dump::snapshots(&dump) else { return };
+        let first = snaps.next().unwrap();
+        let t = Game::scene_tool(&mut db, 0).unwrap();
+        let (r, d) = (first.of("ToolControllerBehaviour").next().unwrap(), first.of("DragTool").next().unwrap());
+        assert_eq!(format!("LayerMask(m_Mask={})", t.SelectionLayer), r.req("SelectionLayer").unwrap());
+        assert_eq!((t.isCurrentlyHolding, t.isSelecting), (r.req("isCurrentlyHolding").unwrap() == "1", r.req("isSelecting").unwrap() == "1"));
+        assert_eq!((t.isActive, format!("{:08x}", t.rotationSpeed.to_bits())), (d.req("isActive").unwrap() == "1", d.req("rotationSpeed").unwrap().to_string()));
+        assert_eq!(d.req("dragJoint").unwrap(), "null");
     }
 }
