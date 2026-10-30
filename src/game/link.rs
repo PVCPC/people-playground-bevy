@@ -556,7 +556,7 @@ impl Game {
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
             let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
-            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
+            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale], constraints: rb.constraints };
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             let mut driven_by = None;
             if rb.body_type != 2 && detached.is_none() {
@@ -652,7 +652,7 @@ impl Game {
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
             let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
-            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
+            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, simulated: rb.simulated, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale], constraints: rb.constraints };
             // Rigidbody2D::Create set the scene's m_RigidbodyHierarchyChanged.
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             p.transform = pose(inst, o);
@@ -1679,6 +1679,26 @@ impl Game {
                     let after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
                     self.tr.collision_scripts.push(super::translated::rt::CollisionScript { physical, index: c, after_physical, b });
                 }
+                let trigger = ["OnTriggerEnter2D", "OnTriggerStay2D", "OnTriggerExit2D"].iter().any(|m| super::translated::receives(class, m));
+                let joint_break = super::translated::receives(class, "OnJointBreak2D");
+                if trigger || joint_break {
+                    // SendMessage goes to the receiving GameObject's scripts: select it by that object's components.
+                    let ids = |f: fn(&Component) -> bool| -> Vec<i32> { (0..prefab.objects[o].components.len()).filter(|&k| f(&prefab.objects[o].components[k].1)).map(|k| inst.objects[o].components[k]).collect() };
+                    let after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                    if trigger && script(prefab, o, "WaterBehaviour").is_some() {
+                        unimplemented!("{class} next to a WaterBehaviour: OnTrigger*2D component order");
+                    }
+                    self.message_scripts.push(super::messages::MessageScript {
+                        colliders: ids(|x| matches!(x, Component::Collider2D(_))),
+                        rigidbodies: ids(|x| matches!(x, Component::Rigidbody2D(_))),
+                        joints: ids(|x| matches!(x, Component::Joint2D(_))),
+                        index: c,
+                        after_physical,
+                        b,
+                        trigger,
+                        joint_break,
+                    });
+                }
             }
         }
         for (&(o, c), &b) in &translated {
@@ -1724,6 +1744,16 @@ impl Game {
                     }),
                     K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
                     K::Hinge => V::Hinge(hinge(x)?),
+                    K::Collider => V::Collider(match x.pptr().ok_or(name)? {
+                        p if p.is_null() => 0,
+                        p => {
+                            let (o, c) = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or_else(|| format!("{class}.{name} outside the prefab"))?;
+                            if !matches!(prefab.objects[o].components[c].1, Component::Collider2D(_)) {
+                                return Err(format!("{class}.{name}: not a Collider2D"));
+                            }
+                            inst.objects[o].components[c]
+                        }
+                    }),
                     K::Hinges => V::Hinges(x.array().ok_or(name)?.iter().map(&hinge).collect::<Result<_, _>>()?),
                     K::Event => V::Event(event_calls(prefab, file, x, inst, &format!("{class}.{name}"), true)?),
                     K::Handwritten(arena) => V::Handwritten(match l.object(x)? {
@@ -2071,10 +2101,17 @@ impl Game {
                 }
                 name if super::translated::CLASSES.contains(&name) => {
                     let b = linked.translated[&(o, c)];
+                    // The translated code reaches its clone through the instance lists.
+                    let root = inst.objects[0].components[0];
+                    self.unsynced.push(std::mem::take(inst));
+                    self.awaking = true;
                     self.tr_awake(b);
                     if *enabled {
                         self.tr_on_enable(b);
                     }
+                    self.awaking = false;
+                    let at = self.unsynced.iter().rposition(|i| i.objects[0].components[0] == root).expect("the instance being awoken");
+                    *inst = self.unsynced.remove(at);
                 }
                 "LiquidContainerController" => self.liquid_container_awake(linked.liquid_containers[&o]),
                 // No Awake; its OnEnable follows here.

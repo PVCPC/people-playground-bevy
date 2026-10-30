@@ -267,6 +267,9 @@ impl Game {
     pub fn tr_set_active(&mut self, go: Go, v: bool) {
         self.with_component_instance(go.local(), |g, inst, o| {
             if inst.objects[o].self_active != v {
+                if g.awaking {
+                    unimplemented!("GameObject.SetActive({v}) in an Awake/OnEnable during Instantiate (the Awake pass skips inactive objects)");
+                }
                 g.set_active_scripts(inst, o, v);
             }
         });
@@ -334,4 +337,13 @@ impl Game {
     pub fn tr_raycast(&mut self, origin: [f32; 2], direction: [f32; 2], distance: f32, mask: u32) -> Option<RayHit2D> {
         self.raycast(V::new(origin[0], origin[1]), direction, distance, mask, f32::NEG_INFINITY, f32::INFINITY)
     }
+}
+
+/// UnityEngine.Object == on two Collider2Ds (Object.CompareBaseObjects): two references are equal by instance id;
+/// a null one (0) equals the other only when that one is destroyed.
+pub fn collider_eq(a: i32, b: i32) -> bool {
+    if (a == 0) != (b == 0) {
+        unimplemented!("Collider2D == null: whether a collider is still alive");
+    }
+    a == b
 }

@@ -927,7 +927,7 @@ impl Game {
             return;
         }
         let fallback = self.original_blood_color(l);
-        let colour = self.get_computed_color(l, fallback);
+        let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
         // The loop bound Random.Range(1, 4) is drawn again before each pass.
         let mut i = 0;
         while i < self.random.range_int(1, 4) {

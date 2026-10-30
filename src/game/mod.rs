@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 pub mod ballistics;
 pub mod circulation;
+pub mod container;
 pub mod acts;
 pub mod car;
 pub mod tyre;
@@ -13,6 +14,8 @@ pub mod flask;
 pub mod light;
 pub mod continuous;
 pub mod detector;
+pub mod effector;
+pub mod messages;
 pub mod sort;
 pub mod flamethrower;
 pub mod piston;
@@ -343,6 +346,30 @@ macro_rules! script {
             }
         }
     };
+    // A subclass of a rewritten base class: `base` holds the base's fields, dumped after the subclass's own.
+    ($(#[$m:meta])* $name:ident { $($(#[$fm:meta])* $field:ident : $ty:ty = $default:expr),* $(,)? }
+     base { $bfield:ident : $bty:ty }
+     links { $($(#[$lm:meta])* $lfield:ident : $lty:ty = $ldefault:expr),* $(,)? }) => {
+        $(#[$m])*
+        #[derive(Clone, Debug)]
+        pub struct $name {
+            $($(#[$fm])* pub $field: $ty,)*
+            pub $bfield: $bty,
+            $($(#[$lm])* pub $lfield: $lty,)*
+        }
+        impl Default for $name {
+            fn default() -> Self {
+                Self { $($field: $default,)* $bfield: Default::default(), $($lfield: $ldefault,)* }
+            }
+        }
+        impl $name {
+            pub fn fields(&mut self) -> Vec<(&'static str, &mut dyn $crate::game::Field)> {
+                let mut v = vec![$((stringify!($field), &mut self.$field as &mut dyn $crate::game::Field)),*];
+                v.extend(self.$bfield.fields());
+                v
+            }
+        }
+    };
 }
 pub(crate) use script;
 
@@ -572,6 +599,8 @@ pub struct Rigidbody {
     pub simulated: bool,
     /// While detached, the component's linear drag, angular drag and gravity scale (the next Create reads them).
     pub detached_props: [f32; 3],
+    /// Rigidbody2D.constraints (+0x4c): RigidbodyConstraints2D bits (1 freeze x, 2 freeze y, 4 freeze rotation).
+    pub constraints: i32,
 }
 
 /// RigidbodyMovementState2D (Rigidbody2D+0x98): the body pose before and after the last physics step, and the
@@ -646,6 +675,29 @@ impl Rigidbody {
             }
             b.torque += torque;
         }
+    }
+    /// Rigidbody2D::SetConstraints (180c23360): stored, then b2Body SetFixedPositionX/Y and SetFixedRotation
+    /// (180bba380: on a change, angular velocity 0 and ResetMassData) on a live body.
+    pub fn set_constraints(&mut self, w: &mut World, v: i32) {
+        self.constraints = v;
+        if self.detached.is_some() {
+            return;
+        }
+        if v & 3 != 0 {
+            unimplemented!("Rigidbody2D FreezePositionX/Y (b2Body::SetFixedPositionX/Y)");
+        }
+        let fixed = v & 4 != 0;
+        let b = w.body_mut(self.body);
+        if (b.flags & BODY_FIXED_ROTATION != 0) == fixed {
+            return;
+        }
+        b.angular_velocity = 0.0;
+        if fixed { b.flags |= BODY_FIXED_ROTATION } else { b.flags &= !BODY_FIXED_ROTATION }
+        w.reset_mass_data(self.body);
+    }
+    /// Rigidbody2D.gravityScale: the b2 body's, or the component's own while detached.
+    pub fn gravity_scale(&self, w: &World) -> f32 {
+        if self.detached.is_some() { self.detached_props[2] } else { w.body(self.body).gravity_scale }
     }
     pub fn mass(&self, w: &World) -> f32 {
         self.detached.unwrap_or_else(|| w.body(self.body).rigidbody).mass
@@ -1251,6 +1303,11 @@ pub struct Game {
     pub blood_puffs: Vec<misc::BloodPuff>,
     pub blood_puff_pool: Option<misc::ObjectPool>,
     pub hinges: Vec<Hinge>,
+    /// Every PointEffector2D component, and the indices of those on the scene's UpdateEffectors list (AddToManager order).
+    pub point_effectors: Vec<effector::PointEffector>,
+    pub effector_updates: Vec<usize>,
+    /// The translated components that take OnTrigger*2D / OnJointBreak2D (messages.rs).
+    pub message_scripts: Vec<messages::MessageScript>,
     /// The map's scripts that draw UnityEngine.Random (scene order).
     pub ambient_audio: Vec<PlayAudioAtRandom>,
     pub map_lights: Vec<MapLight>,
@@ -1306,6 +1363,8 @@ pub struct Game {
     pub unsynced: Vec<spawn::Instance>,
     /// Synced instances that hold a WaterBehaviour (its SetActive calls change their objects).
     pub retained: Vec<spawn::Instance>,
+    /// A translated Awake/OnEnable of an instance being instantiated runs (its clone is the last in `unsynced`).
+    pub awaking: bool,
     /// The game's data, for what scripts instantiate at run time (the catalog); None when loaded from a recording.
     pub assets: Option<Box<crate::assets::db::AssetDb>>,
     /// CatalogBehaviour.SelectedItem: the SpawnableAsset's name (the catalog UI is not rewritten).

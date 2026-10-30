@@ -851,7 +851,7 @@ impl Game {
                 if !self.physicals[stabber].destroyed && self.physicals[stabber].StabCausesWound && self.get_relative_stab_speed(stabber, p) > 0.05 {
                     let point = self.get_global_stab_point(stabber, p).expect("beingStabbedBy without a penetration");
                     let fallback = self.original_blood_color(l);
-                    let colour = self.get_computed_color(l, fallback);
+                    let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
                     // SendMessage skips an inactive stabber.
                     if self.physicals[stabber].active {
                         let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
@@ -987,7 +987,7 @@ impl Game {
                 let p = self.limbs[l].PhysicalBehaviour;
                 self.create_impact_effect(p, point, normal, mathf::clamp(num / 4.0, 1.0, 2.0));
                 let fallback = self.original_blood_color(l);
-                let colour = self.get_computed_color(l, fallback);
+                let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
                 if let Some(other) = self.collision_physical(c) {
                     let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
                     self.physical_decal(other, ty, point, 1.0, colour);
@@ -1038,7 +1038,7 @@ impl Game {
             let force = d(get_min_impulse(&buffer, contacts)) * self.prefs.CrushForceMultiplier / mass_strength_ratio * self.prefs.FragilityMultiplier;
             if !(force < threshold) {
                 let fallback = self.original_blood_color(l);
-                let colour = self.get_computed_color(l, fallback);
+                let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
                 if let Some(other) = self.collision_physical(c) {
                     let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
                     let at = self.physicals[p].transform.position;
@@ -1150,7 +1150,7 @@ impl Game {
             if !self.limbs[l].IsAndroid {
                 // BloodExplosionBehaviour.SetColor: the particles' start colour and the splat's decal colour.
                 let fallback = self.original_blood_color(l);
-                let color = self.get_computed_color(l, fallback);
+                let color = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
                 if let Some(s) = splat {
                     self.splats[s].DecalColourMultiplier = color;
                 }

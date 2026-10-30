@@ -460,6 +460,10 @@ impl Game {
                     Component::Rigidbody2D(rb) => self.rigidbody2d_awake(&mut insts[n], &prefab, o, c, rb),
                     Component::Collider2D(_) => self.collider2d_awake(&mut insts[n], &prefab, o, c),
                     Component::Joint2D(j) => self.joint2d_awake(&mut insts[n], &prefab, o, c, j),
+                    Component::PointEffector2D(e) => {
+                        self.point_effector_create(&insts[n], o, c, e);
+                        self.point_effector_awake(&insts[n], &prefab, o, c);
+                    }
                     // Transform, SpriteRenderer and the unread classes make no physics state.
                     _ => {}
                 }
@@ -559,6 +563,7 @@ impl Game {
                     Component::Rigidbody2D(rb) => self.rigidbody2d_activate(inst, &prefab, d, c, rb),
                     Component::Collider2D(_) => self.collider2d_awake(inst, &prefab, d, c),
                     Component::Joint2D(_) => unimplemented!("Joint2D::AwakeFromLoad on GameObject.SetActive(true)"),
+                    Component::PointEffector2D(_) => self.point_effector_awake(inst, &prefab, d, c),
                     Component::Script { .. } => scripts.push((d, c)),
                     // Transform, SpriteRenderer and the unread classes hold no Physics2D state.
                     _ => {}
@@ -622,6 +627,7 @@ impl Game {
                 Component::Rigidbody2D(_) => self.rigidbody2d_deactivate(inst, prefab, o),
                 Component::Script { .. } => scripts.push((o, c)),
                 Component::Joint2D(_) => self.joint2d_deactivate(inst, prefab, o, c),
+                Component::PointEffector2D(_) => self.point_effector_deactivate(inst, o, c),
                 // Transform, SpriteRenderer and the unread classes hold no Physics2D state.
                 _ => {}
             }
@@ -643,6 +649,7 @@ impl Game {
             self.world.reset_mass_data(body);
         }
         self.world.contacts2d.destroy_contacts(id);
+        self.world.effector_colliders.remove(&id);
         inst.colliders.remove(&(o, c));
         // Collider2D::RemoveFromManager.
         inst.interest[o] &= !CHANGE_COLLIDER;
@@ -750,6 +757,7 @@ impl Game {
         let mass = r.detached.expect("a Rigidbody2D without a body is detached");
         (fields.body_type, fields.collision_detection, fields.interpolate) = (r.bodyType, r.collisionDetectionMode, r.interpolation);
         [fields.linear_drag, fields.angular_drag, fields.gravity_scale] = r.detached_props;
+        fields.constraints = r.constraints;
         let pose = self.owner_pose(owner);
         self.rigidbody2d_create(inst, prefab, o, c, &fields, Some((pose, mass)));
         let body = inst.bodies[&o];
@@ -1026,8 +1034,13 @@ impl Game {
     /// collider TRS system.
     fn collider2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
         if inst.objects[o].active {
-            self.collider2d_create_fixtures(inst, prefab, o, c);
             let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
+            // Collider2D +0xc8: the GameObject's Effector2D, found before the fixtures exist.
+            if col.used_by_effector {
+                let effector = Self::object_effector(inst, prefab, o);
+                self.world.effector_colliders.insert(inst.objects[o].components[c], effector);
+            }
+            self.collider2d_create_fixtures(inst, prefab, o, c);
             if col.enabled {
                 inst.interest[o] |= CHANGE_COLLIDER;
             }

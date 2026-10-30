@@ -7,6 +7,27 @@ use super::solver::VelocityConstraint;
 use super::world::{BodyId, ColliderRef, ContactId, FixtureId, RigidbodyRef, World, BODY_AWAKE, CONTACT_ENABLED, CONTACT_KEEP_DISABLED};
 use std::collections::HashMap;
 
+/// Effector2D::EffectorContact (0x50 bytes): one b2Contact of an effector's collider, from the effector side: the
+/// attached bodies, fixtures and child indices of the effector's collider and of the other.
+#[derive(Clone, Copy, Debug)]
+pub struct EffectorContact {
+    pub body: BodyId,
+    pub fixture: FixtureId,
+    pub child: usize,
+    pub other_body: BodyId,
+    pub other_fixture: FixtureId,
+    pub other_child: usize,
+    pub contact: ContactId,
+}
+
+/// The Effector2D fields the b2 listeners read (useColliderMask +0x60, colliderMask +0x64) and its contact array (+0x40).
+#[derive(Clone, Debug, Default)]
+pub struct Effector2D {
+    pub use_collider_mask: bool,
+    pub collider_mask: i32,
+    pub contacts: Vec<EffectorContact>,
+}
+
 /// Collision2D::ContactState.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ContactState {
@@ -200,10 +221,49 @@ impl World {
         WorldManifold::new(&c.manifold, &a.xf, c.radius_a, &b.xf, c.radius_b)
     }
 
+    /// Effector2D::ProcessCheckEffectorColliderMask (180bfd510): whether `c`'s effector lets `other`'s layer touch it.
+    pub(super) fn effector_mask_allows(&self, c: ColliderRef, other: ColliderRef) -> bool {
+        match self.effector_colliders.get(&c.id) {
+            None => true,
+            // usedByEffector without an Effector2D on the GameObject.
+            Some(None) => false,
+            // IgnoreContacts() is false for a PointEffector2D (the only Effector2D the rewrite reads).
+            Some(Some(e)) => {
+                let e = &self.effectors[e];
+                !e.use_collider_mask || e.collider_mask >> (self.layers[&other.game_object] & 31) & 1 != 0
+            }
+        }
+    }
+
+    /// Effector2D::BeginContact (180bfbd00): ProcessBeginContact (180bfd3c0) for fixture A's collider, then B's. A
+    /// collider used by an effector adds the contact to the effector's array (UseContactUpdate is true for a
+    /// PointEffector2D; its BeginContactCallback is empty).
+    fn effector_begin_contact(&mut self, id: ContactId) {
+        let c = self.contact(id);
+        let (fa, fb, ia, ib) = (c.fixture_a, c.fixture_b, c.child_a, c.child_b);
+        for (f, i, o, oi) in [(fa, ia, fb, ib), (fb, ib, fa, ia)] {
+            let Some(&Some(e)) = self.effector_colliders.get(&self.fixture(f).collider.id) else { continue };
+            let contact = EffectorContact { body: self.fixture(f).body, fixture: f, child: i, other_body: self.fixture(o).body, other_fixture: o, other_child: oi, contact: id };
+            self.effectors.get_mut(&e).unwrap().contacts.push(contact);
+        }
+    }
+
+    /// Effector2D::EndContact (180bfd190): ProcessEndContact (180bfd580) for fixture A's collider, then B's: the
+    /// contact's entry leaves the effector's array, the last entry taking its place.
+    fn effector_end_contact(&mut self, id: ContactId) {
+        let c = self.contact(id);
+        for f in [c.fixture_a, c.fixture_b] {
+            let Some(&Some(e)) = self.effector_colliders.get(&self.fixture(f).collider.id) else { continue };
+            let contacts = &mut self.effectors.get_mut(&e).unwrap().contacts;
+            if let Some(at) = contacts.iter().position(|x| x.contact == id) {
+                contacts.swap_remove(at);
+            }
+        }
+    }
+
     /// WorldContactListener2D::BeginContact (180c1cdb0).
-    // ponytail: Effector2D::BeginContact/EndContact are not rewritten (no effector colliders until items with
-    // Area/Point/Platform/Surface effectors exist).
     pub fn begin_contact(&mut self, id: ContactId) {
+        self.effector_begin_contact(id);
         let c = self.contact_mut(id);
         if c.flags & CONTACT_KEEP_DISABLED != 0 {
             c.flags &= !CONTACT_ENABLED;
@@ -275,6 +335,7 @@ impl World {
 
     /// WorldContactListener2D::EndContact (180c1f010).
     pub(crate) fn end_contact(&mut self, id: ContactId) {
+        self.effector_end_contact(id);
         let c = self.contact_mut(id);
         c.flags &= !CONTACT_KEEP_DISABLED;
         let (rid, ui) = (c.user_data.unwrap(), c.user_index);

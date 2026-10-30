@@ -1,5 +1,5 @@
 //! PistonBehaviour. Audio is presentation; the activation, the slider's limits and motor, and the head's depth stay.
-//! OnFlip has no sender in the rewrite (SelectionController's flip), so it is not rewritten.
+//! OnFlip is SelectionController's flip broadcast (BroadcastMessage "OnFlip").
 #![allow(non_snake_case)]
 
 use super::{d, mathf, script, Game};
@@ -89,6 +89,16 @@ impl Game {
     /// PistonBehaviour.FixedUpdate
     pub fn piston_fixed_update(&mut self, i: usize) {
         self.piston_move(i, if self.pistons[i].Activated { 1.0 } else { -1.0 });
+    }
+
+    /// PistonBehaviour.OnFlip(center): `originalLimits = Slider.limits` (the joint's current limits, which UpdateLimits scaled
+    /// by the old scale), then `Slider.angle` is 180 for a mirrored piston and 0 otherwise.
+    pub fn piston_on_flip(&mut self, i: usize, _center: [f32; 3]) {
+        let f = self.piston_slider(i);
+        let s = self.fixed_joints[f].slider.as_ref().unwrap();
+        self.pistons[i].originalLimits = [s.lower, s.upper];
+        let mirrored = self.physicals[self.pistons[i].Phys].transform.localScale[0] < 0.0;
+        self.slider_joint_set_angle(f, if mirrored { 180.0 } else { 0.0 });
     }
 
     /// PistonBehaviour.MovePiston

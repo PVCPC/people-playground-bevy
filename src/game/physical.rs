@@ -162,7 +162,7 @@ script! {
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
-        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3] },
+        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3], constraints: 0 },
         transform: Pose = Pose::default(),
         /// The Transform's parent (index into Game.transform_nodes).
         parent: Option<usize> = None,

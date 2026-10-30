@@ -74,7 +74,7 @@ fn written_pose(b: &crate::b2::world::Body, z: f32, rotation: [f32; 4]) -> ([f32
 impl Game {
     /// PhysicsManager2D::Simulate after the FixedUpdate scripts.
     // ponytail: the MovePosition/MoveRotation half of SetupMovementStates does nothing here: no rewritten script
-    // calls MovePosition/MoveRotation. UpdateEffectors waits for the first Effector2D.
+    // calls MovePosition/MoveRotation.
     pub fn simulate_physics(&mut self) {
         self.sync_pending();
         let dt = self.time.fixedDeltaTime;
@@ -102,6 +102,7 @@ impl Game {
             }
             self.rigidbody_hierarchy_changed = false;
         }
+        self.update_effectors(dt);
         self.update_joints(dt);
         let reports = self.world.process_contacts(true);
         self.send_callback_reports(&reports);
@@ -469,7 +470,9 @@ impl Game {
             if broken {
                 match j {
                     BreakJoint::Hinge(h) => {
+                        self.send_joint_break_scripts(j, false);
                         self.on_joint_break(h);
+                        self.send_joint_break_scripts(j, true);
                         // DestroyObjectHighLevel: HingeJoint2D::Cleanup destroys the b2 joint.
                         if let Some(j) = self.hinges[h].joint.take() {
                             self.world.destroy_joint(j);
@@ -478,7 +481,9 @@ impl Game {
                     }
                     BreakJoint::Spring(l) => {
                         // SendMessage("OnJointBreak2D") to the limb: only its GoreStringBehaviour owns the joint.
+                        self.send_joint_break_scripts(j, false);
                         self.gore_string_on_joint_break(l);
+                        self.send_joint_break_scripts(j, true);
                         // DestroyObjectHighLevel, ahead of the script's own delayed Destroy.
                         self.remove_spring_joint(l);
                     }
@@ -486,6 +491,8 @@ impl Game {
                         // SendMessage("OnJointBreak2D") finds PhysicalBehaviour, LimbBehaviour and
                         // CirculationBehaviour at most, and each only compares the joint with its own penetration or
                         // limb joint, never a prefab's. DestroyObjectHighLevel then runs Joint2D::Cleanup.
+                        self.send_joint_break_scripts(j, false);
+                        self.send_joint_break_scripts(j, true);
                         if let Some(id) = self.anchored_joints[a].joint.take() {
                             self.world.destroy_joint(id);
                         }
@@ -496,10 +503,12 @@ impl Game {
                         // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares
                         // `penetration.Joint` (a SliderJoint2D) with it, and no other rewritten script sits on a piece
                         // (a stabber's other scripts compare against their own joints too).
+                        self.send_joint_break_scripts(j, false);
                         if self.fixed_joints[f].slider.is_some() && matches!(self.fixed_joints[f].attached, BodyOwner::Physical(_)) {
                             self.physical_on_joint_break_slider(f);
                         }
                         self.sticky_grenade_on_joint_break(f);
+                        self.send_joint_break_scripts(j, true);
                         // DestroyObjectHighLevel then removes the component.
                         self.fixed_joint_destroy(f);
                     }
@@ -534,6 +543,10 @@ impl Game {
                             self.water_on_trigger(w, other.id);
                         }
                     }
+                }
+                // The translated scripts: A (then its rigidbody's object), then B (messages.rs).
+                for (own, rigidbody, other) in [(r.collider_a, r.rigidbody_a, r.collider_b), (r.collider_b, r.rigidbody_b, r.collider_a)] {
+                    self.send_trigger_message(r.message, own.id, rigidbody, other.id);
                 }
                 continue;
             };

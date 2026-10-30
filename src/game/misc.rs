@@ -692,11 +692,11 @@ impl Game {
         let l = bp.CirculationBehaviour;
         let c = &self.circulations[l];
         let num = if bp.IsOnlyForInternalBleeding { c.InternalBleedingIntensity } else { c.BleedingRate };
-        let scaled = mathf::map_range(0.0, 1.0, 0.0, 1.0, c.TotalLiquidAmount);
+        let scaled = mathf::map_range(0.0, 1.0, 0.0, 1.0, c.base.TotalLiquidAmount);
         let pushing_ok = bp.PushingTo.map_or(true, |p| self.circulations[p].IsDisconnected);
         if pushing_ok && num > 0.05 && scaled > 0.05 && self.physicals[self.limbs[l].PhysicalBehaviour].Temperature > 0.0 {
             let fallback = self.original_blood_color(l);
-            let mut color = self.get_computed_color(l, fallback);
+            let mut color = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
             if self.prefs.GorelessMode {
                 color = super::circulation::change_red_to_orange(color);
             }
@@ -707,7 +707,7 @@ impl Game {
             let flag = self.is_point_under_water([at[0], at[1]]);
             let dt = self.time.deltaTime;
             let c = &self.circulations[l];
-            let (flow, mult, total) = (c.BloodFlow, c.BloodLossRateMultiplier, c.TotalLiquidAmount);
+            let (flow, mult, total) = (c.BloodFlow, c.BloodLossRateMultiplier, c.base.TotalLiquidAmount);
             let bp = &mut self.bleeding[b];
             bp.fakeHeartClock = (d(bp.fakeHeartClock) + d(dt) * flow * bp.PulseSpeed).f();
             let num2 = (d(bp.SpeedMultiplier) * (d(flow) * flow * flow * 2.0f32) * mult * mathf::lerp(0.7, 1.0, bp.Laminarity)).f();
@@ -990,8 +990,8 @@ impl Game {
         // BroadcastMessage("OnImpactCreated") down the object: a limb's CirculationBehaviour.
         if let Some(l) = self.limbs.iter().position(|l| l.PhysicalBehaviour == p) {
             let original = self.original_blood_color(l);
-            let color = if mathf::map_range(0.0, 1.0, 0.0, 1.0, self.circulations[l].TotalLiquidAmount) > 0.05 {
-                self.get_computed_color(l, original)
+            let color = if mathf::map_range(0.0, 1.0, 0.0, 1.0, self.circulations[l].base.TotalLiquidAmount) > 0.05 {
+                self.get_computed_color(super::container::Owner::Circulation(l), original)
             } else {
                 original
             };

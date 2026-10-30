@@ -1,5 +1,6 @@
 //! BloodContainer, CirculationBehaviour and the Liquid registry.
-use super::{d, mathf, script, CsDict, Game};
+use super::container::{BloodContainer, Owner};
+use super::{d, mathf, script, Game};
 use super::misc::{BleedingParticle, FancyBloodSplat, FixedIntervalDistributor};
 
 /// Liquid.Registry / Liquid.LiquidSet order (Global.Awake); a liquid is its index here.
@@ -182,30 +183,18 @@ script! {
         NewlySpawned: bool = true,
         ArtificialHeartbeat: f32 = 0.0,
         cachedHeartRate: Option<f32> = None,
-        TotalLiquidAmount: f32 = 0.0,
-        isComputedColourCached: bool = false,
-        cachedComputedColour: [f32; 4] = [0.0, 0.0, 0.0, 0.0],
-        MeasuredPressure: f32 = 0.0,
-        shouldDeleteEmptyEntries: bool = false,
-        timer: f32 = 0.0,
     }
+    base { base: BloodContainer }
     links {
         /// Source / PushesTo as limb indices.
         Source: Option<usize> = None,
         PushesTo: Vec<usize> = Vec::new(),
-        LiquidDistribution: CsDict<usize, RefFloat> = CsDict::default(),
         /// Bounds (center xyz, extents xyz) in limb space.
         LocalArteryRects: Option<Vec<[f32; 6]>> = None,
         /// Bleeding particle indices (Game::bleeding).
         BleedingParticles: Vec<usize> = Vec::new(),
         enabled: bool = true,
     }
-}
-
-/// Liquid virtual hooks. Only blood exists until syringes are rewritten.
-fn liquid_hook_unwritten(l: usize, hook: &str) -> ! {
-    // ponytail: non-blood liquid behaviours arrive with syringes and containers.
-    unimplemented!("{}.{hook}", LIQUIDS[l].1)
 }
 
 impl Game {
@@ -216,7 +205,7 @@ impl Game {
     /// CirculationBehaviour.GetAmountOfBlood
     pub fn amount_of_blood(&self, l: usize) -> f32 {
         let c = &self.circulations[l];
-        c.LiquidDistribution.get(self.blood_type(l)).map_or(0.0, |r| r.raw)
+        c.base.LiquidDistribution.get(self.blood_type(l)).map_or(0.0, |r| r.raw)
     }
 
     /// CirculationBehaviour.HasCirculation
@@ -236,7 +225,7 @@ impl Game {
         let c = &self.circulations[l];
         let p = &self.people[self.limbs[l].Person];
         let num = mathf::clamp01(c.BloodFlow);
-        let t = mathf::clamp01(c.TotalLiquidAmount);
+        let t = mathf::clamp01(c.base.TotalLiquidAmount);
         let pick = |v: f32| if connected { mathf::clamp01(v) } else { 0.0 };
         let (t2, num2, num3, num4, num5) =
             (pick(p.OxygenLevel), pick(p.Consciousness), pick(p.PainLevel), pick(p.AdrenalineLevel), pick(p.ShockLevel));
@@ -250,186 +239,6 @@ impl Game {
         );
         self.circulations[l].cachedHeartRate = Some(v);
         v
-    }
-
-    // ---- BloodContainer (Limits (0, 1), AllowsOverflow true, Pressure None) ----
-
-    pub fn add_liquid(&mut self, l: usize, liquid: usize, amount: f32) -> f32 {
-        if amount <= mathf::EPSILON {
-            return 0.0;
-        }
-        let c = &mut self.circulations[l];
-        let num = mathf::clamp(c.TotalLiquidAmount + amount, 0.0, f32::MAX) - c.TotalLiquidAmount;
-        if num.is_nan() || num <= mathf::EPSILON {
-            return 0.0;
-        }
-        c.isComputedColourCached = false;
-        c.TotalLiquidAmount += num;
-        if let Some(r) = c.LiquidDistribution.get_mut(liquid) {
-            let v = r.raw + num;
-            r.set_raw(v);
-        } else {
-            c.LiquidDistribution.insert(liquid, RefFloat::new(num));
-            // OnLiquidEnter: OnDistributionChange (no listeners), OnEnterContainer, OnEnterLimb.
-            if liquid != 0 {
-                liquid_hook_unwritten(liquid, "OnEnterContainer");
-            }
-        }
-        num
-    }
-
-    pub fn remove_liquid(&mut self, l: usize, liquid: usize, amount: f32) -> f32 {
-        if amount <= mathf::EPSILON {
-            return 0.0;
-        }
-        let c = &mut self.circulations[l];
-        let mut num = mathf::clamp(c.TotalLiquidAmount - amount, 0.0, f32::MAX) - c.TotalLiquidAmount;
-        if num.is_nan() || num >= -1e-45 {
-            return 0.0;
-        }
-        if let Some(r) = c.LiquidDistribution.get_mut(liquid) {
-            if r.raw + num < 0.0 {
-                num = 0.0 - r.raw;
-            }
-            c.TotalLiquidAmount += num;
-            let v = r.raw + num;
-            r.set_raw(v);
-        }
-        c.isComputedColourCached = false;
-        c.shouldDeleteEmptyEntries = true;
-        num
-    }
-
-    pub fn drain(&mut self, l: usize, amount: f32) {
-        let count = self.circulations[l].LiquidDistribution.len();
-        if amount <= mathf::EPSILON || count == 0 {
-            return;
-        }
-        let amount2 = amount / count as f32;
-        for liquid in self.circulations[l].LiquidDistribution.keys() {
-            self.remove_liquid(l, liquid, amount2);
-        }
-        self.circulations[l].shouldDeleteEmptyEntries = true;
-    }
-
-    pub fn delete_empty_liquid_entries(&mut self, l: usize) {
-        let c = &mut self.circulations[l];
-        c.shouldDeleteEmptyEntries = false;
-        for item in 0..LIQUIDS.len() {
-            let Some(r) = c.LiquidDistribution.get(item).copied() else { continue };
-            if r.raw <= 0.02 && (r.raw <= mathf::EPSILON || r.has_decreased() || !r.has_changed()) {
-                c.TotalLiquidAmount -= r.raw;
-                if item != 0 {
-                    liquid_hook_unwritten(item, "OnExitContainer");
-                }
-                c.LiquidDistribution.remove(item);
-            }
-            // The removed RefFloat is still updated; it is unreachable afterwards.
-            if let Some(r) = c.LiquidDistribution.get_mut(item) {
-                r.Previous = r.raw;
-            }
-        }
-    }
-
-    /// BloodContainer.TransferTo(Liquid, float, BloodContainer)
-    pub fn transfer_liquid_to(&mut self, from: usize, liquid: usize, amount: f32, to: usize) -> f32 {
-        if !self.circulations[from].enabled || !self.circulations[to].enabled || amount <= mathf::EPSILON {
-            return 0.0;
-        }
-        let num = self.remove_liquid(from, liquid, amount).abs();
-        if num > mathf::EPSILON {
-            self.add_liquid(to, liquid, num);
-        }
-        num
-    }
-
-    /// BloodContainer.TransferTo(float, BloodContainer, proportional = true)
-    pub fn transfer_to(&mut self, from: usize, amount: f32, to: usize) -> f32 {
-        if !self.circulations[from].enabled || !self.circulations[to].enabled || amount <= mathf::EPSILON {
-            return 0.0;
-        }
-        let total = self.circulations[from].TotalLiquidAmount;
-        let mut num = 0.0;
-        // The enumerator throws if the dictionary changes; a removal never happens here.
-        let entries: Vec<(usize, f32)> = self.circulations[from].LiquidDistribution.iter().map(|(k, v)| (*k, v.raw)).collect();
-        for (key, _) in entries {
-            let raw = self.circulations[from].LiquidDistribution.get(key).unwrap().raw;
-            let amount2 = amount * (raw / total);
-            num += self.transfer_liquid_to(from, key, amount2, to);
-        }
-        num
-    }
-
-    /// BloodContainer.Update
-    /// BloodContainer.GetComputedColor(Color)
-    pub fn get_computed_color(&mut self, l: usize, fallback: [f32; 4]) -> [f32; 4] {
-        let c = &mut self.circulations[l];
-        if c.isComputedColourCached {
-            return c.cachedComputedColour;
-        }
-        if c.LiquidDistribution.len() == 0 || mathf::approximately(0.0, c.TotalLiquidAmount) {
-            return fallback;
-        }
-        let mut v = [0.0f32; 4];
-        for (liquid, amount) in c.LiquidDistribution.iter() {
-            let num = amount.raw / c.TotalLiquidAmount;
-            let color = liquid_color(*liquid);
-            for i in 0..4 {
-                v[i] += color[i] * num;
-            }
-        }
-        v[3] = mathf::clamp(v[3], 0.1, 1.0);
-        for i in 0..3 {
-            v[i] = mathf::clamp(v[i], 0.0, 10.0);
-        }
-        if self.prefs.GorelessMode {
-            v = change_red_to_orange(v);
-        }
-        c.cachedComputedColour = v;
-        c.isComputedColourCached = true;
-        v
-    }
-
-    pub fn blood_container_update(&mut self, l: usize) {
-        let dt = self.time.deltaTime;
-        let c = &mut self.circulations[l];
-        c.timer += dt;
-        // ScaledLiquidAmount = MapRange(0, 1, 0, 1, TotalLiquidAmount)
-        let scaled = mathf::map_range(0.0, 1.0, 0.0, 1.0, c.TotalLiquidAmount);
-        c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, scaled, mathf::lerp_factor_dt(0.6, dt));
-        if c.timer > 1.0 {
-            c.timer = 0.0;
-            self.delete_empty_liquid_entries(l);
-            for liquid in self.circulations[l].LiquidDistribution.keys() {
-                if liquid == 0 {
-                    // Blood.OnUpdate
-                    if self.limbs[l].SpeciesIdentity == "Android" && self.random.value() > 0.995 {
-                        let p = self.limbs[l].PhysicalBehaviour;
-                        let c = self.physicals[p].Charge() + 5.0;
-                        self.physicals[p].charge = c;
-                    }
-                } else {
-                    liquid_hook_unwritten(liquid, "OnUpdate");
-                }
-            }
-            for (sources, target, rate, outside_only) in mix_instructions() {
-                let _ = target;
-                if outside_only {
-                    continue;
-                }
-                // Utils.LiquidMixProcess(container, Liquid[], result, delta)
-                if sources.iter().any(|&s| self.circulations[l].LiquidDistribution.get(s).map_or(0.0, |r| r.raw) < rate) {
-                    continue;
-                }
-                for &s in &sources {
-                    self.remove_liquid(l, s, rate);
-                }
-                self.add_liquid(l, target, rate * sources.len() as f32);
-            }
-        }
-        if self.circulations[l].shouldDeleteEmptyEntries {
-            self.delete_empty_liquid_entries(l);
-        }
     }
 
     // ---- CirculationBehaviour ----
@@ -481,7 +290,7 @@ impl Game {
         {
             let amount = c.BloodRegenerationPerSecond * fdt;
             let blood = self.blood_type(l);
-            self.add_liquid(l, blood, amount);
+            self.add_liquid(Owner::Circulation(l), blood, amount);
         }
         // GLOWING_HUMAN achievement: Steam only.
     }
@@ -501,20 +310,20 @@ impl Game {
         }
         let c = &mut self.circulations[l];
         if c.IsPump {
-            c.BloodFlow = c.TotalLiquidAmount;
+            c.BloodFlow = c.base.TotalLiquidAmount;
         } else if c.WasInitiallyPumping {
             c.BloodFlow = (d(c.BloodFlow) - d(dt) * 0.2f32).f();
         } else {
             c.BloodFlow = (d(c.BloodFlow) - d(dt) * 0.05f32).f();
         }
-        c.BloodFlow = mathf::clamp(c.BloodFlow, 0.0, c.TotalLiquidAmount);
+        c.BloodFlow = mathf::clamp(c.BloodFlow, 0.0, c.base.TotalLiquidAmount);
     }
 
     fn handle_damage_edge_cases(&mut self, l: usize) {
         let ph = &self.physicals[self.limbs[l].PhysicalBehaviour];
         let num = mathf::max(ph.BurnProgress, self.skins[l].acidProgress);
         if num > 0.8 && ph.Temperature > 0.0 {
-            self.drain(l, mathf::lerp(0.02, 0.1, mathf::map_range(0.8, 1.0, 0.0, 1.0, num)));
+            self.drain(Owner::Circulation(l), mathf::lerp(0.02, 0.1, mathf::map_range(0.8, 1.0, 0.0, 1.0, num)));
         }
     }
 
@@ -526,7 +335,7 @@ impl Game {
                 c.BleedingRate = (d(c.BleedingRate) - d(self.time.deltaTime) * 0.05f32).f();
             }
             let amount = (d(dt) / mathf::lerp(60.0, 20.0, c.BloodFlow) * c.BleedingRate * 0.2f32).f();
-            self.drain(l, amount);
+            self.drain(Owner::Circulation(l), amount);
         }
     }
 
@@ -563,8 +372,8 @@ impl Game {
 
     fn diffuse_to_limb(&mut self, l: usize, other: usize, rate: f32) {
         if !self.physicals[self.limbs[other].PhysicalBehaviour].isDisintegrated && other != l && self.node_is_connected_to(l, other) {
-            if !(self.circulations[other].TotalLiquidAmount > self.circulations[l].TotalLiquidAmount) {
-                self.transfer_to(l, rate, other);
+            if !(self.circulations[other].base.TotalLiquidAmount > self.circulations[l].base.TotalLiquidAmount) {
+                self.transfer_to(Owner::Circulation(l), rate, Owner::Circulation(other));
             }
         }
     }
@@ -766,7 +575,7 @@ impl Game {
         }
         let liquid = self.blood_type(l);
         if self.circulations[l].NewlySpawned {
-            self.add_liquid(l, liquid, 1.0);
+            self.add_liquid(Owner::Circulation(l), liquid, 1.0);
             self.circulations[l].NewlySpawned = false;
         }
         if !self.physicals[self.limbs[l].PhysicalBehaviour].isDisintegrated {

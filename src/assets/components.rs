@@ -35,6 +35,41 @@ fn done<T>(r: &Reader, what: &str, v: T) -> Result<T, String> {
     Ok(v)
 }
 
+/// PointEffector2D (class 250): Behaviour, Effector2D (useColliderMask, colliderMask), then the point fields.
+#[derive(Clone, Debug)]
+pub struct PointEffector2D {
+    pub game_object: PPtr,
+    pub enabled: bool,
+    pub use_collider_mask: bool,
+    pub collider_mask: i32,
+    pub force_magnitude: f32,
+    pub force_variation: f32,
+    pub distance_scale: f32,
+    pub force_source: i32,
+    pub force_target: i32,
+    pub force_mode: i32,
+    pub drag: f32,
+    pub angular_drag: f32,
+}
+
+impl PointEffector2D {
+    pub const CLASS: i32 = 250;
+
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let game_object = PPtr::read(r)?;
+        let enabled = flag(r)?;
+        let use_collider_mask = flag(r)?;
+        let collider_mask = r.i32()?;
+        let force_magnitude = r.f32()?;
+        let force_variation = r.f32()?;
+        let distance_scale = r.f32()?;
+        let (force_source, force_target, force_mode) = (r.i32()?, r.i32()?, r.i32()?);
+        let (drag, angular_drag) = (r.f32()?, r.f32()?);
+        done(r, "PointEffector2D", PointEffector2D { game_object, enabled, use_collider_mask, collider_mask, force_magnitude, force_variation, distance_scale, force_source, force_target, force_mode, drag, angular_drag })
+    }
+}
+
 /// Rigidbody2D (class 50).
 #[derive(Clone, Debug)]
 pub struct Rigidbody2D {

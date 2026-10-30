@@ -612,6 +612,10 @@ pub struct World {
     /// the game's data) and the layer of each GameObject (by instance id) it is looked up with.
     pub layer_collision_matrix: Vec<u32>,
     pub layers: std::collections::HashMap<i32, i32>,
+    /// The colliders with Collider2D.usedByEffector (by instance id) and the Effector2D component on their GameObject
+    /// (Collider2D +0xc8, none when the GameObject has none), and each Effector2D's state, by component id.
+    pub effector_colliders: std::collections::HashMap<i32, Option<i32>>,
+    pub effectors: std::collections::HashMap<i32, super::contacts2d::Effector2D>,
     /// The contact listener's PhysicsContacts2D.
     pub contacts2d: Contacts2D,
     /// PhysicsScene2D's fixtureless static ground body (what a joint without connectedBody attaches to), made on first use.
@@ -651,6 +655,8 @@ impl World {
             ignored: Default::default(),
             layer_collision_matrix: Vec::new(),
             layers: Default::default(),
+            effector_colliders: Default::default(),
+            effectors: Default::default(),
             contacts2d: Contacts2D::default(),
             ground: None,
         }
@@ -1368,7 +1374,14 @@ impl World {
     fn fixtures_should_collide(&self, fa: FixtureId, fb: FixtureId) -> bool {
         let (ca, cb) = (self.fixture(fa).collider, self.fixture(fb).collider);
         let layer = |c: ColliderRef| self.layers[&c.game_object] as usize;
-        if !self.layer_collision_matrix.is_empty() && self.layer_collision_matrix[layer(ca)] >> layer(cb) & 1 == 0 {
+        // A collider used by an effector whose useColliderMask is on decides by Effector2D::CheckEffectorColliderMask
+        // (180bfc570) in place of the layer collision matrix.
+        let masked = |c: ColliderRef| matches!(self.effector_colliders.get(&c.id), Some(Some(e)) if self.effectors[e].use_collider_mask);
+        if masked(ca) || masked(cb) {
+            if !(self.effector_mask_allows(ca, cb) && self.effector_mask_allows(cb, ca)) {
+                return false;
+            }
+        } else if !self.layer_collision_matrix.is_empty() && self.layer_collision_matrix[layer(ca)] >> layer(cb) & 1 == 0 {
             return false;
         }
         should_collide(&self.fixture(fa).filter, &self.fixture(fb).filter) && !self.ignored.contains(&(ca.id.min(cb.id), ca.id.max(cb.id)))

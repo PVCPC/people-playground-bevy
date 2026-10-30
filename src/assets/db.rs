@@ -2,7 +2,7 @@
 //! with their classes, and prefabs as GameObject trees.
 
 use super::classes::{GameObject, MonoBehaviour, MonoScript, PPtr, Transform};
-use super::components::{Collider2D, Joint2D, Rigidbody2D, SpriteRenderer};
+use super::components::{Collider2D, Joint2D, PointEffector2D, Rigidbody2D, SpriteRenderer};
 use super::mono::{Managed, Value};
 use super::serialized::{Reader, SerializedFile};
 use std::collections::HashMap;
@@ -30,6 +30,7 @@ pub enum Component {
     Collider2D(Collider2D),
     Joint2D(Joint2D),
     SpriteRenderer(SpriteRenderer),
+    PointEffector2D(PointEffector2D),
     /// A MonoBehaviour: its script class, MonoScript.m_ExecutionOrder, Behaviour.m_Enabled and fields.
     Script { class: String, execution_order: i32, enabled: bool, fields: Value },
     /// A component class the rewrite does not read yet (audio, particles, UI...).
@@ -229,6 +230,7 @@ impl AssetDb {
             4 | 224 => Component::Transform(Transform::read(d)?),
             50 => Component::Rigidbody2D(Rigidbody2D::read(d)?),
             212 => Component::SpriteRenderer(SpriteRenderer::read(d)?),
+            PointEffector2D::CLASS => Component::PointEffector2D(PointEffector2D::read(d)?),
             c if Collider2D::CLASSES.contains(&c) => Component::Collider2D(Collider2D::read(c, d)?),
             c if Joint2D::CLASSES.contains(&c) => Component::Joint2D(Joint2D::read(c, d)?),
             114 => match self.mono(r)? {
@@ -374,6 +376,70 @@ mod tests {
                     println!("BARE {} | {} layer {} active {} rb {rb} | parent {parent} | {:?}", p.objects[0].name, p.objects[o].name, p.objects[o].layer, p.objects[o].active, std::mem::discriminant(&col.shape));
                 }
             }
+        }
+    }
+
+    /// One catalog item's prefab (`PPG_ITEM=name`): per object its layer, parent and components, with the raw bytes
+    /// of the classes the rewrite does not read (`-- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn catalog_dump_item() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let Ok(name) = std::env::var("PPG_ITEM") else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            if p.objects[0].name != name {
+                continue;
+            }
+            for (i, o) in p.objects.iter().enumerate() {
+                println!("OBJ {i} {} layer {} active {} parent {:?}", o.name, o.layer, o.active, o.parent);
+                for (r, c) in &o.components {
+                    match c {
+                        Component::Collider2D(c) => println!("  COLLIDER enabled {} trigger {} effector {} {:?}", c.enabled, c.is_trigger, c.used_by_effector, c.shape),
+                        Component::Other(id) => println!("  OTHER {id} {:02x?}", db.data(*r)),
+                        Component::Script { class, .. } => println!("  SCRIPT {class}"),
+                        Component::Rigidbody2D(_) => println!("  RIGIDBODY"),
+                        Component::Joint2D(_) => println!("  JOINT"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// The component class ids the rewrite does not read, per catalog item (`-- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn catalog_other_components() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        let mut classes: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            for o in &p.objects {
+                for (_, c) in &o.components {
+                    if let Component::Other(id) = c {
+                        let items = classes.entry(*id).or_default();
+                        if items.last() != Some(&p.objects[0].name) {
+                            items.push(p.objects[0].name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (class, items) in &classes {
+            println!("OTHER {class} {} | {}", items.len(), items.iter().take(6).cloned().collect::<Vec<_>>().join(", "));
         }
     }
 

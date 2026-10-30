@@ -418,7 +418,7 @@ impl Game {
                         detached: None,
                         component: 0,
                         simulated: true,
-                        detached_props: [0.0; 3],
+                        detached_props: [0.0; 3], constraints: 0,
                     };
                     // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
                     let changed = raw.and_then(|r| r.get("hierarchyChanged"));
@@ -436,7 +436,7 @@ impl Game {
                         Some((_, &b)) => b,
                         None => g.world.create_body(&BodyDef::default()),
                     };
-                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3] };
+                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None, component: 0, simulated: true, detached_props: [0.0; 3], constraints: 0 };
                     // From dump16 on the record carries the object's Transform.
                     if let Some(pos) = r.get("tpos") {
                         p.parent = r.get("parent").and_then(|t| node_of(&g, t));
@@ -601,7 +601,7 @@ impl Game {
                 let id = LIQUIDS.iter().position(|(_, c)| *c == class).ok_or_else(|| format!("liquid class {class}"))?;
                 let v = inner_fields(&format!("RefFloat({value}"));
                 let get = |k: &str| f(&v.iter().find(|(n, _)| n == k).unwrap().1);
-                c.LiquidDistribution.insert(id, RefFloat { Previous: get("Previous"), raw: get("raw") });
+                c.base.LiquidDistribution.insert(id, RefFloat { Previous: get("Previous"), raw: get("raw") });
             }
             g.circulations.push(c);
         }
@@ -954,7 +954,7 @@ impl Game {
                 (Phase::Fixed, B::GForce(l)) => self.gforce_fixed_update(l),
                 (Phase::Update, B::Person(p)) => self.person_update(p),
                 (Phase::Update, B::Skin(l)) => self.skin_update(l),
-                (Phase::Update, B::Circulation(l)) => self.blood_container_update(l),
+                (Phase::Update, B::Circulation(l)) => self.blood_container_update(super::container::Owner::Circulation(l)),
                 (Phase::Update, B::Grip(g)) => self.grip_update(g),
                 (Phase::Update, B::GoreString(l)) => self.gore_string_update(l),
                 (Phase::Update, B::Bleeding(b)) => self.bleeding_update(b),
@@ -1046,7 +1046,7 @@ impl Game {
     /// SkinMaterialHandler.OnWillRenderObject
     pub fn skin_will_render(&mut self, l: usize) {
         let blood = super::circulation::liquid_color(super::circulation::liquid(&self.limbs[l].BloodLiquidType));
-        self.get_computed_color(l, blood);
+        self.get_computed_color(super::container::Owner::Circulation(l), blood);
     }
 }
 

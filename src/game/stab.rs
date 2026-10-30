@@ -577,7 +577,7 @@ impl Game {
         }
         if self.amount_of_blood(l) > 0.2 {
             let fallback = self.original_blood_color(l);
-            let colour = self.get_computed_color(l, fallback);
+            let colour = self.get_computed_color(super::container::Owner::Circulation(l), fallback);
             // stabber.SendMessage("Decal", ...)
             if self.physicals[s.stabber].active {
                 let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
