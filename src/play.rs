@@ -3,26 +3,30 @@
 //! --play-map <map>: the same, starting from LoadScene("Main") with that map, all from the game's data.
 
 use crate::b2::world::Shape;
-use crate::game::{dump, Game};
+use crate::game::{dump, Game, Prefs};
 use crate::game_assets::HumanRig;
-use bevy::{prelude::*, sprite::Anchor, text::FontSize};
+use bevy::{prelude::*, sprite::Anchor};
 use crate::assets::db::AssetDb;
 use std::path::{Path, PathBuf};
 
 #[derive(Resource)]
-struct Play {
-    game: Game,
+pub(crate) struct Play {
+    pub game: Game,
     /// Set when a frame panicked (an unrewritten feature): the world stays frozen as it was.
-    stopped: Option<String>,
-    paused: bool,
+    pub stopped: Option<String>,
+    /// How many limbs, physicals and renderers already have a sprite.
+    done: (usize, usize, usize),
+}
+
+impl Play {
+    pub fn new(game: Game) -> Self {
+        Self { game, stopped: None, done: (0, 0, 0) }
+    }
 }
 
 /// A limb's sprite, drawn at its PhysicalBehaviour's Transform.
 #[derive(Component)]
-struct LimbSprite(usize);
-
-#[derive(Component)]
-struct Hud;
+pub(crate) struct LimbSprite(usize);
 
 /// Where the game starts.
 pub enum Start {
@@ -30,26 +34,42 @@ pub enum Start {
     /// The installed game's folder, the Map asset's name and the catalog item selected (if any).
     /// The game, the map, the --item and the --target.
     Map(PathBuf, String, Option<String>, Option<String>),
+    /// The main menu, with the installed game's folder.
+    Menu(PathBuf),
 }
 
-fn load(start: &Start, rig: &HumanRig) -> Result<Game, String> {
+/// `prefs` replace config.json's (the windowed game's settings); None for the headless runs.
+fn load(start: &Start, rig: &HumanRig, prefs: Option<Prefs>) -> Result<Option<Game>, String> {
     let recording = match start {
         Start::Recording(recording) => recording,
-        Start::Map(game, map, item, _) => return new_game(game, map, item.as_deref()),
+        Start::Map(game, map, item, _) => return new_game(game, map, item.as_deref(), prefs).map(Some),
+        Start::Menu(_) => return Ok(None),
     };
     let start = dump::snapshots(recording)?
         .find(|s| s.pt == "FS" && s.of("b2World").next().is_some())
         .ok_or("--play needs a recording with the b2 world (dump12 on)")?;
     let mut g = Game::from_snapshot(&start, rig)?;
     g.load_layers(&dump::header(recording)?);
-    Ok(g)
+    Ok(Some(g))
+}
+
+/// A panic in `f` (an unrewritten feature) comes back as its message.
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|panic| Err(panic_message(panic)))
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
 }
 
 /// SceneManager.LoadScene("Main") with the main menu's map choice: level1's managers and natives, then the
 /// MapLoaderBehaviour's Awake. Its behaviours' Starts run in the first frame.
-fn new_game(game: &Path, map: &str, item: Option<&str>) -> Result<Game, String> {
+pub(crate) fn new_game(game: &Path, map: &str, item: Option<&str>, prefs: Option<Prefs>) -> Result<Game, String> {
     let mut db = AssetDb::open(game)?;
     let mut g = Game::load_main(&mut db, game)?;
+    if let Some(prefs) = prefs {
+        g.prefs = prefs;
+    }
     g.load_scene(&mut db)?;
     g.map_loader_awake(&mut db, map)?;
     g.assets = Some(Box::new(db));
@@ -63,10 +83,10 @@ fn new_game(game: &Path, map: &str, item: Option<&str>) -> Result<Game, String> 
 /// below the center on frame 60, activated ("activateDirect" with the mouse on its first object's center of mass)
 /// on frame 64.
 pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
-    let mut g = load(start, rig)?;
+    let mut g = load(start, rig, None)?.ok_or("the menu has no headless run")?;
     let target = match start {
         Start::Map(_, _, _, target) => target.clone(),
-        Start::Recording(_) => None,
+        _ => None,
     };
     let item = g.catalog_selected.clone();
     // PP_HOLD=N (with a --target): the item is dragged from frame 62 and "activateDirect" is held for N frames from 64.
@@ -132,101 +152,43 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
 }
 
 pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
-    let game = load(start, &rig)?;
-    App::new()
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window { title: "PP-R/B".into(), resolution: (1280, 800).into(), ..default() }),
-                    ..default()
-                })
-                .set(AssetPlugin { file_path: cache.to_string_lossy().into_owned(), ..default() })
-                .set(ImagePlugin::default_nearest()),
-        )
-        .insert_resource(ClearColor(Color::srgb(0.055, 0.065, 0.08)))
-        .insert_resource(rig)
-        .insert_resource(Play { game, stopped: None, paused: false })
-        .add_systems(Startup, setup)
-        .add_systems(Update, (controls, mouse, frame, limb_sprites, object_sprites, draw).chain())
-        .run();
+    let dir = match start {
+        Start::Map(dir, ..) | Start::Menu(dir) => Some(dir.clone()),
+        Start::Recording(_) => None,
+    };
+    let (settings, controls, files) = crate::ui::load_settings(dir.as_deref());
+    let game = load(start, &rig, Some(settings.prefs()))?;
+    let (map, item) = match start {
+        Start::Map(_, map, item, _) => (Some(map.clone()), item.clone()),
+        _ => (None, None),
+    };
+    let mode = if game.is_some() { crate::ui::Mode::Game } else { crate::ui::Mode::Menu };
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window { title: "People Playground rewrite".into(), resolution: (1280, 800).into(), ..default() }),
+                ..default()
+            })
+            .set(AssetPlugin { file_path: cache.to_string_lossy().into_owned(), ..default() })
+            .set(ImagePlugin::default_nearest()),
+    )
+    .insert_resource(ClearColor(Color::srgb(0.055, 0.065, 0.08)))
+    .insert_resource(rig)
+    .insert_resource(crate::ui::new_ui(dir, mode, map, item))
+    .insert_resource(settings)
+    .insert_resource(controls)
+    .insert_resource(files);
+    if let Some(game) = game {
+        app.insert_resource(Play::new(game));
+    }
+    crate::ui::add(&mut app);
+    app.run();
     Ok(())
 }
 
-fn setup(mut commands: Commands, play: Res<Play>) {
-    let g = &play.game;
-    let center = g.limbs.first().map_or([g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0], |l| g.physicals[l.PhysicalBehaviour].transform.position);
-    commands.spawn((
-        Camera2d,
-        Projection::Orthographic(OrthographicProjection { scale: 0.006, ..OrthographicProjection::default_2d() }),
-        Transform::from_xyz(center[0], center[1], 0.0),
-    ));
-    commands.spawn((
-        Hud,
-        Text::new(""),
-        TextFont { font_size: FontSize::Px(16.0), ..default() },
-        TextColor(Color::srgb(0.86, 0.9, 0.94)),
-        Node { position_type: PositionType::Absolute, left: px(12), top: px(12), ..default() },
-    ));
-}
-
-fn controls(keys: Res<ButtonInput<KeyCode>>, mut play: ResMut<Play>, mut exit: MessageWriter<AppExit>) {
-    if keys.just_pressed(KeyCode::Space) {
-        play.paused = !play.paused;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
-        exit.write(AppExit::Success);
-    }
-}
-
-/// The cursor and left button as InputSystem's "drag" control and Input.mousePosition, through this window's camera.
-fn mouse(
-    buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    window: Single<&Window>,
-    camera: Single<(&Camera, &GlobalTransform)>,
-    mut play: ResMut<Play>,
-) {
-    let (camera, at) = *camera;
-    let size = window.size();
-    let (Ok(origin), Ok(one)) = (camera.viewport_to_world_2d(at, Vec2::new(0.0, size.y)), camera.viewport_to_world_2d(at, Vec2::new(1.0, size.y))) else { return };
-    let input = &mut play.game.input;
-    if let (Ok(min), Ok(max)) = (camera.viewport_to_world_2d(at, Vec2::new(0.0, size.y)), camera.viewport_to_world_2d(at, Vec2::new(size.x, 0.0))) {
-        input.view = Some((min.to_array(), max.to_array()));
-    }
-    if let Some(c) = window.cursor_position() {
-        // Unity's screen y runs up from the bottom.
-        let pixel = [c.x, size.y - c.y];
-        let screen = crate::game::tool::Screen { mouse: pixel, origin: origin.to_array(), scale: one.x - origin.x };
-        let w = screen.to_world(pixel);
-        input.mouse = [w[0], w[1], 0.0];
-        input.screen = Some(screen);
-    }
-    let control = crate::game::tool::Control {
-        down: buttons.just_pressed(MouseButton::Left),
-        held: buttons.pressed(MouseButton::Left),
-        up: buttons.just_released(MouseButton::Left),
-    };
-    input.controls.insert("drag".into(), control);
-    // InputSystem's default "spawnRight" (E) and "spawnLeft" (Q).
-    for (name, key) in [("spawnRight", KeyCode::KeyE), ("spawnLeft", KeyCode::KeyQ)] {
-        let control = crate::game::tool::Control { down: keys.just_pressed(key), held: keys.pressed(key), up: keys.just_released(key) };
-        input.controls.insert(name.into(), control);
-    }
-}
-
-/// One Unity player-loop frame: FixedUpdate scripts and the physics pass until fixed time catches up with the
-/// frame's time, then the PreUpdate interpolation and the Update/LateUpdate scripts.
-fn frame(time: Res<bevy::time::Time<Real>>, mut play: ResMut<Play>) {
-    if play.paused || play.stopped.is_some() {
-        return;
-    }
-    if let Err(m) = step(&mut play.game, time.delta_secs()) {
-        play.stopped = Some(m);
-    }
-}
-
 /// A frame panic (an unrewritten feature) comes back as its message.
-fn step(g: &mut Game, real: f32) -> Result<(), String> {
+pub(crate) fn step(g: &mut Game, real: f32) -> Result<(), String> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let t = &mut g.time;
         // Time.deltaTime: the unscaled frame time clamped to maximumDeltaTime, then scaled.
@@ -268,32 +230,25 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         }
         g.end_of_frame_calls();
     }))
-    .map_err(|panic| {
-        panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
-    })
+    .map_err(panic_message)
 }
 
 /// A physical object's own sprite (the limbs use the rig's).
 #[derive(Component)]
 /// The physical, and the scale from the sprite's units to the world (sliced and tiled sprites are laid out in
 /// pixels so their borders keep their texel size).
-struct ObjectSprite(usize, f32);
+pub(crate) struct ObjectSprite(usize, f32);
 
 /// A SpriteRenderer on an object without a PhysicalBehaviour (`Game.renderers`), and the same scale.
 #[derive(Component)]
-struct RendererSprite(usize, f32);
+pub(crate) struct RendererSprite(usize, f32);
 
 type Textures = std::collections::HashMap<(usize, i64), Handle<Image>>;
 
 /// A sprite from the game's data for each non-limb physical object and each other SpriteRenderer without one;
 /// textures decoded once.
-fn object_sprites(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    play: Res<Play>,
-    mut done: Local<(usize, usize)>,
-    mut textures: Local<Textures>,
-) {
+pub(crate) fn object_sprites(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut play: ResMut<Play>, mut textures: Local<Textures>) {
+    let mut done = (play.done.1, play.done.2);
     let g = &play.game;
     let Some(db) = g.assets.as_deref() else { return };
     let limbs: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
@@ -311,7 +266,8 @@ fn object_sprites(
         let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.renderers[i].draw) else { continue };
         commands.spawn((RendererSprite(i, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
     }
-    *done = (g.physicals.len(), g.renderers.len());
+    done = (g.physicals.len(), g.renderers.len());
+    (play.done.1, play.done.2) = done;
 }
 
 /// The Bevy sprite for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
@@ -374,9 +330,10 @@ fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, text
 }
 
 /// A sprite for each limb without one: the starting people's, then the ones spawned since.
-fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, play: Res<Play>, mut done: Local<usize>) {
+pub(crate) fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, mut play: ResMut<Play>) {
     let g = &play.game;
-    for l in *done..g.limbs.len() {
+    let done = play.done.0;
+    for l in done..g.limbs.len() {
         let name = &g.physicals[g.limbs[l].PhysicalBehaviour].name;
         let Some(part) = rig.parts.iter().find(|p| &p.name == name) else { continue };
         let [x, y, w, h] = part.rect;
@@ -385,15 +342,15 @@ fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<Human
         sprite.custom_size = Some(Vec2::from_array(part.size));
         commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default()));
     }
-    *done = g.limbs.len();
+    play.done.0 = play.game.limbs.len();
 }
 
-fn draw(
+pub(crate) fn draw(
     play: Res<Play>,
+    settings: Res<crate::ui::Settings>,
     mut sprites: Query<(&LimbSprite, &mut Transform, &mut Visibility)>,
     mut objects: Query<(&ObjectSprite, &mut Transform, &mut Visibility), Without<LimbSprite>>,
     mut renderers: Query<(&RendererSprite, &mut Transform, &mut Visibility), (Without<LimbSprite>, Without<ObjectSprite>)>,
-    mut hud: Single<&mut Text, With<Hud>>,
     mut gizmos: Gizmos,
 ) {
     let g = &play.game;
@@ -465,7 +422,7 @@ fn draw(
         }
     }
     // SelectionBoxBehaviour, shown past √200 px.
-    if let (Some(t), Some(s)) = (g.tool.as_ref(), g.input.screen) {
+    if let (Some(t), Some(s), true) = (g.tool.as_ref(), g.input.screen, settings.flag("ShowOutlines")) {
         let d = [s.mouse[0] - t.selectionDragStart[0], s.mouse[1] - t.selectionDragStart[1]];
         if t.isSelecting && d[0] * d[0] + d[1] * d[1] > 200.0 {
             let (a, b) = (Vec2::from_array(s.to_world(t.selectionDragStart)), Vec2::from_array(s.to_world(s.mouse)));
@@ -476,9 +433,4 @@ fn draw(
             gizmos.circle_2d(Vec2::new(x, y), 0.05, Color::srgb(0.4, 0.9, 0.5));
         }
     }
-    hud.0 = match &play.stopped {
-        Some(m) => format!("PP-R/B   STOPPED: {m}   Esc: exit"),
-        None if play.paused => "PP-R/B   PAUSED   Space: run   Esc: exit".into(),
-        None => format!("PP-R/B   frame {}   Space: pause   Esc: exit", g.time.frameCount),
-    };
 }

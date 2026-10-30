@@ -11,6 +11,7 @@ mod motor;
 mod physics;
 mod play;
 mod replay;
+mod ui;
 mod unity;
 
 use b2::{
@@ -170,6 +171,8 @@ fn run() -> Result<(), String> {
     let start = match (play, play_map) {
         (Some(recording), _) => Some(play::Start::Recording(recording)),
         (None, Some(map)) => Some(play::Start::Map(game.clone(), map, item, target)),
+        // Without a map, and without one of the other tests, the main menu.
+        (None, None) if script.is_none() && looped.is_none() && reference_probe.is_none() && native_probe.is_none() && !headless && !smoke => Some(play::Start::Menu(game.clone())),
         (None, None) => None,
     };
     if let Some(start) = start {
