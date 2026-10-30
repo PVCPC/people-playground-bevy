@@ -87,6 +87,7 @@ fn run() -> Result<(), String> {
     let mut b2_probe = None;
     let mut replay = None;
     let mut script = None;
+    let mut looped = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -127,6 +128,9 @@ fn run() -> Result<(), String> {
                 let path = PathBuf::from(arguments.next().ok_or("--physics-test needs a PPG_DUMP recording")?);
                 return game::dump::physics::physics_test(&path);
             }
+            "--loop-test" => {
+                looped = Some(PathBuf::from(arguments.next().ok_or("--loop-test needs a PPG_DUMP recording")?));
+            }
             "--script-test" => {
                 script = Some(PathBuf::from(arguments.next().ok_or("--script-test needs a PPG_DUMP recording")?));
             }
@@ -145,6 +149,9 @@ fn run() -> Result<(), String> {
     }
     if let Some(dump) = script {
         return game::dump::script_test(&dump, &rig);
+    }
+    if let Some(dump) = looped {
+        return game::dump::loop_test(&dump, &rig);
     }
     if let Some(probe) = reference_probe {
         return motor::compare_reference(&probe);

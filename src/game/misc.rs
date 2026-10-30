@@ -366,9 +366,9 @@ impl Game {
         }
     }
 
-    /// The delayed Start of every object instantiated since the last fixed step (Unity runs these
-    /// before the step's FixedUpdates). splat_fixed_update also runs its own pending Start, so this
-    /// only matters for the order of the random draws against other FixedUpdates.
+    /// The delayed Start of every object instantiated since the last pass. Unity's player loop runs it
+    /// at FixedUpdate.ScriptRunDelayedFixedFrameRate (before each step's FixedUpdates) and
+    /// Update.ScriptRunDelayedDynamicFrameRate (before Update), whichever comes first after the Instantiate.
     pub fn run_pending_starts(&mut self) {
         for s in 0..self.splats.len() {
             if !self.splats[s].started && !self.splats[s].destroyed {
@@ -396,8 +396,9 @@ impl Game {
         if self.splats[s].destroyed {
             return;
         }
+        // Objects instantiated during this step have not had Start yet and are not in this FixedUpdate pass.
         if !self.splats[s].started {
-            self.splat_start(s);
+            return;
         }
         self.splats[s].particles.retain(|p| !(p.Life <= 0.0));
         if self.splats[s].Continuous {

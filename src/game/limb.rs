@@ -84,6 +84,62 @@ script! {
         goreString: bool = true,
         goreStringEnabled: bool = true,
         goreStringJoint: bool = false,
+        /// The GoreStringBehaviour's own values and line state.
+        gore: GoreString = GoreString::default(),
+    }
+}
+
+/// GoreStringBehaviour.TissueString
+#[derive(Clone, Copy, Debug)]
+pub struct TissueString {
+    pub Pos1: f32,
+    pub Pos2: f32,
+    pub Strength: f32,
+    pub Thickness: f32,
+    pub ThicknessRatio: f32,
+}
+
+/// GoreStringBehaviour (the fields the simulation reads; rendering is skipped).
+#[derive(Clone, Debug)]
+pub struct GoreString {
+    /// The limb whose rigidbody is `Other`.
+    pub Other: Option<usize>,
+    pub JointDampening: f32,
+    pub JointFreq: f32,
+    pub JointBreakThreshold: f32,
+    pub InvincibilityTime: f32,
+    /// LineSegment A.x, A.y, B.x, B.y
+    pub OriginLine: [f32; 4],
+    pub OtherLine: [f32; 4],
+    pub HadJointWhenSerialised: bool,
+    /// TissueSnapClips length (0 when null).
+    pub TissueSnapClips: usize,
+    pub AudioSource: bool,
+    /// `lines != null` with its `lineData`.
+    pub lineData: Option<Vec<TissueString>>,
+    /// The pending SetBreakForce coroutine: Time.timeAsDouble it resumes at.
+    pub break_at: Option<f64>,
+    /// Joint.breakForce of the SpringJoint2D.
+    pub breakForce: f32,
+}
+
+impl Default for GoreString {
+    fn default() -> Self {
+        Self {
+            Other: None,
+            JointDampening: 0.5,
+            JointFreq: 4.0,
+            JointBreakThreshold: 4.0,
+            InvincibilityTime: 0.8,
+            OriginLine: [0.0; 4],
+            OtherLine: [0.0; 4],
+            HadJointWhenSerialised: false,
+            TissueSnapClips: 0,
+            AudioSource: false,
+            lineData: None,
+            break_at: None,
+            breakForce: f32::INFINITY,
+        }
     }
 }
 
@@ -995,8 +1051,7 @@ impl Game {
             && self.skins[l].acidProgress < 0.7
             && self.physicals[p].BurnProgress < 0.8
         {
-            // SpringJoint2D plus Random.Range(5, 14) and per-line draws.
-            unimplemented!("GoreStringBehaviour.CreateJoint");
+            self.gore_string_create_joint(l);
         }
         self.limbs[l].IsDismembered = true;
         let vector = self.transform_point(p, self.hinges[h].anchor);
@@ -1035,6 +1090,124 @@ impl Game {
         if let Some(src) = self.circulations[l].Source {
             remove_first(&mut self.limbs[l].ConnectedLimbs, src);
             remove_first(&mut self.limbs[src].ConnectedLimbs, l);
+        }
+    }
+}
+
+impl Game {
+    /// The SpringJoint2D as the b2 world needs it: limb `l`'s body to `other`'s body.
+    fn create_spring_joint(&mut self, l: usize, other: usize, anchor: [f32; 2], connected_anchor: [f32; 2], distance: f32, frequency: f32, damping_ratio: f32) {
+        let _ = (l, other, anchor, connected_anchor, distance, frequency, damping_ratio);
+        unimplemented!("b2: SpringJoint2D (b2DistanceJoint) between limb bodies l and other: local anchors anchor/connected_anchor, length distance, frequency, damping_ratio, breakForce = inf, collideConnected false");
+    }
+
+    /// Destroy(Joint) for the gore string's SpringJoint2D of limb `l`.
+    fn destroy_spring_joint(&mut self, l: usize) {
+        let _ = l;
+        unimplemented!("b2: destroy limb l's SpringJoint2D (its b2DistanceJoint and break-limit entry)");
+    }
+
+    /// Joint.breakForce = v on limb `l`'s SpringJoint2D.
+    fn set_spring_break_force(&mut self, l: usize, v: f32) {
+        self.limbs[l].gore.breakForce = v;
+        unimplemented!("b2: SpringJoint2D::SetBreakForce(v) on limb l's joint (move/insert it in the scene's break-limit list)");
+    }
+
+    /// GoreStringBehaviour.CreateJoint
+    pub fn gore_string_create_joint(&mut self, l: usize) {
+        if self.limbs[l].goreStringJoint {
+            // Debug.LogError("Tried to create gore string joint again ...")
+            return;
+        }
+        let Some(other) = self.limbs[l].gore.Other else {
+            panic!("Tried to create gore string joint without a rigidbody on either one or both ends");
+        };
+        self.limbs[l].gore.HadJointWhenSerialised = true;
+        let g = &self.limbs[l].gore;
+        // LineSegment.GetMidpoint: (A + B) * 0.5f
+        let anchor = [(g.OriginLine[0] + g.OriginLine[2]) * 0.5, (g.OriginLine[1] + g.OriginLine[3]) * 0.5];
+        let connected_anchor = [(g.OtherLine[0] + g.OtherLine[2]) * 0.5, (g.OtherLine[1] + g.OtherLine[3]) * 0.5];
+        let (freq, damping, invincibility) = (g.JointFreq, g.JointDampening, g.InvincibilityTime);
+        self.create_spring_joint(l, other, anchor, connected_anchor, 0.05, freq, damping);
+        self.limbs[l].goreStringJoint = true;
+        self.limbs[l].gore.breakForce = f32::INFINITY;
+        // StartCoroutine(DelayCoroutine(InvincibilityTime, SetBreakForce)): WaitForSeconds.
+        self.limbs[l].gore.break_at = Some(self.time.timeAsDouble + invincibility as f64);
+        let num = self.random.range_int(5, 14);
+        let mut data = Vec::with_capacity(num as usize);
+        data.push(TissueString { Pos1: 0.5, Pos2: 0.5, Strength: f32::INFINITY, Thickness: 2.0, ThicknessRatio: 1.0 });
+        for _ in 1..num {
+            // Constructor arguments evaluate in order: pos1, pos2, thickness, strength, thicknessRatio.
+            let pos1 = self.random.value();
+            let pos2 = self.random.value();
+            let thickness = self.random.range(0.5, 2.0);
+            let strength = self.random.range(0.1, 1.0);
+            let ratio = self.random.range(0.5, 2.0);
+            data.push(TissueString { Pos1: pos1, Pos2: pos2, Strength: strength, Thickness: thickness, ThicknessRatio: ratio });
+        }
+        // The Lines renderer setup is presentation.
+        self.limbs[l].gore.lineData = Some(data);
+    }
+
+    /// GoreStringBehaviour.DestroyJoint
+    pub fn gore_string_destroy_joint(&mut self, l: usize) {
+        self.limbs[l].gore.HadJointWhenSerialised = false;
+        self.limbs[l].gore.lineData = None;
+        if self.limbs[l].goreStringJoint {
+            self.destroy_spring_joint(l);
+            self.limbs[l].goreStringJoint = false;
+        }
+    }
+
+    /// GoreStringBehaviour.TryPlaySnapSound: the clip pick draws whether AudioSource or the PhysicalBehaviour plays it.
+    fn gore_string_snap_sound(&mut self, l: usize) {
+        let n = self.limbs[l].gore.TissueSnapClips;
+        if n != 0 {
+            self.pick_random(n);
+        }
+    }
+
+    /// GoreStringBehaviour.OnJointBreak2D for the string's own SpringJoint2D breaking.
+    pub fn gore_string_on_joint_break(&mut self, l: usize) {
+        self.gore_string_snap_sound(l);
+        self.gore_string_destroy_joint(l);
+    }
+
+    /// GoreStringBehaviour.Update (the colour smoothing and the line drawing are presentation).
+    pub fn gore_string_update(&mut self, l: usize) {
+        if !self.limbs[l].goreString || !self.limbs[l].goreStringEnabled || self.limbs[l].gore.lineData.is_none() {
+            return;
+        }
+        let Some(other) = self.limbs[l].gore.Other else { return };
+        // Other.gameObject.activeInHierarchy: limbs are never deactivated.
+        let g = &self.limbs[l].gore;
+        let break_force = g.breakForce;
+        let flag = !break_force.is_infinite();
+        let anchor = [(g.OriginLine[0] + g.OriginLine[2]) * 0.5, (g.OriginLine[1] + g.OriginLine[3]) * 0.5];
+        let connected_anchor = [(g.OtherLine[0] + g.OtherLine[2]) * 0.5, (g.OtherLine[1] + g.OtherLine[3]) * 0.5];
+        let a = self.transform_point(self.limbs[l].PhysicalBehaviour, anchor);
+        let b = self.transform_point(self.limbs[other].PhysicalBehaviour, connected_anchor);
+        let num = mathf::magnitude2([a[0] - b[0], a[1] - b[1]]);
+        for i in 0..self.limbs[l].gore.lineData.as_ref().unwrap().len() {
+            let t = self.limbs[l].gore.lineData.as_ref().unwrap()[i];
+            if flag && t.Thickness > f32::from_bits(1) && ((num / (t.Strength * t.Strength)) as f64) > (break_force as f64) * 0.05 {
+                self.gore_string_snap_sound(l);
+                self.limbs[l].gore.lineData.as_mut().unwrap()[i].Thickness = 0.0;
+            }
+        }
+    }
+
+    /// DelayedCallManager: the gore strings' SetBreakForce coroutines that are due.
+    pub fn gore_string_coroutines(&mut self) {
+        let now = self.time.timeAsDouble;
+        let mut due: Vec<usize> = (0..self.limbs.len()).filter(|&l| self.limbs[l].gore.break_at.is_some_and(|w| w <= now)).collect();
+        due.sort_by(|&a, &b| self.limbs[a].gore.break_at.partial_cmp(&self.limbs[b].gore.break_at).unwrap());
+        for l in due {
+            self.limbs[l].gore.break_at = None;
+            if self.limbs[l].goreStringJoint {
+                let v = self.limbs[l].gore.JointBreakThreshold * 1.5;
+                self.set_spring_break_force(l, v);
+            }
         }
     }
 }

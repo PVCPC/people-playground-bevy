@@ -215,6 +215,17 @@ impl Game {
             p.SparksOnSlide = r.req("SparksOnSlide")? == "1";
             p.SoftImpact = list(r.req("SoftImpact")?).len();
             p.HardImpact = list(r.req("HardImpact")?).len();
+            p.SizzleSounds = match r.req("SizzleSounds")? {
+                "null" => None,
+                t => Some(list(t).len()),
+            };
+            p.Sharp = r.req("Sharp")? == "1";
+            p.IgnoreStabResistance = r.req("IgnoreStabResistance")? == "1";
+            p.SharpForceThresholdMultiplier = f(r.req("SharpForceThresholdMultiplier")?);
+            // The dump has only ever listed empty SharpAxes; a non-empty element format is not known.
+            if list(r.req("SharpAxes")?).len() != 0 {
+                return Err("non-empty SharpAxes are not loaded yet".into());
+            }
             p.friction = match (r.get("friction"), r.req("PhysicMaterial")?) {
                 (Some(bits), _) => Some(f(bits)),
                 (None, "null") => None,
@@ -279,6 +290,10 @@ impl Game {
                 t => Some(list(t).into_iter().map(floats::<2>).collect()),
             };
             p.has_fire_map = r.req("LocalFirePropagationMap")? != "null";
+            p.MaximumStabVictims = r.req("MaximumStabVictims")?.parse().map_err(|e| format!("{} MaximumStabVictims: {e}", r.name))?;
+            p.LooseEndSize = f(r.req("LooseEndSize")?);
+            p.OverrideImpactSounds = list(r.req("OverrideImpactSounds")?).len();
+            p.audioSource = r.req("audioSource")? != "null";
             if let Some(rs) = &restored {
                 let collider = |k: &String| k.split(':').next()?.rsplit_once('#').filter(|(o, _)| *o == r.name).map(|(_, id)| id.parse::<i32>().unwrap());
                 p.collider = rs.fixtures.keys().find_map(collider).unwrap_or(0);
@@ -384,6 +399,35 @@ impl Game {
             l.Person = 0;
             l.Joint = hinge_names.iter().position(|n| *n == r.name);
             l.GripBehaviour = None;
+            let gore = reference(r.req("goreString")?);
+            l.goreString = gore.is_some();
+            // GoreStringBehaviour.enabled is not dumped; nothing in the game disables it.
+            l.goreStringEnabled = true;
+            l.goreStringJoint = gore.is_some_and(|id| s.of("GoreStringBehaviour").any(|g| g.id == id && g.req("Joint").is_ok_and(|j| j != "null")));
+            if let Some(g) = gore.and_then(|id| s.of("GoreStringBehaviour").find(|g| g.id == id)) {
+                let line = |k: &str| -> Result<[f32; 4], String> {
+                    let fl = inner_fields(g.req(k)?);
+                    let part = |n: &str| -> Result<[f32; 2], String> { Ok(floats(&fl.iter().find(|(m, _)| m == n).ok_or("LineSegment point")?.1)) };
+                    let (a, b) = (part("A")?, part("B")?);
+                    Ok([a[0], a[1], b[0], b[1]])
+                };
+                l.gore = super::limb::GoreString {
+                    Other: reference(g.req("Other")?).map(|id| rb_owner(s, id).map(|lid| limb_ids[&lid])).transpose()?,
+                    JointDampening: f(g.req("JointDampening")?),
+                    JointFreq: f(g.req("JointFreq")?),
+                    JointBreakThreshold: f(g.req("JointBreakThreshold")?),
+                    InvincibilityTime: f(g.req("InvincibilityTime")?),
+                    OriginLine: line("OriginLine")?,
+                    OtherLine: line("OtherLine")?,
+                    HadJointWhenSerialised: g.req("HadJointWhenSerialised")? == "1",
+                    TissueSnapClips: match g.req("TissueSnapClips")? {
+                        "null" => 0,
+                        t => list(t).len(),
+                    },
+                    AudioSource: g.req("AudioSource")? != "null",
+                    ..Default::default()
+                };
+            }
             l.ConnectedLimbs = list(r.req("ConnectedLimbs")?).into_iter().map(|t| limb_ids[&reference(t).unwrap()]).collect();
             l.NearestLimbToBrain = reference(r.req("NearestLimbToBrain")?).map(|id| limb_ids[&id]);
             l.StrengthMultipliers = list(r.req("StrengthMultipliers")?).into_iter().map(f).collect();
@@ -564,6 +608,7 @@ impl Game {
 
     /// The FixedUpdate scripts between CameraShakeBehaviour (FS) and CameraControlBehaviour (FM).
     pub fn fixed_update_scripts(&mut self) {
+        self.run_pending_starts();
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
                 self.physical_fixed_update(p);
@@ -595,6 +640,7 @@ impl Game {
     /// The Update and LateUpdate scripts between SteamworksInitialiser.Update (US) and end of frame (UE),
     /// in the recorded call order.
     pub fn update_scripts(&mut self) {
+        self.run_pending_starts();
         // UndoControllerBehaviour.Update, then the map's ambience emitter.
         for a in 0..self.ambient_audio.len() {
             self.play_audio_at_random_update(a);
@@ -619,6 +665,7 @@ impl Game {
             if let Some(g) = self.limbs[l].GripBehaviour {
                 self.grip_update(g);
             }
+            self.gore_string_update(l);
         }
         for b in 0..self.bleeding.len() {
             self.bleeding_update(b);
@@ -626,6 +673,7 @@ impl Game {
         self.node_controller_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
+        self.gore_string_coroutines();
         // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
@@ -849,6 +897,41 @@ fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<S
         }
     }
     Ok(out)
+}
+
+/// --loop-test: load the first snapshot with the b2 world once, then run the game loop through the rest of the
+/// recording (FixedUpdate scripts, physics pass, Update) taking only Time from it, comparing at every point.
+pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
+    let text = std::fs::read_to_string(dump).map_err(|e| e.to_string())?;
+    let snaps = parse(&text);
+    if !snaps.iter().any(|s| s.of("Contacts2D").next().is_some()) {
+        return Err("--loop-test needs a recording with Contacts2D (dump12 on)".into());
+    }
+    let start = snaps.iter().position(|s| s.pt == "FS" && s.of("b2World").next().is_some()).ok_or("no FS snapshot")?;
+    let mut g = Game::from_snapshot(&snaps[start], rig)?;
+    for (n, pair) in snaps[start..].windows(2).enumerate() {
+        g.load_time(&pair[0]);
+        let mut diffs = Vec::new();
+        match (pair[0].pt.as_str(), pair[1].pt.as_str()) {
+            ("FS", "FM") => g.fixed_update_scripts(),
+            ("FM", "FE") => {
+                g.simulate_physics();
+                diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
+            }
+            ("US", "UE") => g.update_scripts(),
+            _ => {}
+        }
+        diffs.extend(compare(&mut g, &pair[1]));
+        if !diffs.is_empty() {
+            eprintln!("diverged at {} frame {} (after {n} matching points, {}→{}):", pair[1].pt, pair[1].snap("frame"), pair[0].pt, pair[1].pt);
+            for d in diffs.iter().take(25) {
+                eprintln!("  {d}");
+            }
+            return Err(format!("{} diffs", diffs.len()));
+        }
+    }
+    println!("loop points {}, all match", snaps.len() - start);
+    Ok(())
 }
 
 /// --script-test: for every FS snapshot, load the game's state, run the FixedUpdate scripts and compare at FM;
