@@ -32,6 +32,14 @@ struct Arenas {
     node: HashMap<usize, usize>,
 }
 
+/// What `link_instance` built: the Person's index, and the arena index of each limb object and of each
+/// Rigidbody-less Transform above a body.
+pub struct Linked {
+    pub person: usize,
+    pub limbs: HashMap<usize, usize>,
+    pub nodes: HashMap<usize, usize>,
+}
+
 fn script<'a>(prefab: &'a Prefab, o: usize, class: &str) -> Option<(usize, bool, &'a Value)> {
     prefab.objects[o].components.iter().enumerate().find_map(|(c, (_, comp))| match comp {
         Component::Script { class: k, enabled, fields, .. } if k == class => Some((c, *enabled, fields)),
@@ -146,8 +154,8 @@ impl Game {
     /// order GetComponentsInChildren lists them, and the queue 0x14 order within one script class). Limb-owned
     /// components (CirculationBehaviour, ConnectedNodeBehaviour, SkinMaterialHandler, GForceMeasureBehaviour)
     /// share their limb's index. Rigidbody-less Transforms above bodies become `transform_nodes` in the order
-    /// the bodies reach them. Returns the Person's index.
-    pub fn link_instance(&mut self, db: &mut AssetDb, prefab: &Prefab, inst: &Instance) -> Result<usize, String> {
+    /// the bodies reach them.
+    pub fn link_instance(&mut self, db: &mut AssetDb, prefab: &Prefab, inst: &Instance) -> Result<Linked, String> {
         let file = prefab.objects[0].game_object.file;
         let mut l = Linker { prefab, inst, file, arenas: Arenas::default() };
         let n = prefab.objects.len();
@@ -382,6 +390,23 @@ impl Game {
         p.Limbs = l.limbs(v, "Limbs")?;
         p.BoneBreakClips = array(v, "BoneBreakClips")?.len();
         p.DismembermentClips = array(v, "DismembermentClips")?.len();
+        // CirculationBehaviour copies the BleedingParticle prefab's DripSounds (a serialized array, never null).
+        if let Some(bp) = field(v, "BleedingParticlePrefab")?.pptr().filter(|p| !p.is_null()) {
+            let go = db.resolve(file, bp).ok_or("BleedingParticlePrefab outside the data")?;
+            let mut drips = None;
+            for c in db.game_object(go)?.components {
+                let c = db.resolve(go.file, c).ok_or("a BleedingParticlePrefab component outside the data")?;
+                if db.files[c.file].object(c.path_id).map(|o| o.class_id) != Some(114) {
+                    continue;
+                }
+                if let Some((script, _, bv)) = db.mono(c)? {
+                    if script.class_name == "BleedingParticleBehaviour" {
+                        drips = Some(array(&bv, "DripSounds")?.len());
+                    }
+                }
+            }
+            p.BleedingDripSounds = Some(drips.ok_or("BleedingParticlePrefab without BleedingParticleBehaviour")?);
+        }
         let s = inst.objects[0].trs.s;
         p.localScale = [s[0], s[1], s[2]];
         for pose in array(v, "Poses")? {
@@ -417,7 +442,70 @@ impl Game {
             });
         }
         self.people.push(p);
-        Ok(person)
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node })
+    }
+
+    /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
+    /// AwakeFromLoad queues, the scripts' deserialization (`link_instance`), then queue 0x14's Awake calls.
+    /// Returns the behaviours whose Start is pending; Unity runs Start later (`start_behaviours`). The b2 bodies
+    /// see PersonBehaviour.Awake's rescale at the next SyncTransforms.
+    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Result<(Instance, Linked, Vec<(usize, usize)>), String> {
+        let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, original_ids);
+        let linked = self.link_instance(db, prefab, &inst)?;
+        self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
+        Ok((inst, linked, behaviours))
+    }
+
+    /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order. The classes left out have no Awake
+    /// that touches simulation state (ConnectedNodeBehaviour, GripBehaviour and GoreStringBehaviour only read
+    /// components; the root's other scripts have none), and none of the Person's scripts has OnEnable.
+    pub fn awake_behaviours(&mut self, prefab: &Prefab, inst: &mut Instance, linked: &Linked, order: &[(usize, usize)]) {
+        for &(o, c) in order {
+            let Component::Script { class, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            let limb = || linked.limbs[&o];
+            match class.as_str() {
+                "PersonBehaviour" => {
+                    if let Some(s) = self.person_awake(linked.person) {
+                        inst.set_local_scale(0, s);
+                        if let Some(&n) = linked.nodes.get(&0) {
+                            self.transform_nodes[n].trs.s = [s[0], s[1], s[2], 0.0];
+                        }
+                    }
+                }
+                "SkinMaterialHandler" => self.skin_awake(limb()),
+                "PhysicalBehaviour" => self.physical_awake(self.limbs[limb()].PhysicalBehaviour),
+                "LimbBehaviour" => self.limb_awake(limb()),
+                "CirculationBehaviour" => self.circulation_awake(limb()),
+                _ => {}
+            }
+        }
+    }
+
+    /// Start of each behaviour `spawn` returned, in the same order. Each PhysicalBehaviour's `hash_code` must be
+    /// set first: Random.InitState(GetHashCode()) takes Mono's object hash, a function of the object's address
+    /// in the managed heap. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts
+    /// only touch rendering, event subscriptions and the stat manager.
+    pub fn start_behaviours(&mut self, prefab: &Prefab, linked: &Linked, order: &[(usize, usize)]) {
+        for &(o, c) in order {
+            let Component::Script { class, fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            let limb = || linked.limbs[&o];
+            let flag = |name: &str| field(v, name).and_then(|x| x.bool().ok_or_else(|| name.to_string())).unwrap();
+            match class.as_str() {
+                "PersonBehaviour" => self.person_start(linked.person),
+                "HingeJointLimitAutofixBehaviour" => self.hinge_joint_limit_autofix_start(linked.person),
+                "CirculationBehaviour" => self.circulation_start(limb()),
+                "PhysicalBehaviour" => self.physical_start(self.limbs[limb()].PhysicalBehaviour),
+                "LimbBehaviour" => self.limb_start(limb()),
+                "ConnectedNodeBehaviour" => {
+                    let keep: Option<Vec<bool>> = v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect());
+                    self.node_start(limb(), keep.as_deref());
+                }
+                "GripBehaviour" => self.grip_start(self.limbs[limb()].GripBehaviour.unwrap()),
+                "GoreStringBehaviour" => self.gore_string_start(limb(), flag("CreateJointOnStart")),
+                "ShatteredObjectGenerator" if flag("GenerateOnStart") => unimplemented!("ShatteredObjectGenerator.Start with GenerateOnStart"),
+                _ => {}
+            }
+        }
     }
 
     /// The PhysicalProperties asset's arena index, loading it on first use (assets are shared by name).
@@ -496,13 +584,10 @@ mod tests {
         let mut first = first;
         first.records.retain(|r| r.ty != "FancyBloodSplatController" && r.ty != "BleedingParticleBehaviour");
         let want = Game::from_snapshot(&first, &rig).unwrap();
-        let person = g.link_instance(&mut db, &prefab, &inst).unwrap();
-        // The Awake and Start passes over the queue 0x14 behaviours, sorted as AwakeFromLoadQueue sorts them (script
-        // execution order, then the higher clone id).
-        let header = super::super::dump::header(&root.join("reference-probe/game/dump31spawnrand.txt")).unwrap();
-        g.random = crate::unity::Random { state: super::super::dump::spawn_random_state(&header).unwrap() };
-        // The BleedingParticle prefab's DripSounds (Person.BleedingParticlePrefab) is 11 clips.
-        g.people[person].BleedingDripSounds = Some(11);
+        let linked = g.link_instance(&mut db, &prefab, &inst).unwrap();
+        let person = linked.person;
+        assert_eq!(g.people[person].BleedingDripSounds, Some(11), "BleedingParticle DripSounds");
+        // The queue 0x14 order, as instantiate_native returns it (script execution order, then the higher clone id).
         let mut order: Vec<(usize, usize)> = (0..prefab.objects.len())
             .flat_map(|o| (0..prefab.objects[o].components.len()).map(move |c| (o, c)))
             .filter(|&(o, c)| matches!(prefab.objects[o].components[c].1, Component::Script { .. }))
@@ -511,51 +596,22 @@ mod tests {
             let Component::Script { execution_order, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
             (*execution_order, std::cmp::Reverse(inst.objects[o].components[c]))
         });
-        let class_of = |o: usize, c: usize| match &prefab.objects[o].components[c].1 {
-            Component::Script { class, .. } => class.clone(),
-            _ => unreachable!(),
-        };
-        let limb_of = |g: &Game, o: usize| (0..g.limbs.len()).find(|&l| g.limbs[l].Person == person && g.limbs[l].name == prefab.objects[o].name).unwrap();
-        for &(o, c) in &order {
-            match class_of(o, c).as_str() {
-                "PersonBehaviour" => {
-                    let scale = g.person_awake(person).unwrap();
-                    let s = inst.objects[0].trs.s;
-                    assert_eq!(scale.map(f32::to_bits), [s[0].to_bits(), s[1].to_bits(), s[2].to_bits()], "PersonBehaviour.Awake scale");
-                }
-                "SkinMaterialHandler" => g.skin_awake(limb_of(&g, o)),
-                "PhysicalBehaviour" => g.physical_awake(g.limbs[limb_of(&g, o)].PhysicalBehaviour),
-                "LimbBehaviour" => g.limb_awake(limb_of(&g, o)),
-                "CirculationBehaviour" => g.circulation_awake(limb_of(&g, o)),
-                _ => {}
-            }
-        }
-        // PhysicalBehaviour.SetupSpawnPrefab (Instantiate of the Resources prefab) is not rewritten: off for the Start pass.
-        // Mono's GetHashCode (Random.InitState(GetHashCode()) in PhysicalBehaviour.Start) is a heap property: from the recording.
+        let header = super::super::dump::header(&root.join("reference-probe/game/dump31spawnrand.txt")).unwrap();
+        g.random = crate::unity::Random { state: super::super::dump::spawn_random_state(&header).unwrap() };
+        // spawn_recorded applied the recorded scale; PersonBehaviour.Awake must draw the same one.
+        let recorded_scale = inst.objects[0].trs.s;
+        let mut inst = inst;
+        g.awake_behaviours(&prefab, &mut inst, &linked, &order);
+        assert_eq!(g.people[person].localScale.map(f32::to_bits), [recorded_scale[0].to_bits(), recorded_scale[1].to_bits(), recorded_scale[2].to_bits()], "PersonBehaviour.Awake scale");
+        // Mono's GetHashCode is a heap address: from the recording.
         for p in 0..g.physicals.len() {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
+        // PhysicalBehaviour.SetupSpawnPrefab (Instantiate of the Resources prefab) is not rewritten: off for the Start pass.
         let spawn_particles: Vec<bool> = g.physicals.iter().map(|p| p.SpawnSpawnParticles).collect();
         g.physicals.iter_mut().for_each(|p| p.SpawnSpawnParticles = false);
-        for &(o, c) in &order {
-            let Some((_, _, v)) = script(&prefab, o, &class_of(o, c)) else { unreachable!() };
-            match class_of(o, c).as_str() {
-                "PersonBehaviour" => g.person_start(person),
-                "HingeJointLimitAutofixBehaviour" => g.hinge_joint_limit_autofix_start(person),
-                "CirculationBehaviour" => g.circulation_start(limb_of(&g, o)),
-                "PhysicalBehaviour" => g.physical_start(g.limbs[limb_of(&g, o)].PhysicalBehaviour),
-                "LimbBehaviour" => g.limb_start(limb_of(&g, o)),
-                "ConnectedNodeBehaviour" => {
-                    let keep: Option<Vec<bool>> = v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect());
-                    g.node_start(limb_of(&g, o), keep.as_deref());
-                }
-                "GripBehaviour" => g.grip_start(g.limbs[limb_of(&g, o)].GripBehaviour.unwrap()),
-                "GoreStringBehaviour" => g.gore_string_start(limb_of(&g, o), field(v, "CreateJointOnStart").unwrap().bool().unwrap()),
-                "ShatteredObjectGenerator" => assert!(!field(v, "GenerateOnStart").unwrap().bool().unwrap(), "ShatteredObjectGenerator.Start generates"),
-                _ => {}
-            }
-        }
+        g.start_behaviours(&prefab, &linked, &order);
         for (p, on) in g.physicals.iter_mut().zip(spawn_particles) {
             p.SpawnSpawnParticles = on;
         }
