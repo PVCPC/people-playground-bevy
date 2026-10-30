@@ -1619,6 +1619,13 @@ impl Game {
                         p => Some(super::translated::rt::Go::Asset(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?)),
                     }),
                     K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
+                    K::Handwritten(arena) => V::Handwritten(match l.object(x)? {
+                        None => None,
+                        Some(t) => Some(*match arena {
+                            "DamagableMachineryBehaviour" => &machinery,
+                            _ => unimplemented!("{class}.{name}: a {arena}"),
+                        }.get(&t).ok_or_else(|| format!("{class}.{name}: no {arena} there"))?),
+                    }),
                     K::Transform => V::Transform(l.object(x)?.map(|t| super::translated::rt::Xf::this(l.arenas.physical.get(&t).copied(), physics(t)))),
                 };
                 self.tr_link(b, name, val);

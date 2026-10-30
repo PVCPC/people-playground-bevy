@@ -673,14 +673,19 @@ impl Game {
             }
             return;
         };
-        let classes: Vec<String> = self.with_component_instance(self.physicals[p].id, |_, inst, o| {
-            inst.prefab.objects[o].components.iter().filter_map(|(_, c)| match c {
-                crate::assets::db::Component::Script { class, .. } if receivers.contains(&class.as_str()) => Some(class.clone()),
+        let classes: Vec<(String, i32)> = self.with_component_instance(self.physicals[p].id, |_, inst, o| {
+            inst.prefab.objects[o].components.iter().enumerate().filter_map(|(k, (_, c))| match c {
+                crate::assets::db::Component::Script { class, .. } if receivers.contains(&class.as_str()) => Some((class.clone(), inst.objects[o].components[k])),
                 _ => None,
             }).collect()
         });
-        for class in classes {
+        for (class, id) in classes {
             match (class.as_str(), exit) {
+                (c, _) if super::translated::CLASSES.contains(&c) => {
+                    let Some(&(_, super::Behaviour::Translated(t))) = self.behaviour_of.get(&id) else { unimplemented!("{c}.Shot before its Awake") };
+                    let shot = super::translated::rt::Shot { normal, point, damage };
+                    if exit { self.tr_exit_shot(t, shot) } else { self.tr_shot(t, shot) }
+                }
                 ("PhysicalBehaviour", false) => self.physical_shot(p, normal, point, damage),
                 ("PhysicalBehaviour", true) => self.physical_exit_shot(p, normal, point, damage),
                 ("DestroyableBehaviour", _) => {

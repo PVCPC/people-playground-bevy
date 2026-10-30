@@ -64,7 +64,7 @@ impl Game {
     pub fn fan_behaviour_use(&mut self, this: usize) {
         if self.tr.fan_behaviour[this].enabled {
             self.tr.fan_behaviour[this].Activated = !self.tr.fan_behaviour[this].Activated;
-            { rt::pres(self.tr.fan_behaviour[this].Audio);  };
+            { let _ = self.tr.fan_behaviour[this].Switch; rt::pres(self.tr.fan_behaviour[this].Audio); };
             self.fan_behaviour_update_activated(this);
         }
     }
@@ -137,23 +137,23 @@ impl Game {
     /// FanBehaviour.UpdateActivated
     pub fn fan_behaviour_update_activated(&mut self, this: usize) {
         if self.tr.fan_behaviour[this].Activated {
-            { rt::pres(self.tr.fan_behaviour[this].Audio);  };
-            { rt::pres(self.tr.fan_behaviour[this].Audio);  };
+            { rt::pres(self.tr.fan_behaviour[this].Audio); };
+            { let _ = self.tr.fan_behaviour[this].StartupSound; rt::pres(self.tr.fan_behaviour[this].Audio); };
             if self.tr.fan_behaviour[this].HelicopterAudioSource {
-                { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource);  };
-                { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource);  };
+                { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource); };
+                { let _ = self.tr.fan_behaviour[this].StartupSound; rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource); };
             }
             return;
         }
-        { rt::pres(self.tr.fan_behaviour[this].Audio);  };
+        { rt::pres(self.tr.fan_behaviour[this].Audio); };
         if self.tr.fan_behaviour[this].HelicopterAudioSource {
-            { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource);  };
+            { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource); };
         }
         if ((self.cosmetic_rotation_behaviour_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64) > (30.0 as f64)) {
             if self.tr.fan_behaviour[this].HelicopterAudioSource {
-                { rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource);  };
+                { let _ = self.tr.fan_behaviour[this].ShutoffSound; rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource); };
             }
-            { rt::pres(self.tr.fan_behaviour[this].Audio);  };
+            { let _ = self.tr.fan_behaviour[this].ShutoffSound; rt::pres(self.tr.fan_behaviour[this].Audio); };
         }
     }
 

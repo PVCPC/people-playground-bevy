@@ -8,6 +8,7 @@ pub mod fan_behaviour;
 pub mod fire_sound_emitter;
 pub mod guide_temperature_behaviour;
 pub mod jack_o_latern_behaviour;
+pub mod siren_behaviour;
 pub mod target_line_renderer;
 
 use crate::game::{Game, Phase};
@@ -22,6 +23,7 @@ pub struct Translated {
     pub fire_sound_emitter: Vec<fire_sound_emitter::FireSoundEmitter>,
     pub guide_temperature_behaviour: Vec<guide_temperature_behaviour::GuideTemperatureBehaviour>,
     pub jack_o_latern_behaviour: Vec<jack_o_latern_behaviour::JackOLaternBehaviour>,
+    pub siren_behaviour: Vec<siren_behaviour::SirenBehaviour>,
     pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
 }
 
@@ -35,6 +37,7 @@ impl Default for Translated {
             fire_sound_emitter: Vec::new(),
             guide_temperature_behaviour: Vec::new(),
             jack_o_latern_behaviour: Vec::new(),
+            siren_behaviour: Vec::new(),
             target_line_renderer: Vec::new(),
         }
     }
@@ -49,10 +52,11 @@ pub enum TBehaviour {
     FireSoundEmitter(usize),
     GuideTemperatureBehaviour(usize),
     JackOLaternBehaviour(usize),
+    SirenBehaviour(usize),
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DisableWhenWet", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DisableWhenWet", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
@@ -63,6 +67,7 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
             TBehaviour::GuideTemperatureBehaviour(_) => "GuideTemperatureBehaviour",
             TBehaviour::JackOLaternBehaviour(_) => "JackOLaternBehaviour",
+            TBehaviour::SirenBehaviour(_) => "SirenBehaviour",
             TBehaviour::TargetLineRenderer(_) => "TargetLineRenderer",
         }
     }
@@ -76,6 +81,7 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => true,
             TBehaviour::GuideTemperatureBehaviour(_) => true,
             TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::SirenBehaviour(_) => true,
             TBehaviour::TargetLineRenderer(_) => true,
         }
     }
@@ -89,6 +95,7 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => true,
+            TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
         }
     }
@@ -102,6 +109,7 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::SirenBehaviour(_) => true,
             TBehaviour::TargetLineRenderer(_) => false,
         }
     }
@@ -127,6 +135,8 @@ pub enum LinkKind {
     Mask,
     /// A Transform in the prefab.
     Transform,
+    /// A component of a hand-written class: its index in that class's arena.
+    Handwritten(&'static str),
 }
 
 /// The value the linker found for a field.
@@ -139,6 +149,7 @@ pub enum LinkVal {
     Prefab(Option<rt::Go>),
     Mask(u32),
     Transform(Option<rt::Xf>),
+    Handwritten(Option<usize>),
 }
 
 pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
@@ -149,6 +160,7 @@ pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
         "FireSoundEmitter" => &[],
         "GuideTemperatureBehaviour" => &[],
         "JackOLaternBehaviour" => &[("GlowingSprites", LinkKind::Present), ("ObjectSprite", LinkKind::Present), ("LightSprite", LinkKind::Present)],
+        "SirenBehaviour" => &[("AudioSource", LinkKind::Present), ("SirenSound", LinkKind::Present), ("BrokenSirenSound", LinkKind::Present), ("DamagableMachineryBehaviour", LinkKind::Handwritten("DamagableMachineryBehaviour"))],
         "TargetLineRenderer" => &[("LineRenderer", LinkKind::Present), ("Target", LinkKind::Transform)],
         _ => &[],
     }
@@ -200,6 +212,13 @@ impl Game {
                 self.tr.jack_o_latern_behaviour.push(x);
                 TBehaviour::JackOLaternBehaviour(self.tr.jack_o_latern_behaviour.len() - 1)
             }
+            "SirenBehaviour" => {
+                let mut x = siren_behaviour::SirenBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.siren_behaviour.push(x);
+                TBehaviour::SirenBehaviour(self.tr.siren_behaviour.len() - 1)
+            }
             "TargetLineRenderer" => {
                 let mut x = target_line_renderer::TargetLineRenderer::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -227,6 +246,10 @@ impl Game {
             (TBehaviour::JackOLaternBehaviour(i), "GlowingSprites", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].GlowingSprites = v,
             (TBehaviour::JackOLaternBehaviour(i), "ObjectSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].ObjectSprite = v,
             (TBehaviour::JackOLaternBehaviour(i), "LightSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].LightSprite = v,
+            (TBehaviour::SirenBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.siren_behaviour[i].AudioSource = v,
+            (TBehaviour::SirenBehaviour(i), "SirenSound", LinkVal::Present(v)) => self.tr.siren_behaviour[i].SirenSound = v,
+            (TBehaviour::SirenBehaviour(i), "BrokenSirenSound", LinkVal::Present(v)) => self.tr.siren_behaviour[i].BrokenSirenSound = v,
+            (TBehaviour::SirenBehaviour(i), "DamagableMachineryBehaviour", LinkVal::Handwritten(v)) => self.tr.siren_behaviour[i].DamagableMachineryBehaviour = v,
             (TBehaviour::TargetLineRenderer(i), "LineRenderer", LinkVal::Present(v)) => self.tr.target_line_renderer[i].LineRenderer = v,
             (TBehaviour::TargetLineRenderer(i), "Target", LinkVal::Transform(v)) => self.tr.target_line_renderer[i].Target = v,
             (b, f, v) => panic!("{b:?}.{f} linked with {v:?}"),
@@ -242,6 +265,7 @@ impl Game {
             TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
             TBehaviour::GuideTemperatureBehaviour(i) => self.tr.guide_temperature_behaviour[i].enabled,
             TBehaviour::JackOLaternBehaviour(i) => self.tr.jack_o_latern_behaviour[i].enabled,
+            TBehaviour::SirenBehaviour(i) => self.tr.siren_behaviour[i].enabled,
             TBehaviour::TargetLineRenderer(i) => self.tr.target_line_renderer[i].enabled,
         }
     }
@@ -285,7 +309,20 @@ impl Game {
     pub fn tr_use(&mut self, b: TBehaviour) {
         match b {
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_use(i),
+            TBehaviour::SirenBehaviour(i) => self.siren_behaviour_use(i),
             _ => {}
+        }
+    }
+
+    pub fn tr_shot(&mut self, b: TBehaviour, shot: rt::Shot) {
+        match b {
+            _ => unreachable!("{b:?} has no Shot"),
+        }
+    }
+
+    pub fn tr_exit_shot(&mut self, b: TBehaviour, shot: rt::Shot) {
+        match b {
+            _ => unreachable!("{b:?} has no ExitShot"),
         }
     }
 
@@ -297,6 +334,7 @@ impl Game {
             (Phase::Update, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_update(i),
             (Phase::Fixed, TBehaviour::FireSoundEmitter(i)) => self.fire_sound_emitter_fixed_update(i),
             (Phase::Fixed, TBehaviour::GuideTemperatureBehaviour(i)) => self.guide_temperature_behaviour_fixed_update(i),
+            (Phase::Update, TBehaviour::SirenBehaviour(i)) => self.siren_behaviour_update(i),
             (Phase::Update, TBehaviour::TargetLineRenderer(i)) => self.target_line_renderer_update(i),
             _ => {}
         }

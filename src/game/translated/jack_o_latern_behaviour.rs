@@ -32,7 +32,7 @@ impl Game {
 
     /// JackOLaternBehaviour.Refresh
     pub fn jack_o_latern_behaviour_refresh(&mut self, this: usize) {
-        let _ = { rt::pres(self.tr.jack_o_latern_behaviour[this].GlowingSprites);  };
+        let _ = { rt::pres(self.tr.jack_o_latern_behaviour[this].GlowingSprites); };
         rt::pres(self.tr.jack_o_latern_behaviour[this].LightSprite);
     }
 }

@@ -18,6 +18,14 @@ pub enum Xf {
     Collider(i32),
 }
 
+/// Shot, as SendMessage("Shot"/"ExitShot") passes it.
+#[derive(Clone, Copy, Debug)]
+pub struct Shot {
+    pub normal: [f32; 2],
+    pub point: [f32; 2],
+    pub damage: f32,
+}
+
 /// A GameObject as the translated scripts hold one.
 #[derive(Clone, Copy, Debug)]
 pub enum Go {

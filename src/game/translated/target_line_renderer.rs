@@ -28,12 +28,12 @@ impl Game {
     pub fn target_line_renderer_awake(&mut self, this: usize) {
         rt::pres(self.tr.target_line_renderer[this].LineRenderer);
         rt::pres(self.tr.target_line_renderer[this].LineRenderer);
-        { rt::pres(self.tr.target_line_renderer[this].LineRenderer);  };
+        { rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
         self.target_line_renderer_update(this);
     }
 
     /// TargetLineRenderer.Update
     pub fn target_line_renderer_update(&mut self, this: usize) {
-        { rt::pres(self.tr.target_line_renderer[this].LineRenderer); let a2 = { let a1 = self.tr_position(rt::nn(self.tr.target_line_renderer[this].Target)); self.tr_inverse_transform_point(rt::nn(Some(rt::Xf::this(self.tr.target_line_renderer[this].this_physical, self.tr.target_line_renderer[this].this_physics))), a1) }; };
+        { let _ = { let a1 = self.tr_position(rt::nn(self.tr.target_line_renderer[this].Target)); self.tr_inverse_transform_point(rt::nn(Some(rt::Xf::this(self.tr.target_line_renderer[this].this_physical, self.tr.target_line_renderer[this].this_physics))), a1) }; rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
     }
 }
