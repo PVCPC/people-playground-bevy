@@ -10,7 +10,7 @@ impl Game {
         let mut circulationBehaviour: Option<usize> = None;
         let mut limb: Option<usize> = None;
         self.water_breathing_serum_liquid_on_update(this, c);
-        if (({ circulationBehaviour = match c { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() } && { limb = circulationBehaviour; true }) && (!(self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() == "Android") && (self.limbs[rt::nn(limb)].RoughClassification == 0))) {
+        if (({ circulationBehaviour = match c { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() } && { limb = circulationBehaviour; true }) && (!(self.limbs[rt::nn(limb)].SpeciesIdentity.clone() == "Android") && (self.limbs[rt::nn(limb)].RoughClassification == 0))) {
             self.people[rt::nn(Some(self.limbs[rt::nn(limb)].Person))].OxygenLevel = 1.0;
         }
         return;

@@ -198,7 +198,7 @@ script! {
 }
 
 impl Game {
-    fn blood_type(&self, l: usize) -> usize {
+    pub fn blood_type(&self, l: usize) -> usize {
         liquid(&self.limbs[l].BloodLiquidType)
     }
 

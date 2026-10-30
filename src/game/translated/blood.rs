@@ -8,7 +8,7 @@ impl Game {
     /// Blood.OnUpdate
     pub fn blood_on_update(&mut self, this: usize, mut container: crate::game::container::Owner) {
         let mut circulationBehaviour: Option<usize> = None;
-        if (({ circulationBehaviour = match container { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() }) && ((self.limbs[rt::nn(circulationBehaviour)].SpeciesIdentity.as_str() == "Android") && ((self.random.value() as f64) > (0.9950000047683716 as f64)))) {
+        if (({ circulationBehaviour = match container { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() }) && ((self.limbs[rt::nn(circulationBehaviour)].SpeciesIdentity.clone() == "Android") && ((self.random.value() as f64) > (0.9950000047683716 as f64)))) {
             { let v = ((((self.physicals[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].PhysicalBehaviour))].Charge() as f64) + (5.0 as f64))) as f32); self.physicals[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].PhysicalBehaviour))].charge = v; };
         }
         return;

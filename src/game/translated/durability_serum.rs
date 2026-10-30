@@ -31,7 +31,7 @@ impl Game {
 
     /// DurabilitySerum.OnEnterLimb
     pub fn durability_serum_on_enter_limb(&mut self, this: usize, mut limb: Option<usize>) {
-        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() == "Android") {
+        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.clone() == "Android") {
             self.limbs[rt::nn(limb)].InitialHealth = ((((self.limbs[rt::nn(limb)].InitialHealth as f64) + ((self.random.value() as f64) * (5.0 as f64)))) as f32);
             self.limbs[rt::nn(limb)].Health = ((((self.limbs[rt::nn(limb)].Health as f64) + (self.limbs[rt::nn(limb)].InitialHealth as f64))) as f32);
         }

@@ -21,7 +21,7 @@ impl Game {
 
     /// Oil.OnEnterLimb
     pub fn oil_on_enter_limb(&mut self, this: usize, mut limb: Option<usize>) {
-        if (self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() != "Android") {
+        if (self.limbs[rt::nn(limb)].SpeciesIdentity.clone() != "Android") {
             self.limbs[rt::nn(limb)].Numbness = ((((self.limbs[rt::nn(limb)].Numbness as f64) + (0.5 as f64))) as f32);
             self.circulations[rt::nn(limb)].IsPump = false;
         }

@@ -54,7 +54,7 @@ impl Game {
     /// IndustrialGyrostabiliserBehaviour.SetActivated
     pub fn industrial_gyrostabiliser_behaviour_set_activated(&mut self, this: usize, mut activated: bool) {
         self.tr.industrial_gyrostabiliser_behaviour[this].Activated = activated;
-        self.tr_set_active(rt::nn(self.tr.industrial_gyrostabiliser_behaviour[this].Light), self.tr.industrial_gyrostabiliser_behaviour[this].Activated);
+        { let a1 = self.tr.industrial_gyrostabiliser_behaviour[this].Activated; self.tr_set_active(rt::nn(self.tr.industrial_gyrostabiliser_behaviour[this].Light), a1) };
         { let v = (if self.tr.industrial_gyrostabiliser_behaviour[this].Activated { 4 } else { 0 }); self.physicals[rt::nn(self.tr.industrial_gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.set_constraints(&mut self.world, v); };
         return;
     }

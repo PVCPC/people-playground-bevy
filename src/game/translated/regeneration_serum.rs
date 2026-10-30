@@ -31,7 +31,7 @@ impl Game {
 
     /// RegenerationSerum.OnEnterLimb
     pub fn regeneration_serum_on_enter_limb(&mut self, this: usize, mut limb: Option<usize>) {
-        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() == "Android") {
+        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.clone() == "Android") {
             self.limbs[rt::nn(limb)].RegenerationSpeed = ((((self.limbs[rt::nn(limb)].RegenerationSpeed as f64) + (1.0 as f64))) as f32);
         }
         return;

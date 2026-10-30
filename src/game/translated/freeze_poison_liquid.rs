@@ -11,7 +11,7 @@ impl Game {
         let mut limb: Option<usize> = None;
         let mut num: f32 = 0.0;
         self.freeze_poison_liquid_temporary_body_liquid_on_update(this, c);
-        if (({ circulationBehaviour = match c { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() } && { limb = circulationBehaviour; true }) && !(self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() == "Android")) {
+        if (({ circulationBehaviour = match c { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() } && { limb = circulationBehaviour; true }) && !(self.limbs[rt::nn(limb)].SpeciesIdentity.clone() == "Android")) {
             num = { let a1 = ((((self.get_amount(crate::game::container::Owner::Circulation(rt::nn(limb)), this) as f64) * (750.0 as f64))) as f32); mathf::clamp01(a1) };
             if ((self.random.value() as f64) < (num as f64)) {
                 self.limbs[rt::nn(limb)].Frozen = true;

@@ -87,7 +87,7 @@ impl Game {
     pub fn fan_behaviour_fixed_update(&mut self, this: usize) {
         let mut worldDir: [f32; 3] = [0.0; 3];
         if self.tr.fan_behaviour[this].Activated {
-            worldDir = self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), rt::v3(self.tr.fan_behaviour[this].RelativeDirection));
+            worldDir = { let a1 = rt::v3(self.tr.fan_behaviour[this].RelativeDirection); self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a1) };
             let mut s1 = 0usize;
             'c1: loop {
                 match s1 {
@@ -142,11 +142,11 @@ impl Game {
         let mut i: i32 = 0;
         let mut collider2D: i32 = 0;
         let mut value: Option<usize> = None;
-        num = { let a1 = rt::v2(self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), rt::v3(self.tr.fan_behaviour[this].DeathLocalStartPos))); let a2 = [self.tr.fan_behaviour[this].DeathSize[0], self.tr.fan_behaviour[this].DeathSize[1]]; let a3 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))))[2]; let a4 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a1, a2, a3, a4); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
+        num = { let a2 = rt::v2({ let a1 = rt::v3(self.tr.fan_behaviour[this].DeathLocalStartPos); self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a1) }); let a3 = [self.tr.fan_behaviour[this].DeathSize[0], self.tr.fan_behaviour[this].DeathSize[1]]; let a4 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))))[2]; let a5 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a2, a3, a4, a5); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
         if (num == 0) {
             return;
         }
-        vector = rt::mul(self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), rt::v3(self.tr.fan_behaviour[this].DeathDirection)), (((((({ let a5 = ((((self.time.time as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64))) as f32); mathf::sin(a5) } as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64)) * (2.0 as f64)) * ((mathf::min(self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge(), 2.0) as f64) + (1.0 as f64)))) as f32));
+        vector = rt::mul({ let a6 = rt::v3(self.tr.fan_behaviour[this].DeathDirection); self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a6) }, (((((({ let a7 = ((((self.time.time as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64))) as f32); mathf::sin(a7) } as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64)) * (2.0 as f64)) * ((mathf::min(self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge(), 2.0) as f64) + (1.0 as f64)))) as f32));
         i = 0;
         let mut s1 = 0usize;
         'c1: loop {
@@ -209,10 +209,10 @@ impl Game {
         if ((self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Wetness as f64) > (0.20000000298023224 as f64)) {
             { let a1 = rt::v2(rt::mul(worldDir, (((((self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge() as f64) + (1.0 as f64)) * (50.0 as f64))) as f32))); self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].rigidbody.add_force(&mut self.world, a1) };
         }
-        vector = self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), rt::v3(self.tr.fan_behaviour[this].LocalStartPos));
-        raycastHit2D = self.tr_raycast(rt::v2(vector), rt::v2(rt::neg(worldDir)), length, self.tr.fan_behaviour[this].Mask);
+        vector = { let a2 = rt::v3(self.tr.fan_behaviour[this].LocalStartPos); self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a2) };
+        raycastHit2D = { let a3 = self.tr.fan_behaviour[this].Mask; self.tr_raycast(rt::v2(vector), rt::v2(rt::neg(worldDir)), length, a3) };
         if !raycastHit2D.is_some() {
-            { let a2 = rt::v2(rt::mul(worldDir, (((((self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge() as f64) + (1.0 as f64)) * (20.0 as f64))) as f32))); self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].rigidbody.add_force(&mut self.world, a2) };
+            { let a4 = rt::v2(rt::mul(worldDir, (((((self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge() as f64) + (1.0 as f64)) * (20.0 as f64))) as f32))); self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].rigidbody.add_force(&mut self.world, a4) };
             return;
         }
         { let _ = rt::v3(rt::hit_point(&raycastHit2D)); };
@@ -236,7 +236,7 @@ impl Game {
         let mut collider2D: i32 = 0;
         let mut value: Option<usize> = None;
         num = ((((self.tr.fan_behaviour[this].Strength as f64) * ((1.0 as f64) + (self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge() as f64)))) as f32);
-        num2 = { let a1 = rt::v2(self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), rt::v3(self.tr.fan_behaviour[this].LocalStartPos))); let a2 = [self.tr.fan_behaviour[this].AreaWidth, length]; let a3 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a1, a2, (((((rt::atan2(worldDir[1], worldDir[0]) as f64) * (57.295780181884766 as f64)) - (90.0 as f64))) as f32), a3); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
+        num2 = { let a2 = rt::v2({ let a1 = rt::v3(self.tr.fan_behaviour[this].LocalStartPos); self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a1) }); let a3 = [self.tr.fan_behaviour[this].AreaWidth, length]; let a4 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a2, a3, (((((rt::atan2(worldDir[1], worldDir[0]) as f64) * (57.295780181884766 as f64)) - (90.0 as f64))) as f32), a4); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
         vector = rt::mul(worldDir, ((((2.0 as f64) * ((0.0 as f64) - (num as f64)))) as f32));
         i = 0;
         let mut s1 = 0usize;
@@ -252,7 +252,7 @@ impl Game {
                 1 => {
                     collider2D = self.tr.fan_behaviour__buffer[rt::index(i)];
                     if (!self.tr_xf_eq(Some(rt::Xf::Collider(collider2D)), Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))) && { let r = self.tr_physical_by_transform(rt::nn(Some(rt::Xf::Collider(collider2D)))); value = r; r.is_some() }) {
-                        { let a4 = rt::v2(rt::mul(vector, mathf::max(self.physicals[rt::nn(value)].rigidbody.mass(&self.world), 1.0))); self.physicals[rt::nn(value)].rigidbody.add_force(&mut self.world, a4) };
+                        { let a5 = rt::v2(rt::mul(vector, mathf::max(self.physicals[rt::nn(value)].rigidbody.mass(&self.world), 1.0))); self.physicals[rt::nn(value)].rigidbody.add_force(&mut self.world, a5) };
                         self.physicals[rt::nn(value)].Temperature = mathf::lerp(self.physicals[rt::nn(value)].Temperature, self.AmbientTemperature, 0.004999999888241291);
                     }
                     s1 = 2; continue 'c1;

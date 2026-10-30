@@ -31,7 +31,7 @@ impl Game {
 
     /// VestibularPoison.OnEnterLimb
     pub fn vestibular_poison_on_enter_limb(&mut self, this: usize, mut limb: Option<usize>) {
-        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.as_str() == "Android") {
+        if !(self.limbs[rt::nn(limb)].SpeciesIdentity.clone() == "Android") {
             self.limbs[rt::nn(limb)].BalanceMuscleMovement = ((((self.limbs[rt::nn(limb)].BalanceMuscleMovement as f64) + (((self.random.range_int(-1, 1) as f64) as f32) as f64))) as f32);
             self.limbs[rt::nn(limb)].DoBalanceJerk = (self.limbs[rt::nn(limb)].DoBalanceJerk ^ ((((self.random.range_int(-1, 1) as f64) as f32) as f64) > (0.699999988079071 as f64)));
             self.limbs[rt::nn(limb)].DoStumble = (self.limbs[rt::nn(limb)].DoStumble ^ ((((self.random.range_int(-1, 1) as f64) as f32) as f64) > (0.699999988079071 as f64)));

@@ -68,7 +68,7 @@ impl Game {
 
     /// HoverboxBehaviour.SetActivation
     pub fn hoverbox_behaviour_set_activation(&mut self, this: usize) {
-        self.tr_set_active(rt::nn(self.tr.hoverbox_behaviour[this].Effects), self.tr.hoverbox_behaviour[this].Activated);
+        { let a1 = self.tr.hoverbox_behaviour[this].Activated; self.tr_set_active(rt::nn(self.tr.hoverbox_behaviour[this].Effects), a1) };
         return;
     }
 }

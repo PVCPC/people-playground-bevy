@@ -2,9 +2,15 @@
 #![allow(non_snake_case, unused_variables, unreachable_patterns)]
 
 pub mod rt;
+pub mod adrenaline_liquid;
 pub mod blood;
+pub mod bone_hurting_juice_liquid;
+pub mod coagulation_liquid;
+pub mod combustion_agent;
 pub mod conveyor_belt_behaviour;
+pub mod coolant;
 pub mod cosmetic_rotation_behaviour;
+pub mod crushing_poison;
 pub mod deformation_behaviour;
 pub mod disable_when_wet;
 pub mod durability_serum;
@@ -25,13 +31,16 @@ pub mod muscle_poison;
 pub mod numbing_poison;
 pub mod oil;
 pub mod pink_dormant_liquid;
+pub mod reflection_poison;
 pub mod regeneration_serum;
 pub mod resistor_behaviour;
 pub mod rotor_behaviour;
 pub mod siren_behaviour;
 pub mod target_line_renderer;
+pub mod transparency_poison;
 pub mod vestibular_poison;
 pub mod water_breathing_serum;
+pub mod zombie_poison_liquid;
 
 use crate::game::{Game, Phase};
 
@@ -56,6 +65,10 @@ pub struct Translated {
     pub rotor_behaviour: Vec<rotor_behaviour::RotorBehaviour>,
     pub siren_behaviour: Vec<siren_behaviour::SirenBehaviour>,
     pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
+    pub adrenaline_liquid__RemovalChancePerSecond__k: f32,
+    pub bone_hurting_juice_liquid__RemovalChancePerSecond__k: f32,
+    pub coagulation_liquid__RemovalChancePerSecond__k: f32,
+    pub crushing_poison__RemovalChancePerSecond__k: f32,
     pub durability_serum__RemovalChancePerSecond__k: f32,
     pub freeze_poison_liquid__RemovalChancePerSecond__k: f32,
     pub knockout_poison_liquid__RemovalChancePerSecond__k: f32,
@@ -63,7 +76,9 @@ pub struct Translated {
     pub muscle_poison__RemovalChancePerSecond__k: f32,
     pub numbing_poison__RemovalChancePerSecond__k: f32,
     pub pink_dormant_liquid__RemovalChancePerSecond__k: f32,
+    pub reflection_poison__RemovalChancePerSecond__k: f32,
     pub regeneration_serum__RemovalChancePerSecond__k: f32,
+    pub transparency_poison__RemovalChancePerSecond__k: f32,
     pub vestibular_poison__RemovalChancePerSecond__k: f32,
     /// The components that take collision messages, by the PhysicalBehaviour on their GameObject.
     pub collision_scripts: Vec<rt::CollisionScript>,
@@ -91,6 +106,10 @@ impl Default for Translated {
             rotor_behaviour: Vec::new(),
             siren_behaviour: Vec::new(),
             target_line_renderer: Vec::new(),
+            adrenaline_liquid__RemovalChancePerSecond__k: 0.800000011920929,
+            bone_hurting_juice_liquid__RemovalChancePerSecond__k: 0.800000011920929,
+            coagulation_liquid__RemovalChancePerSecond__k: 0.800000011920929,
+            crushing_poison__RemovalChancePerSecond__k: 0.800000011920929,
             durability_serum__RemovalChancePerSecond__k: 0.800000011920929,
             freeze_poison_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             knockout_poison_liquid__RemovalChancePerSecond__k: 0.800000011920929,
@@ -98,14 +117,16 @@ impl Default for Translated {
             muscle_poison__RemovalChancePerSecond__k: 0.800000011920929,
             numbing_poison__RemovalChancePerSecond__k: 0.800000011920929,
             pink_dormant_liquid__RemovalChancePerSecond__k: 0.800000011920929,
+            reflection_poison__RemovalChancePerSecond__k: 0.800000011920929,
             regeneration_serum__RemovalChancePerSecond__k: 0.800000011920929,
+            transparency_poison__RemovalChancePerSecond__k: 0.800000011920929,
             vestibular_poison__RemovalChancePerSecond__k: 0.800000011920929,
         }
     }
 }
 
 /// The translated liquids (circulation::LIQUIDS class names).
-pub const LIQUID_CLASSES: &[&str] = &["Blood", "DurabilitySerum", "FreezePoisonLiquid", "InertLiquid", "KnockoutPoisonLiquid", "MuscleEnhancementSerum", "MusclePoison", "NumbingPoison", "Oil", "PinkDormantLiquid", "RegenerationSerum", "VestibularPoison", "WaterBreathingSerum"];
+pub const LIQUID_CLASSES: &[&str] = &["AdrenalineLiquid", "Blood", "BoneHurtingJuiceLiquid", "CoagulationLiquid", "CombustionAgent", "Coolant", "CrushingPoison", "DurabilitySerum", "FreezePoisonLiquid", "InertLiquid", "KnockoutPoisonLiquid", "MuscleEnhancementSerum", "MusclePoison", "NumbingPoison", "Oil", "PinkDormantLiquid", "ReflectionPoison", "RegenerationSerum", "TransparencyPoison", "VestibularPoison", "WaterBreathingSerum", "ZombiePoisonLiquid"];
 
 /// A translated component: its class and its index in that class's arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -667,7 +688,13 @@ impl Game {
 
     pub fn tr_liquid_on_enter_limb(&mut self, liquid: usize, limb: usize) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
+            "AdrenalineLiquid" => self.adrenaline_liquid_on_enter_limb(liquid, Some(limb)),
             "Blood" => self.blood_on_enter_limb(liquid, Some(limb)),
+            "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_enter_limb(liquid, Some(limb)),
+            "CoagulationLiquid" => self.coagulation_liquid_on_enter_limb(liquid, Some(limb)),
+            "CombustionAgent" => self.combustion_agent_on_enter_limb(liquid, Some(limb)),
+            "Coolant" => self.coolant_on_enter_limb(liquid, Some(limb)),
+            "CrushingPoison" => self.crushing_poison_on_enter_limb(liquid, Some(limb)),
             "DurabilitySerum" => self.durability_serum_on_enter_limb(liquid, Some(limb)),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_enter_limb(liquid, Some(limb)),
             "InertLiquid" => self.inert_liquid_on_enter_limb(liquid, Some(limb)),
@@ -677,16 +704,25 @@ impl Game {
             "NumbingPoison" => self.numbing_poison_on_enter_limb(liquid, Some(limb)),
             "Oil" => self.oil_on_enter_limb(liquid, Some(limb)),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_enter_limb(liquid, Some(limb)),
+            "ReflectionPoison" => self.reflection_poison_on_enter_limb(liquid, Some(limb)),
             "RegenerationSerum" => self.regeneration_serum_on_enter_limb(liquid, Some(limb)),
+            "TransparencyPoison" => self.transparency_poison_on_enter_limb(liquid, Some(limb)),
             "VestibularPoison" => self.vestibular_poison_on_enter_limb(liquid, Some(limb)),
             "WaterBreathingSerum" => self.water_breathing_serum_on_enter_limb(liquid, Some(limb)),
+            "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_enter_limb(liquid, Some(limb)),
             n => unreachable!("{n} is not translated"),
         }
     }
 
     pub fn tr_liquid_on_enter_container(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
+            "AdrenalineLiquid" => self.adrenaline_liquid_on_enter_container(liquid, c),
             "Blood" => self.blood_on_enter_container(liquid, c),
+            "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_enter_container(liquid, c),
+            "CoagulationLiquid" => self.coagulation_liquid_on_enter_container(liquid, c),
+            "CombustionAgent" => self.combustion_agent_on_enter_container(liquid, c),
+            "Coolant" => self.coolant_on_enter_container(liquid, c),
+            "CrushingPoison" => self.crushing_poison_on_enter_container(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_enter_container(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_enter_container(liquid, c),
             "InertLiquid" => self.inert_liquid_on_enter_container(liquid, c),
@@ -696,16 +732,25 @@ impl Game {
             "NumbingPoison" => self.numbing_poison_on_enter_container(liquid, c),
             "Oil" => self.oil_on_enter_container(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_enter_container(liquid, c),
+            "ReflectionPoison" => self.reflection_poison_on_enter_container(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_enter_container(liquid, c),
+            "TransparencyPoison" => self.transparency_poison_on_enter_container(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_enter_container(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_enter_container(liquid, c),
+            "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_enter_container(liquid, c),
             n => unreachable!("{n} is not translated"),
         }
     }
 
     pub fn tr_liquid_on_exit_container(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
+            "AdrenalineLiquid" => self.adrenaline_liquid_on_exit_container(liquid, c),
             "Blood" => self.blood_on_exit_container(liquid, c),
+            "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_exit_container(liquid, c),
+            "CoagulationLiquid" => self.coagulation_liquid_on_exit_container(liquid, c),
+            "CombustionAgent" => self.combustion_agent_on_exit_container(liquid, c),
+            "Coolant" => self.coolant_on_exit_container(liquid, c),
+            "CrushingPoison" => self.crushing_poison_on_exit_container(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_exit_container(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_exit_container(liquid, c),
             "InertLiquid" => self.inert_liquid_on_exit_container(liquid, c),
@@ -715,16 +760,25 @@ impl Game {
             "NumbingPoison" => self.numbing_poison_on_exit_container(liquid, c),
             "Oil" => self.oil_on_exit_container(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_exit_container(liquid, c),
+            "ReflectionPoison" => self.reflection_poison_on_exit_container(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_exit_container(liquid, c),
+            "TransparencyPoison" => self.transparency_poison_on_exit_container(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_exit_container(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_exit_container(liquid, c),
+            "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_exit_container(liquid, c),
             n => unreachable!("{n} is not translated"),
         }
     }
 
     pub fn tr_liquid_on_update(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
+            "AdrenalineLiquid" => self.adrenaline_liquid_on_update(liquid, c),
             "Blood" => self.blood_on_update(liquid, c),
+            "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_update(liquid, c),
+            "CoagulationLiquid" => self.coagulation_liquid_on_update(liquid, c),
+            "CombustionAgent" => self.combustion_agent_on_update(liquid, c),
+            "Coolant" => self.coolant_on_update(liquid, c),
+            "CrushingPoison" => self.crushing_poison_on_update(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_update(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_update(liquid, c),
             "InertLiquid" => self.inert_liquid_on_update(liquid, c),
@@ -734,9 +788,12 @@ impl Game {
             "NumbingPoison" => self.numbing_poison_on_update(liquid, c),
             "Oil" => self.oil_on_update(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_update(liquid, c),
+            "ReflectionPoison" => self.reflection_poison_on_update(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_update(liquid, c),
+            "TransparencyPoison" => self.transparency_poison_on_update(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_update(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_update(liquid, c),
+            "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_update(liquid, c),
             n => unreachable!("{n} is not translated"),
         }
     }

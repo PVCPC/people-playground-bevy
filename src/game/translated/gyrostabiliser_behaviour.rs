@@ -34,7 +34,7 @@ impl Game {
 
     /// GyrostabiliserBehaviour.Start
     pub fn gyrostabiliser_behaviour_start(&mut self, this: usize) {
-        self.tr_set_active(rt::nn(self.tr.gyrostabiliser_behaviour[this].Light), self.tr.gyrostabiliser_behaviour[this].Activated);
+        { let a1 = self.tr.gyrostabiliser_behaviour[this].Activated; self.tr_set_active(rt::nn(self.tr.gyrostabiliser_behaviour[this].Light), a1) };
         return;
     }
 
@@ -60,7 +60,7 @@ impl Game {
     pub fn gyrostabiliser_behaviour_use(&mut self, this: usize, mut activation: rt::Activation) {
         if self.tr.gyrostabiliser_behaviour[this].enabled {
             self.tr.gyrostabiliser_behaviour[this].Activated = !self.tr.gyrostabiliser_behaviour[this].Activated;
-            self.tr_set_active(rt::nn(self.tr.gyrostabiliser_behaviour[this].Light), self.tr.gyrostabiliser_behaviour[this].Activated);
+            { let a1 = self.tr.gyrostabiliser_behaviour[this].Activated; self.tr_set_active(rt::nn(self.tr.gyrostabiliser_behaviour[this].Light), a1) };
         }
         return;
     }
