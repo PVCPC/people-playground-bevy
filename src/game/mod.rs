@@ -787,6 +787,27 @@ impl Hinge {
     pub fn reference_angle(&self, w: &World) -> f32 {
         self.joint.map_or(0.0, |id| w.joints[id].as_ref().unwrap().revolute().def.reference_angle * mathf::RAD2DEG)
     }
+    /// Joint2D.jointSpeed of a HingeJoint2D (180c45ea0 -> 180bef740): b2RevoluteJoint::GetJointSpeed (bodyB's angular
+    /// velocity minus bodyA's) times Rad2Deg, 0 without a b2 joint.
+    pub fn joint_speed(&self, w: &World) -> f32 {
+        let Some(id) = self.joint else { return 0.0 };
+        let j = w.joints[id].as_ref().unwrap();
+        (w.body(j.body_b).angular_velocity - w.body(j.body_a).angular_velocity) * mathf::RAD2DEG
+    }
+    /// HingeJoint2D::SetUseMotor (180bfdda0): stored, then b2RevoluteJoint::EnableMotor (180bc1740) on a live joint,
+    /// which wakes both bodies when the flag changes.
+    pub fn set_use_motor(&mut self, w: &mut World, v: bool) {
+        self.useMotor = v;
+        let Some(id) = self.joint else { return };
+        let j = w.joints[id].as_ref().unwrap();
+        if j.revolute().def.enable_motor == v {
+            return;
+        }
+        let (a, b) = (j.body_a, j.body_b);
+        wake_for_joint(w, a);
+        wake_for_joint(w, b);
+        w.joints[id].as_mut().unwrap().revolute_mut().def.enable_motor = v;
+    }
     /// HingeJoint2D::SetMotor (the `Joint.motor = motor` setter).
     pub fn set_motor(&mut self, w: &mut World, speed: f32, torque: f32) {
         let mut s = -1_000_000.0;

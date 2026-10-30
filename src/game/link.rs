@@ -1686,6 +1686,16 @@ impl Game {
             let Component::Script { class, fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
             for &(name, kind) in super::translated::link_fields(class) {
                 let x = field(v, name)?;
+                // A HingeJoint2D of this prefab: its `Game::hinges` index.
+                let hinge = |x: &Value| -> Result<Option<usize>, String> {
+                    match x.pptr().ok_or(name)? {
+                        p if p.is_null() => Ok(None),
+                        p => {
+                            let at = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or_else(|| format!("{class}.{name} outside the prefab"))?;
+                            Ok(Some(*l.arenas.hinge.get(&at).ok_or_else(|| format!("{class}.{name}: not a HingeJoint2D"))?))
+                        }
+                    }
+                };
                 let val = match kind {
                     K::Physical => V::Physical(l.in_arena(x, &l.arenas.physical, "PhysicalBehaviour")?),
                     K::Rigidbody => V::Physical(match l.object(x)? {
@@ -1713,6 +1723,8 @@ impl Game {
                         p => Some(super::translated::rt::Go::Asset(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?)),
                     }),
                     K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
+                    K::Hinge => V::Hinge(hinge(x)?),
+                    K::Hinges => V::Hinges(x.array().ok_or(name)?.iter().map(&hinge).collect::<Result<_, _>>()?),
                     K::Event => V::Event(event_calls(prefab, file, x, inst, &format!("{class}.{name}"), true)?),
                     K::Handwritten(arena) => V::Handwritten(match l.object(x)? {
                         None => None,

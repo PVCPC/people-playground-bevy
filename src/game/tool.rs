@@ -506,7 +506,8 @@ impl Game {
                 Behaviour::Launcher(l) => self.launcher_use(l),
                 Behaviour::Bell(b) => self.bell_use(b),
                 Behaviour::MachineGun(m) => self.machine_gun_use(m),
-                Behaviour::Translated(t) => self.tr_use(t),
+                // A direct activation: new ActivationPropagation(direct: true, 0, ..).
+                Behaviour::Translated(t) => self.tr_use(t, super::translated::rt::Activation { Channel: 0 }),
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
                 Behaviour::Led(i) => self.led_use(i),
                 Behaviour::Detector(i) => self.detector_use(i),

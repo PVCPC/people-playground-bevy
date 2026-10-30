@@ -30,7 +30,7 @@ script! {
 
 impl Game {
     /// SirenBehaviour.Use
-    pub fn siren_behaviour_use(&mut self, this: usize) {
+    pub fn siren_behaviour_use(&mut self, this: usize, mut activation: rt::Activation) {
         self.tr.siren_behaviour[this].Activated = !self.tr.siren_behaviour[this].Activated;
         return;
     }

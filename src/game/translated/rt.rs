@@ -7,6 +7,12 @@ use crate::b2::world::Shape;
 use crate::game::explosion::RayHit2D;
 use crate::game::Game;
 
+/// ActivationPropagation as Use receives it: its Channel (Green 0, Red 1, Blue 2).
+#[derive(Clone, Copy, Debug)]
+pub struct Activation {
+    pub Channel: i32,
+}
+
 /// A Transform as the translated scripts hold one.
 #[derive(Clone, Copy, Debug)]
 pub enum Xf {
@@ -154,6 +160,15 @@ pub fn atan2(y: f32, x: f32) -> f32 {
 }
 
 impl Game {
+    /// A HingeJoint2D reference used: a broken joint is a destroyed component.
+    pub fn tr_hinge(&self, h: Option<usize>) -> usize {
+        let h = nn(h);
+        if self.hinges[h].destroyed {
+            unimplemented!("MissingReferenceException: a destroyed HingeJoint2D in a translated script");
+        }
+        h
+    }
+
     fn tr_physical_xf(&self, xf: Xf) -> usize {
         match xf {
             Xf::Physical(p) => p,

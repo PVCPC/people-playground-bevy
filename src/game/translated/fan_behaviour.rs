@@ -61,7 +61,7 @@ impl Game {
     }
 
     /// FanBehaviour.Use
-    pub fn fan_behaviour_use(&mut self, this: usize) {
+    pub fn fan_behaviour_use(&mut self, this: usize, mut activation: rt::Activation) {
         if self.tr.fan_behaviour[this].enabled {
             self.tr.fan_behaviour[this].Activated = !self.tr.fan_behaviour[this].Activated;
             { let _ = self.tr.fan_behaviour[this].Switch; rt::pres(self.tr.fan_behaviour[this].Audio); };

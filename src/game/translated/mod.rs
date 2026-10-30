@@ -2,6 +2,7 @@
 #![allow(non_snake_case, unused_variables, unreachable_patterns)]
 
 pub mod rt;
+pub mod conveyor_belt_behaviour;
 pub mod cosmetic_rotation_behaviour;
 pub mod deformation_behaviour;
 pub mod disable_when_wet;
@@ -10,6 +11,9 @@ pub mod fan_behaviour;
 pub mod fire_sound_emitter;
 pub mod guide_temperature_behaviour;
 pub mod jack_o_latern_behaviour;
+pub mod motorised_hinge_behaviour;
+pub mod resistor_behaviour;
+pub mod rotor_behaviour;
 pub mod siren_behaviour;
 pub mod target_line_renderer;
 
@@ -18,6 +22,7 @@ use crate::game::{Game, Phase};
 /// The translated classes' components, by class.
 #[derive(Clone, Debug)]
 pub struct Translated {
+    pub conveyor_belt_behaviour: Vec<conveyor_belt_behaviour::ConveyorBeltBehaviour>,
     pub cosmetic_rotation_behaviour: Vec<cosmetic_rotation_behaviour::CosmeticRotationBehaviour>,
     pub deformation_behaviour: Vec<deformation_behaviour::DeformationBehaviour>,
     pub disable_when_wet: Vec<disable_when_wet::DisableWhenWet>,
@@ -27,6 +32,9 @@ pub struct Translated {
     pub fire_sound_emitter: Vec<fire_sound_emitter::FireSoundEmitter>,
     pub guide_temperature_behaviour: Vec<guide_temperature_behaviour::GuideTemperatureBehaviour>,
     pub jack_o_latern_behaviour: Vec<jack_o_latern_behaviour::JackOLaternBehaviour>,
+    pub motorised_hinge_behaviour: Vec<motorised_hinge_behaviour::MotorisedHingeBehaviour>,
+    pub resistor_behaviour: Vec<resistor_behaviour::ResistorBehaviour>,
+    pub rotor_behaviour: Vec<rotor_behaviour::RotorBehaviour>,
     pub siren_behaviour: Vec<siren_behaviour::SirenBehaviour>,
     pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
     /// The components that take collision messages, by the PhysicalBehaviour on their GameObject.
@@ -37,6 +45,7 @@ impl Default for Translated {
     fn default() -> Self {
         Self {
             collision_scripts: Vec::new(),
+            conveyor_belt_behaviour: Vec::new(),
             cosmetic_rotation_behaviour: Vec::new(),
             deformation_behaviour: Vec::new(),
             disable_when_wet: Vec::new(),
@@ -46,6 +55,9 @@ impl Default for Translated {
             fire_sound_emitter: Vec::new(),
             guide_temperature_behaviour: Vec::new(),
             jack_o_latern_behaviour: Vec::new(),
+            motorised_hinge_behaviour: Vec::new(),
+            resistor_behaviour: Vec::new(),
+            rotor_behaviour: Vec::new(),
             siren_behaviour: Vec::new(),
             target_line_renderer: Vec::new(),
         }
@@ -55,6 +67,7 @@ impl Default for Translated {
 /// A translated component: its class and its index in that class's arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TBehaviour {
+    ConveyorBeltBehaviour(usize),
     CosmeticRotationBehaviour(usize),
     DeformationBehaviour(usize),
     DisableWhenWet(usize),
@@ -63,15 +76,19 @@ pub enum TBehaviour {
     FireSoundEmitter(usize),
     GuideTemperatureBehaviour(usize),
     JackOLaternBehaviour(usize),
+    MotorisedHingeBehaviour(usize),
+    ResistorBehaviour(usize),
+    RotorBehaviour(usize),
     SirenBehaviour(usize),
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "SirenBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
         match self {
+            TBehaviour::ConveyorBeltBehaviour(_) => "ConveyorBeltBehaviour",
             TBehaviour::CosmeticRotationBehaviour(_) => "CosmeticRotationBehaviour",
             TBehaviour::DeformationBehaviour(_) => "DeformationBehaviour",
             TBehaviour::DisableWhenWet(_) => "DisableWhenWet",
@@ -80,6 +97,9 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
             TBehaviour::GuideTemperatureBehaviour(_) => "GuideTemperatureBehaviour",
             TBehaviour::JackOLaternBehaviour(_) => "JackOLaternBehaviour",
+            TBehaviour::MotorisedHingeBehaviour(_) => "MotorisedHingeBehaviour",
+            TBehaviour::ResistorBehaviour(_) => "ResistorBehaviour",
+            TBehaviour::RotorBehaviour(_) => "RotorBehaviour",
             TBehaviour::SirenBehaviour(_) => "SirenBehaviour",
             TBehaviour::TargetLineRenderer(_) => "TargetLineRenderer",
         }
@@ -88,6 +108,7 @@ impl TBehaviour {
     /// It has Update, FixedUpdate or LateUpdate (a behaviour manager list).
     pub fn managed(self) -> bool {
         match self {
+            TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => true,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => true,
@@ -96,6 +117,9 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => true,
             TBehaviour::GuideTemperatureBehaviour(_) => true,
             TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::MotorisedHingeBehaviour(_) => true,
+            TBehaviour::ResistorBehaviour(_) => true,
+            TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => true,
             TBehaviour::TargetLineRenderer(_) => true,
         }
@@ -104,6 +128,7 @@ impl TBehaviour {
     /// It has Start.
     pub fn has_start(self) -> bool {
         match self {
+            TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
@@ -112,6 +137,9 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => true,
+            TBehaviour::MotorisedHingeBehaviour(_) => true,
+            TBehaviour::ResistorBehaviour(_) => true,
+            TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
         }
@@ -120,6 +148,7 @@ impl TBehaviour {
     /// It has Use (Messages.IUse).
     pub fn has_use(self) -> bool {
         match self {
+            TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
@@ -128,6 +157,9 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::MotorisedHingeBehaviour(_) => true,
+            TBehaviour::ResistorBehaviour(_) => false,
+            TBehaviour::RotorBehaviour(_) => true,
             TBehaviour::SirenBehaviour(_) => true,
             TBehaviour::TargetLineRenderer(_) => false,
         }
@@ -136,6 +168,7 @@ impl TBehaviour {
     /// It has OnCollisionEnter2D, OnCollisionStay2D or OnCollisionExit2D.
     pub fn has_collision(self) -> bool {
         match self {
+            TBehaviour::ConveyorBeltBehaviour(_) => false,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
@@ -144,6 +177,9 @@ impl TBehaviour {
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::MotorisedHingeBehaviour(_) => false,
+            TBehaviour::ResistorBehaviour(_) => false,
+            TBehaviour::RotorBehaviour(_) => false,
             TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
         }
@@ -170,6 +206,10 @@ pub enum LinkKind {
     Mask,
     /// A UnityEvent: its persistent calls that are not presentation.
     Event,
+    /// A HingeJoint2D: its `Game::hinges` index.
+    Hinge,
+    /// A HingeJoint2D[]: each one's `Game::hinges` index.
+    Hinges,
     /// A Transform in the prefab.
     Transform,
     /// A component of a hand-written class: its index in that class's arena.
@@ -186,12 +226,15 @@ pub enum LinkVal {
     Prefab(Option<rt::Go>),
     Mask(u32),
     Event(Vec<crate::game::link::EventCall>),
+    Hinge(Option<usize>),
+    Hinges(Vec<Option<usize>>),
     Transform(Option<rt::Xf>),
     Handwritten(Option<usize>),
 }
 
 pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
     match class {
+        "ConveyorBeltBehaviour" => &[("WheelJoints", LinkKind::Hinges), ("PhysicalBehaviour", LinkKind::Physical)],
         "CosmeticRotationBehaviour" => &[],
         "DeformationBehaviour" => &[],
         "DisableWhenWet" => &[("PhysicalBehaviour", LinkKind::Physical), ("ToDisable", LinkKind::Prefab)],
@@ -200,6 +243,9 @@ pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
         "FireSoundEmitter" => &[],
         "GuideTemperatureBehaviour" => &[],
         "JackOLaternBehaviour" => &[("GlowingSprites", LinkKind::Present), ("ObjectSprite", LinkKind::Present), ("LightSprite", LinkKind::Present)],
+        "MotorisedHingeBehaviour" => &[("IndicatorArm", LinkKind::Transform), ("AudioSource", LinkKind::Present), ("Hinge", LinkKind::Hinge), ("PhysicalBehaviour", LinkKind::Physical), ("ActiveLight", LinkKind::Present)],
+        "ResistorBehaviour" => &[("HandleJoint", LinkKind::Hinge), ("PhysicalBehaviour", LinkKind::Physical)],
+        "RotorBehaviour" => &[("Hinge", LinkKind::Hinge), ("AudioSource", LinkKind::Present), ("PhysicalBehaviour", LinkKind::Physical), ("ActiveLight", LinkKind::Present)],
         "SirenBehaviour" => &[("AudioSource", LinkKind::Present), ("SirenSound", LinkKind::Present), ("BrokenSirenSound", LinkKind::Present), ("DamagableMachineryBehaviour", LinkKind::Handwritten("DamagableMachineryBehaviour"))],
         "TargetLineRenderer" => &[("LineRenderer", LinkKind::Present), ("Target", LinkKind::Transform)],
         _ => &[],
@@ -210,6 +256,13 @@ impl Game {
     /// A new component of `class` with its serialized plain fields; the links come after.
     pub fn tr_new(&mut self, class: &str, values: &crate::assets::mono::Value, id: i32, enabled: bool, physical: Option<usize>, physics: bool) -> Result<TBehaviour, String> {
         Ok(match class {
+            "ConveyorBeltBehaviour" => {
+                let mut x = conveyor_belt_behaviour::ConveyorBeltBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.conveyor_belt_behaviour.push(x);
+                TBehaviour::ConveyorBeltBehaviour(self.tr.conveyor_belt_behaviour.len() - 1)
+            }
             "CosmeticRotationBehaviour" => {
                 let mut x = cosmetic_rotation_behaviour::CosmeticRotationBehaviour::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -266,6 +319,27 @@ impl Game {
                 self.tr.jack_o_latern_behaviour.push(x);
                 TBehaviour::JackOLaternBehaviour(self.tr.jack_o_latern_behaviour.len() - 1)
             }
+            "MotorisedHingeBehaviour" => {
+                let mut x = motorised_hinge_behaviour::MotorisedHingeBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.motorised_hinge_behaviour.push(x);
+                TBehaviour::MotorisedHingeBehaviour(self.tr.motorised_hinge_behaviour.len() - 1)
+            }
+            "ResistorBehaviour" => {
+                let mut x = resistor_behaviour::ResistorBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.resistor_behaviour.push(x);
+                TBehaviour::ResistorBehaviour(self.tr.resistor_behaviour.len() - 1)
+            }
+            "RotorBehaviour" => {
+                let mut x = rotor_behaviour::RotorBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.rotor_behaviour.push(x);
+                TBehaviour::RotorBehaviour(self.tr.rotor_behaviour.len() - 1)
+            }
             "SirenBehaviour" => {
                 let mut x = siren_behaviour::SirenBehaviour::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -286,6 +360,8 @@ impl Game {
 
     pub fn tr_link(&mut self, b: TBehaviour, field: &str, v: LinkVal) {
         match (b, field, v) {
+            (TBehaviour::ConveyorBeltBehaviour(i), "WheelJoints", LinkVal::Hinges(v)) => self.tr.conveyor_belt_behaviour[i].WheelJoints = v,
+            (TBehaviour::ConveyorBeltBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.conveyor_belt_behaviour[i].PhysicalBehaviour = v,
             (TBehaviour::DisableWhenWet(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.disable_when_wet[i].PhysicalBehaviour = v,
             (TBehaviour::DisableWhenWet(i), "ToDisable", LinkVal::Prefab(v)) => self.tr.disable_when_wet[i].ToDisable = v,
             (TBehaviour::FanBehaviour(i), "HelicopterAudioSource", LinkVal::Present(v)) => self.tr.fan_behaviour[i].HelicopterAudioSource = v,
@@ -300,6 +376,17 @@ impl Game {
             (TBehaviour::JackOLaternBehaviour(i), "GlowingSprites", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].GlowingSprites = v,
             (TBehaviour::JackOLaternBehaviour(i), "ObjectSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].ObjectSprite = v,
             (TBehaviour::JackOLaternBehaviour(i), "LightSprite", LinkVal::Present(v)) => self.tr.jack_o_latern_behaviour[i].LightSprite = v,
+            (TBehaviour::MotorisedHingeBehaviour(i), "IndicatorArm", LinkVal::Transform(v)) => self.tr.motorised_hinge_behaviour[i].IndicatorArm = v,
+            (TBehaviour::MotorisedHingeBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.motorised_hinge_behaviour[i].AudioSource = v,
+            (TBehaviour::MotorisedHingeBehaviour(i), "Hinge", LinkVal::Hinge(v)) => self.tr.motorised_hinge_behaviour[i].Hinge = v,
+            (TBehaviour::MotorisedHingeBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.motorised_hinge_behaviour[i].PhysicalBehaviour = v,
+            (TBehaviour::MotorisedHingeBehaviour(i), "ActiveLight", LinkVal::Present(v)) => self.tr.motorised_hinge_behaviour[i].ActiveLight = v,
+            (TBehaviour::ResistorBehaviour(i), "HandleJoint", LinkVal::Hinge(v)) => self.tr.resistor_behaviour[i].HandleJoint = v,
+            (TBehaviour::ResistorBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.resistor_behaviour[i].PhysicalBehaviour = v,
+            (TBehaviour::RotorBehaviour(i), "Hinge", LinkVal::Hinge(v)) => self.tr.rotor_behaviour[i].Hinge = v,
+            (TBehaviour::RotorBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.rotor_behaviour[i].AudioSource = v,
+            (TBehaviour::RotorBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.rotor_behaviour[i].PhysicalBehaviour = v,
+            (TBehaviour::RotorBehaviour(i), "ActiveLight", LinkVal::Present(v)) => self.tr.rotor_behaviour[i].ActiveLight = v,
             (TBehaviour::SirenBehaviour(i), "AudioSource", LinkVal::Present(v)) => self.tr.siren_behaviour[i].AudioSource = v,
             (TBehaviour::SirenBehaviour(i), "SirenSound", LinkVal::Present(v)) => self.tr.siren_behaviour[i].SirenSound = v,
             (TBehaviour::SirenBehaviour(i), "BrokenSirenSound", LinkVal::Present(v)) => self.tr.siren_behaviour[i].BrokenSirenSound = v,
@@ -313,6 +400,7 @@ impl Game {
     /// Behaviour.enabled.
     pub fn tr_enabled(&self, b: TBehaviour) -> bool {
         match b {
+            TBehaviour::ConveyorBeltBehaviour(i) => self.tr.conveyor_belt_behaviour[i].enabled,
             TBehaviour::CosmeticRotationBehaviour(i) => self.tr.cosmetic_rotation_behaviour[i].enabled,
             TBehaviour::DeformationBehaviour(i) => self.tr.deformation_behaviour[i].enabled,
             TBehaviour::DisableWhenWet(i) => self.tr.disable_when_wet[i].enabled,
@@ -321,6 +409,9 @@ impl Game {
             TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
             TBehaviour::GuideTemperatureBehaviour(i) => self.tr.guide_temperature_behaviour[i].enabled,
             TBehaviour::JackOLaternBehaviour(i) => self.tr.jack_o_latern_behaviour[i].enabled,
+            TBehaviour::MotorisedHingeBehaviour(i) => self.tr.motorised_hinge_behaviour[i].enabled,
+            TBehaviour::ResistorBehaviour(i) => self.tr.resistor_behaviour[i].enabled,
+            TBehaviour::RotorBehaviour(i) => self.tr.rotor_behaviour[i].enabled,
             TBehaviour::SirenBehaviour(i) => self.tr.siren_behaviour[i].enabled,
             TBehaviour::TargetLineRenderer(i) => self.tr.target_line_renderer[i].enabled,
         }
@@ -338,21 +429,31 @@ impl Game {
 
     pub fn tr_on_enable(&mut self, b: TBehaviour) {
         match b {
+            TBehaviour::MotorisedHingeBehaviour(i) => self.motorised_hinge_behaviour_on_enable(i),
+            TBehaviour::RotorBehaviour(i) => self.rotor_behaviour_on_enable(i),
             _ => {}
         }
     }
 
     pub fn tr_start(&mut self, b: TBehaviour) {
         match b {
+            TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_start(i),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_start(i),
             TBehaviour::JackOLaternBehaviour(i) => self.jack_o_latern_behaviour_start(i),
+            TBehaviour::MotorisedHingeBehaviour(i) => self.motorised_hinge_behaviour_start(i),
+            TBehaviour::ResistorBehaviour(i) => self.resistor_behaviour_start(i),
+            TBehaviour::RotorBehaviour(i) => self.rotor_behaviour_start(i),
             _ => {}
         }
     }
 
     pub fn tr_on_disable(&mut self, b: TBehaviour) {
         match b {
+            TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_on_disable(i),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_on_disable(i),
+            TBehaviour::MotorisedHingeBehaviour(i) => self.motorised_hinge_behaviour_on_disable(i),
+            TBehaviour::ResistorBehaviour(i) => self.resistor_behaviour_on_disable(i),
+            TBehaviour::RotorBehaviour(i) => self.rotor_behaviour_on_disable(i),
             _ => {}
         }
     }
@@ -363,10 +464,13 @@ impl Game {
         }
     }
 
-    pub fn tr_use(&mut self, b: TBehaviour) {
+    pub fn tr_use(&mut self, b: TBehaviour, activation: rt::Activation) {
         match b {
-            TBehaviour::FanBehaviour(i) => self.fan_behaviour_use(i),
-            TBehaviour::SirenBehaviour(i) => self.siren_behaviour_use(i),
+            TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_use(i, activation),
+            TBehaviour::FanBehaviour(i) => self.fan_behaviour_use(i, activation),
+            TBehaviour::MotorisedHingeBehaviour(i) => self.motorised_hinge_behaviour_use(i, activation),
+            TBehaviour::RotorBehaviour(i) => self.rotor_behaviour_use(i, activation),
+            TBehaviour::SirenBehaviour(i) => self.siren_behaviour_use(i, activation),
             _ => {}
         }
     }
@@ -409,6 +513,7 @@ impl Game {
 
     pub fn tr_phase(&mut self, phase: Phase, b: TBehaviour) {
         match (phase, b) {
+            (Phase::Fixed, TBehaviour::ConveyorBeltBehaviour(i)) => self.conveyor_belt_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::CosmeticRotationBehaviour(i)) => self.cosmetic_rotation_behaviour_update(i),
             (Phase::Update, TBehaviour::DisableWhenWet(i)) => self.disable_when_wet_update(i),
             (Phase::Fixed, TBehaviour::EmitParticlesOnShakeBehaviour(i)) => self.emit_particles_on_shake_behaviour_fixed_update(i),
@@ -416,6 +521,9 @@ impl Game {
             (Phase::Update, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_update(i),
             (Phase::Fixed, TBehaviour::FireSoundEmitter(i)) => self.fire_sound_emitter_fixed_update(i),
             (Phase::Fixed, TBehaviour::GuideTemperatureBehaviour(i)) => self.guide_temperature_behaviour_fixed_update(i),
+            (Phase::Fixed, TBehaviour::MotorisedHingeBehaviour(i)) => self.motorised_hinge_behaviour_fixed_update(i),
+            (Phase::Fixed, TBehaviour::ResistorBehaviour(i)) => self.resistor_behaviour_fixed_update(i),
+            (Phase::Fixed, TBehaviour::RotorBehaviour(i)) => self.rotor_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::SirenBehaviour(i)) => self.siren_behaviour_update(i),
             (Phase::Update, TBehaviour::TargetLineRenderer(i)) => self.target_line_renderer_update(i),
             _ => {}
@@ -425,5 +533,5 @@ impl Game {
 
 /// The class has a method for SendMessage/BroadcastMessage `msg` (one the rewrite sends).
 pub fn receives(class: &str, msg: &str) -> bool {
-    matches!((class, msg), ("FanBehaviour", "Use") | ("SirenBehaviour", "Use"))
+    matches!((class, msg), ("ConveyorBeltBehaviour", "Use") | ("FanBehaviour", "Use") | ("MotorisedHingeBehaviour", "Use") | ("RotorBehaviour", "Use") | ("SirenBehaviour", "Use"))
 }
