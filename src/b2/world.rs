@@ -7,6 +7,7 @@ use super::collide::*;
 use super::contacts2d::{CollisionId, Contacts2D};
 use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
+use super::distance_joint::{DistanceDef, DistanceJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
 use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
 use super::solver::*;
@@ -361,14 +362,69 @@ pub struct Contact {
 
 pub type JointId = usize;
 
-/// b2Joint: Unity's HingeJoint2D is the only joint the game's bodies use.
+/// The b2Joint types the game creates: HingeJoint2D and SpringJoint2D.
+#[derive(Clone, Debug)]
+pub enum JointKind {
+    Revolute(RevoluteJoint),
+    Distance(DistanceJoint),
+}
+
+impl From<RevoluteDef> for JointKind {
+    fn from(def: RevoluteDef) -> Self {
+        Self::Revolute(RevoluteJoint::new(def))
+    }
+}
+
+impl From<DistanceDef> for JointKind {
+    fn from(def: DistanceDef) -> Self {
+        Self::Distance(DistanceJoint::new(def))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Joint {
-    pub revolute: RevoluteJoint,
+    pub kind: JointKind,
     pub body_a: BodyId,
     pub body_b: BodyId,
     pub collide_connected: bool,
     island_flag: bool,
+}
+
+impl Joint {
+    pub fn revolute(&self) -> &RevoluteJoint {
+        match &self.kind {
+            JointKind::Revolute(r) => r,
+            JointKind::Distance(_) => panic!("not a hinge"),
+        }
+    }
+
+    pub fn revolute_mut(&mut self) -> &mut RevoluteJoint {
+        match &mut self.kind {
+            JointKind::Revolute(r) => r,
+            JointKind::Distance(_) => panic!("not a hinge"),
+        }
+    }
+
+    pub fn distance(&self) -> &DistanceJoint {
+        match &self.kind {
+            JointKind::Distance(d) => d,
+            JointKind::Revolute(_) => panic!("not a spring"),
+        }
+    }
+
+    fn ends(&self) -> (JointBody, JointBody) {
+        match &self.kind {
+            JointKind::Revolute(r) => (r.a, r.b),
+            JointKind::Distance(d) => (d.a, d.b),
+        }
+    }
+
+    fn ends_mut(&mut self) -> (&mut JointBody, &mut JointBody) {
+        match &mut self.kind {
+            JointKind::Revolute(r) => (&mut r.a, &mut r.b),
+            JointKind::Distance(d) => (&mut d.a, &mut d.b),
+        }
+    }
 }
 
 pub struct World {
@@ -498,9 +554,9 @@ impl World {
     }
 
     /// b2World::CreateJoint (180bb8f10).
-    pub fn create_joint(&mut self, def: RevoluteDef, body_a: BodyId, body_b: BodyId, collide_connected: bool) -> JointId {
+    pub fn create_joint(&mut self, def: impl Into<JointKind>, body_a: BodyId, body_b: BodyId, collide_connected: bool) -> JointId {
         let id = self.joints.len();
-        self.joints.push(Some(Joint { revolute: RevoluteJoint::new(def), body_a, body_b, collide_connected, island_flag: false }));
+        self.joints.push(Some(Joint { kind: def.into(), body_a, body_b, collide_connected, island_flag: false }));
         self.joint_list.push(id);
         self.body_mut(body_a).joints.push((body_b, id));
         self.body_mut(body_b).joints.push((body_a, id));
@@ -541,6 +597,19 @@ impl World {
         b.sweep.a = angle;
         b.sweep.a0 = angle;
         self.synchronize_fixtures(id);
+    }
+
+    /// The wake b2World::DestroyJoint gives each end.
+    pub fn wake_body(&mut self, id: BodyId) {
+        self.body_mut(id).wake();
+    }
+
+    /// The wake Joint2D::FinalizeCreateJoint gives each end of a new joint: not a body created asleep this step.
+    pub fn wake_joined(&mut self, id: BodyId) {
+        let b = self.body_mut(id);
+        if b.flags & BODY_STARTED_ASLEEP == 0 {
+            b.wake();
+        }
     }
 
     /// b2World::DestroyJoint (180bb9680).
@@ -1068,9 +1137,9 @@ impl World {
                 let j = self.joints[jid].as_ref().unwrap();
                 let (a, b) = (self.body(j.body_a), self.body(j.body_b));
                 let ends = [(a.island_index as usize, a.axis), (b.island_index as usize, b.axis)];
-                let r = &mut self.joints[jid].as_mut().unwrap().revolute;
-                (r.a.index, r.a.axis) = ends[0];
-                (r.b.index, r.b.axis) = ends[1];
+                let (ja, jb) = self.joints[jid].as_mut().unwrap().ends_mut();
+                (ja.index, ja.axis) = ends[0];
+                (jb.index, jb.axis) = ends[1];
             }
             for &b in &island_bodies {
                 self.body_mut(b).island_index = -1;
@@ -1124,12 +1193,19 @@ impl World {
                 let b = self.body(id);
                 JointBody { local_center: b.sweep.local_center, inv_mass: b.inv_mass, inv_i: b.inv_i, ..e }
             };
-            let (a, b) = (end(j.body_a, j.revolute.a), end(j.body_b, j.revolute.b));
-            self.joints[jid].as_mut().unwrap().revolute.init_velocity_constraints(a, b, step, &positions, &mut velocities);
+            let (ea, eb) = j.ends();
+            let (a, b) = (end(j.body_a, ea), end(j.body_b, eb));
+            match &mut self.joints[jid].as_mut().unwrap().kind {
+                JointKind::Revolute(r) => r.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+                JointKind::Distance(d) => d.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+            }
         }
         for _ in 0..step.velocity_iterations {
             for &jid in island_joints {
-                self.joints[jid].as_mut().unwrap().revolute.solve_velocity_constraints(&mut velocities);
+                match &mut self.joints[jid].as_mut().unwrap().kind {
+                    JointKind::Revolute(r) => r.solve_velocity_constraints(&mut velocities),
+                    JointKind::Distance(d) => d.solve_velocity_constraints(&mut velocities),
+                }
             }
             solver.solve_velocity_constraints(&mut velocities);
         }
@@ -1161,7 +1237,10 @@ impl World {
             let contacts_solved = solver.solve_position_constraints(&mut positions);
             let mut joints_solved = true;
             for &jid in island_joints {
-                joints_solved &= self.joints[jid].as_ref().unwrap().revolute.solve_position_constraints(&mut positions);
+                joints_solved &= match &self.joints[jid].as_ref().unwrap().kind {
+                    JointKind::Revolute(r) => r.solve_position_constraints(&mut positions),
+                    JointKind::Distance(d) => d.solve_position_constraints(&mut positions),
+                };
             }
             if contacts_solved && joints_solved {
                 position_solved = true;

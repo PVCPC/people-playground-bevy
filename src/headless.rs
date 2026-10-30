@@ -197,7 +197,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
     let motor_enabled = |app: &App, joint: b2::world::JointId| {
         app.world().resource::<Physics>().world.joints[joint]
             .as_ref()
-            .is_some_and(|j| j.revolute.def.enable_motor)
+            .is_some_and(|j| j.revolute().def.enable_motor)
     };
     if hinges(app).iter().any(|(_, h)| motor_enabled(app, h.joint)) {
         return Err("A muscle motor remained enabled on a limp human".into());
@@ -266,7 +266,7 @@ fn active_checks(app: &mut App) -> Result<(), String> {
         let reference = app.world().resource::<Physics>().world.joints[hinge.joint]
             .as_ref()
             .unwrap()
-            .revolute
+            .revolute()
             .def
             .reference_angle;
         let (a, b) = (pose(app, hinge.body_a).1, pose(app, hinge.body_b).1);

@@ -763,6 +763,7 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_island_solve(executable, false)?;
     compare_island_solve(executable, true)?;
     compare_revolute(executable)?;
+    compare_distance_joint(executable)?;
     compare_perlin(executable)?;
     compare_curve(executable)
 }
@@ -1207,7 +1208,7 @@ fn revolute_bytes(j: &super::revolute::RevoluteJoint) -> Vec<u8> {
 }
 
 /// Buffers: 0 joint, 1 solver data, 2 positions, 3 velocities, 4 body A, 5 body B.
-fn revolute_call(rva: u32, j: &super::revolute::RevoluteJoint, bodies: [&super::revolute::JointBody; 2], step: &TimeStep, positions: &[Position], velocities: &[Velocity]) -> Call {
+fn joint_call(rva: u32, joint: Vec<u8>, bodies: [&super::revolute::JointBody; 2], step: &TimeStep, positions: &[Position], velocities: &[Velocity]) -> Call {
     let mut data = vec![0; 40];
     let fields = [step.dt.to_bits(), step.inv_dt.to_bits(), step.dt_ratio.to_bits(), step.velocity_iterations as u32, step.position_iterations as u32, step.warm_starting as u32];
     for (k, v) in fields.iter().enumerate() {
@@ -1221,7 +1222,7 @@ fn revolute_call(rva: u32, j: &super::revolute::RevoluteJoint, bodies: [&super::
         put(&mut b, 0xa4, jb.inv_i.to_bits());
         b
     };
-    let mut c = call(rva, vec![revolute_bytes(j), data, p, v, body(bodies[0]), body(bodies[1])], &["b0", "b1"]);
+    let mut c = call(rva, vec![joint, data, p, v, body(bodies[0]), body(bodies[1])], &["b0", "b1"]);
     c.links = vec![[0, 0x60, 4, 0], [0, 0x68, 5, 0], [1, 0x18, 2, 0], [1, 0x20, 3, 0]];
     c
 }
@@ -1274,16 +1275,16 @@ fn compare_revolute(executable: &std::path::Path) -> Result<(), String> {
         // Init reads the bodies, so its starting joint carries their data too.
         joint.a = a;
         joint.b = b;
-        calls.push(revolute_call(REVOLUTE_INIT, &joint, [&a, &b], &step, &positions, &velocities));
+        calls.push(joint_call(REVOLUTE_INIT, revolute_bytes(&joint), [&a, &b], &step, &positions, &velocities));
         joint.init_velocity_constraints(a, b, &step, &positions, &mut velocities);
         expected.push(record("init", &joint, &positions, &velocities));
         for _ in 0..3 {
-            calls.push(revolute_call(REVOLUTE_SOLVE_VELOCITY, &joint, [&a, &b], &step, &positions, &velocities));
+            calls.push(joint_call(REVOLUTE_SOLVE_VELOCITY, revolute_bytes(&joint), [&a, &b], &step, &positions, &velocities));
             joint.solve_velocity_constraints(&mut velocities);
             expected.push(record("velocity", &joint, &positions, &velocities));
         }
         for _ in 0..3 {
-            calls.push(revolute_call(REVOLUTE_SOLVE_POSITION, &joint, [&a, &b], &step, &positions, &velocities));
+            calls.push(joint_call(REVOLUTE_SOLVE_POSITION, revolute_bytes(&joint), [&a, &b], &step, &positions, &velocities));
             let solved = joint.solve_position_constraints(&mut positions);
             let mut r = record("position", &joint, &positions, &velocities);
             r.1.push(solved as u8);
@@ -1312,4 +1313,122 @@ fn compare_revolute(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     report("REVOLUTE JOINT", bad, replies.len(), first)
+}
+
+const DISTANCE_INIT: u32 = 0xbc7440;
+const DISTANCE_SOLVE_VELOCITY: u32 = 0xbc9f80;
+const DISTANCE_SOLVE_POSITION: u32 = 0xbc9370;
+
+/// b2DistanceJoint (252 bytes).
+fn distance_bytes(j: &super::distance_joint::DistanceJoint) -> Vec<u8> {
+    let mut b = vec![0; 252];
+    put(&mut b, 0x70, j.a.index as u32);
+    put(&mut b, 0x74, j.b.index as u32);
+    put_vec(&mut b, 0x78, j.a.axis);
+    put_vec(&mut b, 0x80, j.b.axis);
+    put(&mut b, 0x98, j.def.frequency_hz.to_bits());
+    put(&mut b, 0x9c, j.def.damping_ratio.to_bits());
+    put(&mut b, 0xa0, j.bias.to_bits());
+    put_vec(&mut b, 0xa4, j.def.local_anchor_a);
+    put_vec(&mut b, 0xac, j.def.local_anchor_b);
+    put(&mut b, 0xb4, j.gamma.to_bits());
+    put(&mut b, 0xb8, j.impulse.to_bits());
+    put(&mut b, 0xbc, j.def.length.to_bits());
+    put_vec(&mut b, 0xc0, j.u);
+    put_vec(&mut b, 0xc8, j.r_a);
+    put_vec(&mut b, 0xd0, j.r_b);
+    put_vec(&mut b, 0xd8, j.a.local_center);
+    put_vec(&mut b, 0xe0, j.b.local_center);
+    for (k, x) in [j.a.inv_mass, j.b.inv_mass, j.a.inv_i, j.b.inv_i, j.mass].iter().enumerate() {
+        put(&mut b, 0xe8 + 4 * k, x.to_bits());
+    }
+    b
+}
+
+/// Random springs (soft and rigid, stretched, slack and coincident anchors; static and fixed-rotation sides;
+/// axis locks) stepped through init, velocity and position solves.
+fn compare_distance_joint(executable: &std::path::Path) -> Result<(), String> {
+    use super::distance_joint::*;
+    use super::revolute::JointBody;
+    let mut random = Random(0x5eed_000a);
+    let mut calls = Vec::new();
+    let mut expected: Vec<(&str, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    let axes = [Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)];
+    for case in 0..1024 {
+        let body = |random: &mut Random, index: usize, side: usize| {
+            let fixed = (case + side) % 11 == 0;
+            JointBody {
+                index,
+                local_center: random.vec(0.3),
+                inv_mass: if fixed { 0.0 } else { random.range(0.2, 4.0) },
+                inv_i: if fixed || random.next() % 9 == 0 { 0.0 } else { random.range(0.5, 40.0) },
+                axis: axes[random.next() as usize % axes.len()],
+            }
+        };
+        let (ia, ib) = if random.next() % 2 == 0 { (0, 1) } else { (2, 0) };
+        let (a, b) = (body(&mut random, ia, 0), body(&mut random, ib, 1));
+        let mut positions: Vec<Position> = (0..3).map(|_| Position { c: random.vec(1.0), a: random.range(-3.0, 3.0) }).collect();
+        let def = DistanceDef {
+            local_anchor_a: random.vec(0.5),
+            local_anchor_b: random.vec(0.5),
+            length: [0.05, 0.005, random.range(0.005, 2.0)][random.next() as usize % 3],
+            frequency_hz: [0.0, random.range(0.0, 10.0), random.range(0.0, 10.0)][random.next() as usize % 3],
+            damping_ratio: random.range(0.0, 1.0),
+        };
+        if case % 13 == 0 {
+            // Anchors on top of each other: the axis falls back to zero.
+            let (qa, qb) = (super::math::Rot::new(positions[ia].a), super::math::Rot::new(positions[ib].a));
+            let wa = qa.apply(def.local_anchor_a - a.local_center);
+            let rb = qb.apply(def.local_anchor_b - b.local_center);
+            positions[ib].c = Vec2::new(positions[ia].c.x + wa.x - rb.x, positions[ia].c.y + wa.y - rb.y);
+        }
+        let mut joint = DistanceJoint::new(def);
+        joint.impulse = random.range(-1.0, 1.0);
+        let mut velocities: Vec<Velocity> = (0..3).map(|_| Velocity { v: random.vec(5.0), w: random.range(-8.0, 8.0) }).collect();
+        let dt = [1.0 / 60.0, 0.02][random.next() as usize % 2];
+        let step = TimeStep { dt, inv_dt: 1.0 / dt, dt_ratio: random.range(0.5, 1.5), velocity_iterations: 8, position_iterations: 8, warm_starting: random.next() % 4 != 0 };
+        let record = |op, joint: &DistanceJoint, positions: &[Position], velocities: &[Velocity]| {
+            let (p, v) = island_bytes(positions, velocities);
+            (op, distance_bytes(joint), p, v)
+        };
+        joint.a = a;
+        joint.b = b;
+        calls.push(joint_call(DISTANCE_INIT, distance_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+        joint.init_velocity_constraints(a, b, &step, &positions, &mut velocities);
+        expected.push(record("init", &joint, &positions, &velocities));
+        for _ in 0..3 {
+            calls.push(joint_call(DISTANCE_SOLVE_VELOCITY, distance_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            joint.solve_velocity_constraints(&mut velocities);
+            expected.push(record("velocity", &joint, &positions, &velocities));
+        }
+        for _ in 0..3 {
+            calls.push(joint_call(DISTANCE_SOLVE_POSITION, distance_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            let solved = joint.solve_position_constraints(&mut positions);
+            let mut r = record("position", &joint, &positions, &velocities);
+            r.1.push(solved as u8);
+            expected.push(r);
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let (op, joint, p, v) = &expected[i];
+        let mut native_joint = unhex(&reply.buffers[0]);
+        native_joint[0x60..0x70].fill(0);
+        if *op == "position" {
+            native_joint.push((reply.ret & 0xff != 0) as u8);
+        }
+        let native = [native_joint, unhex(&reply.buffers[2]), unhex(&reply.buffers[3])];
+        for (k, (n, r)) in native.iter().zip([joint, p, v]).enumerate() {
+            if n != r {
+                bad += 1;
+                let at = n.iter().zip(r).position(|(x, y)| x != y).unwrap_or(n.len().min(r.len()));
+                let o = at & !3;
+                first.get_or_insert_with(|| format!("call {i} {op}: buffer {k} byte {at:#x} native={:#x} rust={:#x}", get(n, o.min(n.len() - 4)), get(r, o.min(r.len() - 4))));
+                break;
+            }
+        }
+    }
+    report("DISTANCE JOINT", bad, replies.len(), first)
 }

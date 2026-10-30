@@ -78,8 +78,8 @@ impl Physics {
     /// The world points both ends of a hinge pin to.
     pub fn anchors(&self, hinge: &Hinge) -> Option<(Vec2, Vec2)> {
         let j = self.world.joints[hinge.joint].as_ref()?;
-        let a = self.world.body(j.body_a).xf.apply(j.revolute.def.local_anchor_a);
-        let b = self.world.body(j.body_b).xf.apply(j.revolute.def.local_anchor_b);
+        let a = self.world.body(j.body_a).xf.apply(j.revolute().def.local_anchor_a);
+        let b = self.world.body(j.body_b).xf.apply(j.revolute().def.local_anchor_b);
         Some((bevy(a), bevy(b)))
     }
 }

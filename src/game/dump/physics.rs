@@ -201,7 +201,7 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         let a = bodies[&format!("{}#{}", own.name, own.id)];
         let b = *bodies.get(connected).ok_or(format!("hinge {} connects to {connected}", h.name))?;
         let id = world.create_joint(def, a, b, false);
-        let rev = &mut world.joints[id].as_mut().unwrap().revolute;
+        let rev = world.joints[id].as_mut().unwrap().revolute_mut();
         rev.impulse = [fl(4), fl(5), fl(6)];
         rev.motor_impulse = fl(7);
         rev.limit_state = w[37];
@@ -569,7 +569,7 @@ pub fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> 
             out.push(format!("b2RevoluteJoint {}: missing", h.name));
             continue;
         };
-        let rev = &w.joints[id].as_ref().unwrap().revolute;
+        let rev = &w.joints[id].as_ref().unwrap().revolute();
         let g = words(j);
         let ours = [rev.impulse[0].to_bits(), rev.impulse[1].to_bits(), rev.impulse[2].to_bits(), rev.motor_impulse.to_bits()];
         for (k, (gw, o)) in g[4..8].iter().zip(ours).enumerate() {

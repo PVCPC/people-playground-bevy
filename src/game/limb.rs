@@ -121,6 +121,10 @@ pub struct GoreString {
     pub break_at: Option<f64>,
     /// Joint.breakForce of the SpringJoint2D.
     pub breakForce: f32,
+    /// The SpringJoint2D's b2DistanceJoint.
+    pub joint: Option<crate::b2::world::JointId>,
+    /// A pending Object.Destroy(Joint): the DelayedCallManager time it runs at.
+    pub destroy_at: Option<f64>,
 }
 
 impl Default for GoreString {
@@ -139,6 +143,8 @@ impl Default for GoreString {
             lineData: None,
             break_at: None,
             breakForce: f32::INFINITY,
+            joint: None,
+            destroy_at: None,
         }
     }
 }
@@ -1095,22 +1101,54 @@ impl Game {
 }
 
 impl Game {
-    /// The SpringJoint2D as the b2 world needs it: limb `l`'s body to `other`'s body.
+    /// AddComponent<SpringJoint2D> and the setters GoreStringBehaviour.CreateJoint runs, ending with
+    /// connectedBody = other. Each ReCreate (anchor, connectedAnchor, connectedBody) destroys the b2 joint and
+    /// builds it again; the ones before connectedBody hang from the scene's fixtureless ground body, so all they
+    /// leave behind is limb `l` woken by b2World::DestroyJoint. The last one is SpringJoint2D::Create with
+    /// autoconfiguration already complete: anchors scaled by each body's lossy scale, the clamped distance,
+    /// frequency and damping ratio, breakForce infinite (so out of the break-limit list).
     fn create_spring_joint(&mut self, l: usize, other: usize, anchor: [f32; 2], connected_anchor: [f32; 2], distance: f32, frequency: f32, damping_ratio: f32) {
-        let _ = (l, other, anchor, connected_anchor, distance, frequency, damping_ratio);
-        unimplemented!("b2: SpringJoint2D (b2DistanceJoint) between limb bodies l and other: local anchors anchor/connected_anchor, length distance, frequency, damping_ratio, breakForce = inf, collideConnected false");
+        let (pa, pb) = (self.limbs[l].PhysicalBehaviour, self.limbs[other].PhysicalBehaviour);
+        let (sa, sb) = (self.physicals[pa].transform.localScale, self.physicals[pb].transform.localScale);
+        let (a, b) = (self.physicals[pa].rigidbody.body, self.physicals[pb].rigidbody.body);
+        // SpringJoint2D::SetDistance / SetFrequency / SetDampingRatio.
+        let clamp = |v: f32, lo: f32, hi: f32| if lo <= v && v <= hi { v } else if lo <= v { hi } else { lo };
+        let def = crate::b2::distance_joint::DistanceDef {
+            local_anchor_a: crate::b2::math::Vec2::new(sa[0] * anchor[0], sa[1] * anchor[1]),
+            local_anchor_b: crate::b2::math::Vec2::new(sb[0] * connected_anchor[0], sb[1] * connected_anchor[1]),
+            length: clamp(distance, f32::from_bits(0x3ba3_d70a), 1_000_000.0),
+            frequency_hz: clamp(frequency, 0.0, 1_000_000.0),
+            damping_ratio: clamp(damping_ratio, 0.0, 1.0),
+        };
+        self.world.wake_body(a);
+        let id = self.world.create_joint(def, a, b, false);
+        self.world.wake_joined(a);
+        self.world.wake_joined(b);
+        self.limbs[l].gore.joint = Some(id);
     }
 
-    /// Destroy(Joint) for the gore string's SpringJoint2D of limb `l`.
+    /// Object.Destroy(Joint): DestroyObjectDelayed queues it on the DelayedCallManager at
+    /// min(fixedTimeAsDouble, the frame's time); a second Destroy finds nothing left to do.
     fn destroy_spring_joint(&mut self, l: usize) {
-        let _ = l;
-        unimplemented!("b2: destroy limb l's SpringJoint2D (its b2DistanceJoint and break-limit entry)");
+        let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+        self.limbs[l].gore.destroy_at.get_or_insert(at);
     }
 
-    /// Joint.breakForce = v on limb `l`'s SpringJoint2D.
+    /// SpringJoint2D destruction (Joint2D::Cleanup): the b2 joint and its break-limit entry go; `Joint` reads null.
+    pub fn remove_spring_joint(&mut self, l: usize) {
+        if let Some(id) = self.limbs[l].gore.joint.take() {
+            self.world.destroy_joint(id);
+        }
+        self.joint_break_limits.retain(|&k| k != super::BreakJoint::Spring(l));
+        self.limbs[l].goreStringJoint = false;
+        self.limbs[l].gore.destroy_at = None;
+    }
+
+    /// Joint.breakForce = v on limb `l`'s SpringJoint2D (Joint2D::SetBreakForce).
     fn set_spring_break_force(&mut self, l: usize, v: f32) {
+        let v = if 0.0 <= v && v <= f32::INFINITY { v } else if 0.0 <= v { f32::INFINITY } else { 0.0 };
         self.limbs[l].gore.breakForce = v;
-        unimplemented!("b2: SpringJoint2D::SetBreakForce(v) on limb l's joint (move/insert it in the scene's break-limit list)");
+        self.add_break_limits_update(super::BreakJoint::Spring(l), v, f32::INFINITY);
     }
 
     /// GoreStringBehaviour.CreateJoint
@@ -1155,7 +1193,6 @@ impl Game {
         self.limbs[l].gore.lineData = None;
         if self.limbs[l].goreStringJoint {
             self.destroy_spring_joint(l);
-            self.limbs[l].goreStringJoint = false;
         }
     }
 
@@ -1197,16 +1234,34 @@ impl Game {
         }
     }
 
-    /// DelayedCallManager: the gore strings' SetBreakForce coroutines that are due.
-    pub fn gore_string_coroutines(&mut self) {
+    /// DelayedCallManager::Update (180634dd0): the gore strings' due callbacks in time order. The fixed-rate
+    /// pass (after the physics step) runs only the delayed Destroys; the dynamic one (after Update) also the
+    /// SetBreakForce coroutines.
+    // ponytail: callbacks queued during this pass wait for the next (timeStamp); nothing here queues any.
+    pub fn gore_string_delayed_calls(&mut self, dynamic: bool) {
         let now = self.time.timeAsDouble;
-        let mut due: Vec<usize> = (0..self.limbs.len()).filter(|&l| self.limbs[l].gore.break_at.is_some_and(|w| w <= now)).collect();
-        due.sort_by(|&a, &b| self.limbs[a].gore.break_at.partial_cmp(&self.limbs[b].gore.break_at).unwrap());
-        for l in due {
-            self.limbs[l].gore.break_at = None;
-            if self.limbs[l].goreStringJoint {
-                let v = self.limbs[l].gore.JointBreakThreshold * 1.5;
-                self.set_spring_break_force(l, v);
+        let mut due: Vec<(f64, bool, usize)> = Vec::new();
+        for l in 0..self.limbs.len() {
+            let g = &self.limbs[l].gore;
+            if let Some(t) = g.break_at.filter(|&t| dynamic && t <= now) {
+                due.push((t, false, l));
+            }
+            if let Some(t) = g.destroy_at.filter(|&t| t <= now) {
+                due.push((t, true, l));
+            }
+        }
+        due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for (_, destroy, l) in due {
+            if destroy {
+                if self.limbs[l].gore.destroy_at.is_some() {
+                    self.remove_spring_joint(l);
+                }
+            } else {
+                self.limbs[l].gore.break_at = None;
+                if self.limbs[l].goreStringJoint {
+                    let v = self.limbs[l].gore.JointBreakThreshold * 1.5;
+                    self.set_spring_break_force(l, v);
+                }
             }
         }
     }

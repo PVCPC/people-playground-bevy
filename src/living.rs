@@ -320,13 +320,13 @@ pub fn drive_muscles(
         let Some(joint) = world.joints[hinge.joint].as_ref() else {
             continue;
         };
-        let reference = joint.revolute.def.reference_angle;
+        let reference = joint.revolute().def.reference_angle;
         input.joint_angle = hinge::joint_angle(angle, world.body(joint.body_b).sweep.a, reference).to_degrees();
         input.reference = reference.to_degrees();
         let torque = limb_motor(&input, muscle);
         let out = motor::MotorOutput { speed: muscle.previous_speed, torque }.clamp_native_properties();
         muscle.previous_speed = out.speed;
-        let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute.def;
+        let def = &mut world.joints[hinge.joint].as_mut().unwrap().revolute_mut().def;
         def.enable_motor = out.torque > 0.0;
         def.motor_speed = out.speed * 0.017453292;
         def.max_motor_torque = out.torque;

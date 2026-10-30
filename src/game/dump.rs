@@ -383,7 +383,7 @@ impl Game {
                     upper_angle: fl(14),
                 };
                 let id = g.world.create_joint(def, limb_bodies[l], limb_bodies[connected], false);
-                let rev = &mut g.world.joints[id].as_mut().unwrap().revolute;
+                let rev = g.world.joints[id].as_mut().unwrap().revolute_mut();
                 rev.impulse = [fl(4), fl(5), fl(6)];
                 rev.motor_impulse = fl(7);
                 h.joint = Some(id);
@@ -391,7 +391,7 @@ impl Game {
             let _ = rig;
             // ponytail: the recorder does not dump m_JointBreakLimits; finite-limit hinges list in hinge order.
             if h.breakForce != f32::INFINITY || h.breakTorque != f32::INFINITY {
-                g.joint_break_limits.push(g.hinges.len());
+                g.joint_break_limits.push(super::BreakJoint::Hinge(g.hinges.len()));
             }
             g.hinges.push(h);
         }
@@ -678,7 +678,7 @@ impl Game {
         self.node_controller_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
-        self.gore_string_coroutines();
+        self.gore_string_delayed_calls(true);
         // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {

@@ -551,11 +551,11 @@ impl Hinge {
     pub fn joint_angle(&self, w: &World) -> f32 {
         let Some(id) = self.joint else { return 0.0 };
         let j = w.joints[id].as_ref().unwrap();
-        (w.body(j.body_b).sweep.a - w.body(j.body_a).sweep.a - j.revolute.def.reference_angle) * mathf::RAD2DEG
+        (w.body(j.body_b).sweep.a - w.body(j.body_a).sweep.a - j.revolute().def.reference_angle) * mathf::RAD2DEG
     }
     /// HingeJoint2D::GetReferenceAngle, degrees.
     pub fn reference_angle(&self, w: &World) -> f32 {
-        self.joint.map_or(0.0, |id| w.joints[id].as_ref().unwrap().revolute.def.reference_angle * mathf::RAD2DEG)
+        self.joint.map_or(0.0, |id| w.joints[id].as_ref().unwrap().revolute().def.reference_angle * mathf::RAD2DEG)
     }
     /// HingeJoint2D::SetMotor (the `Joint.motor = motor` setter).
     pub fn set_motor(&mut self, w: &mut World, speed: f32, torque: f32) {
@@ -572,23 +572,23 @@ impl Hinge {
         let Some(id) = self.joint else { return };
         let j = w.joints[id].as_ref().unwrap();
         let (a, b) = (j.body_a, j.body_b);
-        let def = &j.revolute.def;
+        let def = &j.revolute().def;
         let (enable, old_speed, old_torque) = (def.enable_motor, def.motor_speed, def.max_motor_torque);
         let speed = s * mathf::DEG2RAD;
         if !enable {
             wake_for_joint(w, a);
             wake_for_joint(w, b);
-            w.joints[id].as_mut().unwrap().revolute.def.enable_motor = true;
+            w.joints[id].as_mut().unwrap().revolute_mut().def.enable_motor = true;
         }
         if speed != old_speed {
             wake_for_joint(w, a);
             wake_for_joint(w, b);
-            w.joints[id].as_mut().unwrap().revolute.def.motor_speed = speed;
+            w.joints[id].as_mut().unwrap().revolute_mut().def.motor_speed = speed;
         }
         if t != old_torque {
             wake_for_joint(w, a);
             wake_for_joint(w, b);
-            w.joints[id].as_mut().unwrap().revolute.def.max_motor_torque = t;
+            w.joints[id].as_mut().unwrap().revolute_mut().def.max_motor_torque = t;
         }
     }
     /// HingeJoint2D::SetLimits (the `Joint.limits = limits` setter).
@@ -605,10 +605,10 @@ impl Hinge {
         let Some(id) = self.joint else { return };
         let j = w.joints[id].as_ref().unwrap();
         let (a, b) = (j.body_a, j.body_b);
-        if !j.revolute.def.enable_limit {
+        if !j.revolute().def.enable_limit {
             wake_for_joint(w, a);
             wake_for_joint(w, b);
-            let r = &mut w.joints[id].as_mut().unwrap().revolute;
+            let r = w.joints[id].as_mut().unwrap().revolute_mut();
             r.def.enable_limit = true;
             r.impulse[2] = 0.0;
         }
@@ -616,11 +616,11 @@ impl Hinge {
         if upper < lower {
             std::mem::swap(&mut lower, &mut upper);
         }
-        let def = &w.joints[id].as_ref().unwrap().revolute.def;
+        let def = &w.joints[id].as_ref().unwrap().revolute().def;
         if lower != def.lower_angle || upper != def.upper_angle {
             wake_for_joint(w, a);
             wake_for_joint(w, b);
-            let r = &mut w.joints[id].as_mut().unwrap().revolute;
+            let r = w.joints[id].as_mut().unwrap().revolute_mut();
             r.def.lower_angle = lower;
             r.def.upper_angle = upper;
             r.impulse[2] = 0.0;
@@ -633,6 +633,13 @@ impl Hinge {
     pub fn set_break_torque(&mut self, v: f32) {
         self.breakTorque = if 0.0 <= v && v <= f32::INFINITY { v } else if 0.0 <= v { f32::INFINITY } else { 0.0 };
     }
+}
+
+/// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, or a limb's gore-string SpringJoint2D.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BreakJoint {
+    Hinge(usize),
+    Spring(usize),
 }
 
 /// A Transform as the scripts read it: world position, rotation and lossy scale.
@@ -692,7 +699,7 @@ pub struct Game {
     pub velocityIterations: i32,
     pub positionIterations: i32,
     /// PhysicsScene2D.m_JointBreakLimits: hinges with a finite break force or torque, in list order.
-    pub joint_break_limits: Vec<usize>,
+    pub joint_break_limits: Vec<BreakJoint>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
     /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.

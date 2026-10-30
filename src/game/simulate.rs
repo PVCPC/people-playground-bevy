@@ -2,6 +2,7 @@
 //! joint breaking and the contact callbacks.
 use super::*;
 use crate::b2::contacts2d::{Message, Report, ScriptCollision};
+use crate::b2::world::JointKind;
 use crate::unity::{acosf, atan2f, cosf, sinf, transform};
 
 /// Quaternionf operator* (1800b7f20), in its single-precision operation order.
@@ -75,6 +76,9 @@ impl Game {
         self.update_joints(dt);
         let reports = self.world.process_contacts(true);
         self.send_callback_reports(&reports);
+        // FixedUpdate.ScriptRunDelayedFixedFrameRate, which also resumes the recorder's FE snapshot.
+        // ponytail: the destroys run before that snapshot; order them by time when a recording has gore strings.
+        self.gore_string_delayed_calls(false);
     }
 
     /// Each awake Rigidbody2D's body pose to its Transform: the position's x/y, and the rotation's z turn replaced
@@ -165,9 +169,16 @@ impl Game {
     }
 
     fn update_break_limits(&mut self, h: usize) {
-        self.joint_break_limits.retain(|&k| k != h);
-        if self.hinges[h].breakForce != f32::INFINITY || self.hinges[h].breakTorque != f32::INFINITY {
-            self.joint_break_limits.push(h);
+        let (force, torque) = (self.hinges[h].breakForce, self.hinges[h].breakTorque);
+        self.add_break_limits_update(BreakJoint::Hinge(h), force, torque);
+    }
+
+    /// Joint2D::AddBreakLimitsUpdate / SetBreakForce: to the back of the list, or out of it when both limits are
+    /// infinite.
+    pub fn add_break_limits_update(&mut self, j: BreakJoint, force: f32, torque: f32) {
+        self.joint_break_limits.retain(|&k| k != j);
+        if force != f32::INFINITY || torque != f32::INFINITY {
+            self.joint_break_limits.push(j);
         }
     }
 
@@ -176,27 +187,45 @@ impl Game {
     /// list walk does.
     fn update_joints(&mut self, dt: f32) {
         let mut next = self.joint_break_limits.first().copied();
-        while let Some(h) = next {
-            let at = self.joint_break_limits.iter().position(|&k| k == h).unwrap();
+        while let Some(j) = next {
+            let at = self.joint_break_limits.iter().position(|&k| k == j).unwrap();
             next = self.joint_break_limits.get(at + 1).copied();
-            let (force, torque) = (self.hinges[h].breakForce, self.hinges[h].breakTorque);
-            // Joint2D::GetReactionForce/Torque: zero without a b2 joint or under 0.0001s; b2RevoluteJoint gives
-            // inv_dt times the point impulse, and inv_dt times the limit impulse as torque.
-            let impulse = self.hinges[h].joint.filter(|_| 0.0001 <= dt).map(|j| self.world.joints[j].as_ref().unwrap().revolute.impulse);
-            let inv_dt = 1.0 / dt;
-            let over_force = force != f32::INFINITY && {
-                let [fx, fy] = impulse.map_or([0.0, 0.0], |i| [i[0] * inv_dt, i[1] * inv_dt]);
-                (fx * fx + fy * fy).sqrt() > force
+            let (force, torque, joint) = match j {
+                BreakJoint::Hinge(h) => (self.hinges[h].breakForce, self.hinges[h].breakTorque, self.hinges[h].joint),
+                // SpringJoint2D keeps Joint2D::Reset's infinite breakTorque.
+                BreakJoint::Spring(l) => (self.limbs[l].gore.breakForce, f32::INFINITY, self.limbs[l].gore.joint),
             };
-            let broken = over_force || (torque != f32::INFINITY && impulse.map_or(0.0, |i| i[2] * inv_dt) > torque);
-            if broken {
-                self.on_joint_break(h);
-                // DestroyObjectHighLevel: HingeJoint2D::Cleanup destroys the b2 joint.
-                if let Some(j) = self.hinges[h].joint.take() {
-                    self.world.destroy_joint(j);
+            // Joint2D::GetReactionForce/Torque: zero without a b2 joint or under 0.0001s. b2RevoluteJoint gives
+            // inv_dt times the point impulse and inv_dt times the limit impulse as torque; b2DistanceJoint gives
+            // (inv_dt * impulse) * u and no torque.
+            let inv_dt = 1.0 / dt;
+            let ([fx, fy], t) = match joint.filter(|_| 0.0001 <= dt).map(|id| &self.world.joints[id].as_ref().unwrap().kind) {
+                None => ([0.0, 0.0], 0.0),
+                Some(JointKind::Revolute(r)) => ([r.impulse[0] * inv_dt, r.impulse[1] * inv_dt], r.impulse[2] * inv_dt),
+                Some(JointKind::Distance(d)) => {
+                    let f = d.reaction_force(inv_dt);
+                    ([f.x, f.y], 0.0)
                 }
-                self.hinges[h].destroyed = true;
-                self.joint_break_limits.retain(|&k| k != h);
+            };
+            let broken = (force != f32::INFINITY && (fx * fx + fy * fy).sqrt() > force) || (torque != f32::INFINITY && t > torque);
+            if broken {
+                match j {
+                    BreakJoint::Hinge(h) => {
+                        self.on_joint_break(h);
+                        // DestroyObjectHighLevel: HingeJoint2D::Cleanup destroys the b2 joint.
+                        if let Some(j) = self.hinges[h].joint.take() {
+                            self.world.destroy_joint(j);
+                        }
+                        self.hinges[h].destroyed = true;
+                    }
+                    BreakJoint::Spring(l) => {
+                        // SendMessage("OnJointBreak2D") to the limb: only its GoreStringBehaviour owns the joint.
+                        self.gore_string_on_joint_break(l);
+                        // DestroyObjectHighLevel, ahead of the script's own delayed Destroy.
+                        self.remove_spring_joint(l);
+                    }
+                }
+                self.joint_break_limits.retain(|&k| k != j);
             }
             if next.is_some_and(|n| !self.joint_break_limits.contains(&n)) {
                 next = None;

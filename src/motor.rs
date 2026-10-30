@@ -273,7 +273,7 @@ mod tests {
                 case.previous_speed = previous;
                 let output = command(&case);
                 previous = output.speed;
-                let def = &mut world.joints[joint].as_mut().unwrap().revolute.def;
+                let def = &mut world.joints[joint].as_mut().unwrap().revolute_mut().def;
                 def.enable_motor = true;
                 def.motor_speed = output.speed.to_radians();
                 def.max_motor_torque = output.torque;
