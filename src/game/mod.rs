@@ -12,6 +12,7 @@ pub mod tyre;
 pub mod flask;
 pub mod light;
 pub mod detector;
+pub mod devices;
 pub mod dump;
 pub mod explosion;
 pub mod lifecycle;
@@ -334,6 +335,10 @@ pub struct Time {
     pub timeScale: f32,
     pub frameCount: i32,
     pub unscaledDeltaTime: f32,
+    /// Time.smoothDeltaTime and TimeManager's weight counter (+0x80 and +0x84): the recordings lack them, so a loaded
+    /// one starts at the steady state (the counter at its fixed point 1, the average at the frame's dt).
+    pub smoothDeltaTime: f32,
+    pub smoothCount: f32,
 }
 
 /// UnityEngine.Bounds in the xy plane.
@@ -658,6 +663,14 @@ impl Rigidbody {
         }
         w.body_mut(self.body).apply_force_to_center(V::new(force[0], force[1]));
     }
+    /// Rigidbody2D::AddRelativeForce (180c1c1b0) with ForceMode2D.Force: the force turned by the body's rotation.
+    pub fn add_relative_force(&self, w: &mut World, force: [f32; 2]) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        let q = w.body(self.body).xf.q;
+        w.body_mut(self.body).apply_force_to_center(V::new(q.c * force[0] - q.s * force[1], q.s * force[0] + q.c * force[1]));
+    }
     /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Impulse.
     pub fn add_impulse_at_position(&self, w: &mut World, impulse: [f32; 2], point: [f32; 2]) {
         if self.detached.is_some() || self.bodyType != 0 {
@@ -960,6 +973,11 @@ pub enum Behaviour {
     Led(usize),
     Detector(usize),
     Sticky(usize),
+    Generator(usize),
+    Floodlight(usize),
+    SpikeGrenade(usize),
+    HeatingElement(usize),
+    RayGun(usize),
 }
 
 impl Behaviour {
@@ -989,6 +1007,11 @@ impl Behaviour {
             Behaviour::Glowtube(_) => "GlowtubeBehaviour",
             Behaviour::Led(_) => "LEDBulbBehaviour",
             Behaviour::Detector(_) => "DetectorBehaviour",
+            Behaviour::Generator(_) => "GeneratorBehaviour",
+            Behaviour::Floodlight(_) => "SingleFloodlightBehaviour",
+            Behaviour::SpikeGrenade(_) => "SpikeGrenadeBehaviour",
+            Behaviour::HeatingElement(_) => "HeatingElementBehaviour",
+            Behaviour::RayGun(_) => "TemperatureRayGunBehaviour",
             Behaviour::Sticky(_) => "StickyGrenadeBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
@@ -1104,6 +1127,11 @@ pub struct Game {
     pub glowtubes: Vec<light::Glowtube>,
     pub leds: Vec<light::LedBulb>,
     pub detectors: Vec<detector::Detector>,
+    pub generators: Vec<devices::Generator>,
+    pub floodlights: Vec<devices::Floodlight>,
+    pub spike_grenades: Vec<devices::SpikeGrenade>,
+    pub heating_elements: Vec<devices::HeatingElement>,
+    pub ray_guns: Vec<devices::RayGun>,
     /// Each TruckDoorBehaviour with its component's instance id.
     pub truck_doors: Vec<(i32, car::TruckDoor)>,
     pub joint_helpers: Vec<car::JointHelper>,

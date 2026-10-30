@@ -163,12 +163,57 @@ impl Game {
                     self.detector_on_disable(i);
                 }
             }
+            "GeneratorBehaviour" => {
+                let i = self.generators.iter().position(|x| x.id == id).expect("a GeneratorBehaviour in the arena");
+                if !std::mem::replace(&mut self.generators[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Generator(i));
+                if active {
+                    self.generator_on_disable(i);
+                }
+            }
+            "SingleFloodlightBehaviour" => {
+                let i = self.floodlights.iter().position(|x| x.id == id).expect("a SingleFloodlightBehaviour in the arena");
+                if !std::mem::replace(&mut self.floodlights[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Floodlight(i));
+                if active {
+                    self.with_component_instance(id, |g, inst, _| g.floodlight_on_disable(i, inst));
+                }
+            }
+            "SpikeGrenadeBehaviour" => {
+                let i = self.spike_grenades.iter().position(|x| x.id == id).expect("a SpikeGrenadeBehaviour in the arena");
+                if !std::mem::replace(&mut self.spike_grenades[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::SpikeGrenade(i));
+                if active {
+                    self.spike_grenade_on_disable(i);
+                }
+            }
+            "TemperatureRayGunBehaviour" => {
+                let i = self.ray_guns.iter().position(|x| x.id == id).expect("a TemperatureRayGunBehaviour in the arena");
+                if !std::mem::replace(&mut self.ray_guns[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::RayGun(i));
+                if active {
+                    self.ray_gun_on_disable(i);
+                }
+            }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
         }
     }
 
     /// Behaviour.enabled was set to false at run time (SetAsBroken), over the prefab's m_Enabled.
     pub(super) fn script_disabled(&self, id: i32) -> bool {
-        self.leds.iter().any(|x| x.id == id && !x.enabled) || self.detectors.iter().any(|x| x.id == id && !x.enabled)
+        self.leds.iter().any(|x| x.id == id && !x.enabled)
+            || self.detectors.iter().any(|x| x.id == id && !x.enabled)
+            || self.generators.iter().any(|x| x.id == id && !x.enabled)
+            || self.floodlights.iter().any(|x| x.id == id && !x.enabled)
+            || self.spike_grenades.iter().any(|x| x.id == id && !x.enabled)
+            || self.ray_guns.iter().any(|x| x.id == id && !x.enabled)
     }
 }

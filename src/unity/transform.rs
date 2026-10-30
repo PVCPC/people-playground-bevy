@@ -330,7 +330,11 @@ fn matrix_to_quaternion(m: &[f32; 9]) -> [f32; 4] {
 /// 180973710 -> FromToQuaternionSafe 18073d8e0 -> Matrix3x3f::SetFromToRotation 18074cca0 -> MatrixToQuaternion
 /// 18073f5c0). Either input shorter than 1e-5 gives identity. The caller then sets the result as the world rotation.
 pub fn from_to_rotation_up(v: [f32; 3]) -> [f32; 4] {
-    let from = [0.0f32, 1.0, 0.0];
+    from_to_rotation([0.0, 1.0, 0.0], v)
+}
+
+/// Transform.right = v is Quaternion.FromToRotation(Vector3.right, v); `from_to_rotation_up` is Transform.up = v.
+pub fn from_to_rotation(from: [f32; 3], v: [f32; 3]) -> [f32; 4] {
     let mf = sqrtf(from[0] * from[0] + from[1] * from[1] + from[2] * from[2]);
     let mt = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     let eps = f32::from_bits(0x3727c5ac);

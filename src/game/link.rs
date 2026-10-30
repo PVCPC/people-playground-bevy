@@ -66,6 +66,11 @@ pub struct Linked {
     pub leds: HashMap<usize, usize>,
     pub detectors: HashMap<usize, usize>,
     pub sticky_grenades: HashMap<usize, usize>,
+    pub generators: HashMap<usize, usize>,
+    pub floodlights: HashMap<usize, usize>,
+    pub spike_grenades: HashMap<usize, usize>,
+    pub heating_elements: HashMap<usize, usize>,
+    pub ray_guns: HashMap<usize, usize>,
     pub act_on_collides: HashMap<usize, usize>,
     pub spawners: HashMap<usize, usize>,
     pub heat_rects: HashMap<usize, usize>,
@@ -377,7 +382,7 @@ pub(super) fn check_rewritten(class: &str) {
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
         | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
-        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" => {}
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
         // SmoothLineControllerBehaviour only sets LineRenderer positions and width.
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
@@ -1221,6 +1226,68 @@ impl Game {
             machinery.insert(o, self.machinery.len());
             self.machinery.push(m);
         }
+        let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        for o in 0..n {
+            if let Some((c, enabled, v)) = script(prefab, o, "GeneratorBehaviour") {
+                let mut x = super::devices::Generator::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = l.in_arena(field(v, "physicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("GeneratorBehaviour.physicalBehaviour is null")?;
+                generators.insert(o, self.generators.len());
+                self.generators.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "SingleFloodlightBehaviour") {
+                let mut x = super::devices::Floodlight::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.ToToggle = l.object(field(v, "ToToggle")?)?;
+                x.SwitchSounds = array(v, "SwitchSounds")?.len();
+                x.OnSwitchSound = array(v, "OnSwitchSound")?.len();
+                floodlights.insert(o, self.floodlights.len());
+                self.floodlights.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "SpikeGrenadeBehaviour") {
+                let mut x = super::devices::SpikeGrenade::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = *l.arenas.physical.get(&o).ok_or("SpikeGrenadeBehaviour without a PhysicalBehaviour")?;
+                for (name, slot) in [("SpikePrefab", &mut x.SpikePrefab), ("ExplosionVFX", &mut x.ExplosionVFX)] {
+                    let p = field(v, name)?.pptr().ok_or(name)?;
+                    *slot = if p.is_null() { None } else { Some(db.resolve(file, p).ok_or_else(|| format!("SpikeGrenadeBehaviour.{name} outside the data"))?) };
+                }
+                x.CollisionLayers = field(field(v, "CollisionLayers")?, "m_Bits")?.i64().ok_or("CollisionLayers.m_Bits")? as u32;
+                spike_grenades.insert(o, self.spike_grenades.len());
+                self.spike_grenades.push(x);
+            }
+            if let Some((_, _, v)) = script(prefab, o, "HeatingElementBehaviour") {
+                let mut x = super::devices::HeatingElement::default();
+                load_values(x.fields(), v)?;
+                x.Phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("HeatingElementBehaviour.PhysicalBehaviour is null")?;
+                let m = l.object(field(v, "DamagableMachineryBehaviour")?)?.ok_or("HeatingElementBehaviour.DamagableMachineryBehaviour is null")?;
+                x.Machinery = *machinery.get(&m).ok_or("HeatingElementBehaviour: no DamagableMachineryBehaviour on its object")?;
+                heating_elements.insert(o, self.heating_elements.len());
+                self.heating_elements.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TemperatureRayGunBehaviour") {
+                let mut x = super::devices::RayGun::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("TemperatureRayGunBehaviour.PhysicalBehaviour is null")?;
+                x.Layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("Layers.m_Bits")? as u32;
+                // LineRenderer.transform: its object's local TRS and each parent's below the gun's own object.
+                let mut at = l.object(field(v, "LineRenderer")?)?.ok_or("TemperatureRayGunBehaviour.LineRenderer is null")?;
+                while at != o {
+                    x.Barrel.push(inst.objects[at].trs);
+                    at = inst.objects[at].parent.ok_or("TemperatureRayGunBehaviour.LineRenderer is outside the gun")?;
+                }
+                ray_guns.insert(o, self.ray_guns.len());
+                self.ray_guns.push(x);
+            }
+        }
         let mut fire_maps = HashMap::new();
         for o in 0..n {
             let Some((_, _, v)) = script(prefab, o, "LocalFirePropagationMap") else { continue };
@@ -1423,7 +1490,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -1689,6 +1756,10 @@ impl Game {
                             "PhysicalBehaviour" => self.physical_on_disable(linked.physicals[&d]),
                             "LEDBulbBehaviour" => self.led_on_disable(linked.leds[&d]),
                             "DetectorBehaviour" => self.detector_on_disable(linked.detectors[&d]),
+                            "GeneratorBehaviour" => self.generator_on_disable(linked.generators[&d]),
+                            "SingleFloodlightBehaviour" => self.floodlight_on_disable(linked.floodlights[&d], inst),
+                            "SpikeGrenadeBehaviour" => self.spike_grenade_on_disable(linked.spike_grenades[&d]),
+                            "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
                             // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
                             "ActivateIfTutorial" | "ActivateIfFancyEffects" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "DebrisComponent" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
                             c if super::lifecycle::LIFECYCLE.iter().any(|(k, m)| *k == c && !m.contains(&"OnDisable")) => {}
@@ -1836,6 +1907,11 @@ impl Game {
                 "LEDBulbBehaviour" => Some(Behaviour::Led(linked.leds[&o])),
                 "DetectorBehaviour" => Some(Behaviour::Detector(linked.detectors[&o])),
                 "StickyGrenadeBehaviour" => Some(Behaviour::Sticky(linked.sticky_grenades[&o])),
+                "GeneratorBehaviour" => Some(Behaviour::Generator(linked.generators[&o])),
+                "SingleFloodlightBehaviour" => Some(Behaviour::Floodlight(linked.floodlights[&o])),
+                "SpikeGrenadeBehaviour" => Some(Behaviour::SpikeGrenade(linked.spike_grenades[&o])),
+                "HeatingElementBehaviour" => Some(Behaviour::HeatingElement(linked.heating_elements[&o])),
+                "TemperatureRayGunBehaviour" => Some(Behaviour::RayGun(linked.ray_guns[&o])),
                 _ => None,
             };
             if let Some(b) = behaviour {
@@ -1979,6 +2055,8 @@ impl Game {
                 }
                 "GasTankBehaviour" | "FlaskBehaviour" => PendingStart::Flask(linked.flasks[&o]),
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
+                "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
+                "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "RandomCarTextureBehaviour" => PendingStart::CarTexture(self.random_car_textures.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
                 "DisintegrationCounterBehaviour" if linked.person.is_some() && o == 0 => continue,
                 "DisintegrationCounterBehaviour" => PendingStart::DisintegrationCounter(inst.objects[o].components[c]),

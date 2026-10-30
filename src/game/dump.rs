@@ -849,6 +849,8 @@ impl Game {
             timeScale: f(s.snap("timeScale")),
             frameCount: s.snap("frame").parse().unwrap(),
             unscaledDeltaTime: f(s.snap("unscaledDt")),
+            smoothDeltaTime: f(s.snap("dt")),
+            smoothCount: 1.0,
         };
         // Older recordings lack it: the Default map prefab sets Ambient_temperature 20.
         self.AmbientTemperature = s.snap.iter().find(|(k, _)| k == "ambient").map_or(20.0, |(_, v)| f(v));
@@ -919,6 +921,14 @@ impl Game {
                 (Phase::Fixed, B::Detector(i)) => self.detector_fixed_update(i),
                 // DetectorBehaviour.Update: the glow intensity.
                 (Phase::Update, B::Detector(_)) => {}
+                (Phase::Fixed, B::Generator(i)) => self.generator_fixed_update(i),
+                (Phase::Update, B::Generator(i)) => self.generator_update(i),
+                // SingleFloodlightBehaviour.Update: the glow property blocks and the highlight colours.
+                (Phase::Update, B::Floodlight(_)) => {}
+                (Phase::Fixed, B::HeatingElement(i)) => self.heating_element_fixed_update(i),
+                (Phase::Fixed, B::RayGun(i)) => self.ray_gun_fixed_update(i),
+                // TemperatureRayGunBehaviour.Update: the line renderer's start.
+                (Phase::Update, B::RayGun(_)) => {}
                 (Phase::Fixed, B::Sticky(i)) => self.sticky_grenade_fixed_update(i),
                 (Phase::Fixed, B::TruckDoor(t)) => self.truck_door_fixed_update(t, self.truck_doors[t].0),
                 (Phase::Update, B::DeleteAfter(i)) => self.delete_after_update(i),

@@ -441,6 +441,30 @@ impl Game {
                         self.detector_on_disable(i);
                     }
                 }
+                "GeneratorBehaviour" => {
+                    let i = self.generators.iter().position(|c| c.id == id).expect("a GeneratorBehaviour in the arena");
+                    if self.generators[i].enabled {
+                        self.generator_on_disable(i);
+                    }
+                }
+                "SingleFloodlightBehaviour" => {
+                    let i = self.floodlights.iter().position(|c| c.id == id).expect("a SingleFloodlightBehaviour in the arena");
+                    if self.floodlights[i].enabled {
+                        self.floodlight_on_disable(i, inst);
+                    }
+                }
+                "SpikeGrenadeBehaviour" => {
+                    let i = self.spike_grenades.iter().position(|c| c.id == id).expect("a SpikeGrenadeBehaviour in the arena");
+                    if self.spike_grenades[i].enabled {
+                        self.spike_grenade_on_disable(i);
+                    }
+                }
+                "TemperatureRayGunBehaviour" => {
+                    let i = self.ray_guns.iter().position(|c| c.id == id).expect("a TemperatureRayGunBehaviour in the arena");
+                    if self.ray_guns[i].enabled {
+                        self.ray_gun_on_disable(i);
+                    }
+                }
                 c if !super::declares(c, "OnDisable") => {}
                 _ => unimplemented!("{class}.OnDisable"),
             }

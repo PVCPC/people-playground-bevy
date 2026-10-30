@@ -280,6 +280,21 @@ impl Instance {
         }
     }
 
+    /// Transform.rotation = q (SetRotation 1807f5af0): the normalized local rotation, which SetLocalR (1800ca1c0)
+    /// stores when it differs, marking the object's global R and every descendant's global T, R and S.
+    pub fn set_world_rotation(&mut self, o: usize, q: [f32; 4]) {
+        let chain = self.chain(o);
+        let ((_, local), _) = crate::unity::transform::set_world(&chain[1..], self.position(o), q);
+        if self.objects[o].trs.q == local {
+            return;
+        }
+        self.objects[o].trs.q = local;
+        self.changed[o] |= self.interest[o] & GLOBAL_R;
+        for d in self.descendants(o) {
+            self.changed[d] |= self.interest[d] & (GLOBAL_T | GLOBAL_R | GLOBAL_S);
+        }
+    }
+
     /// The object's descendants in hierarchy (pre-) order.
     pub(super) fn descendants(&self, o: usize) -> Vec<usize> {
         // The prefab's depth-first order bounds them; SetParent(null) may have taken some out.

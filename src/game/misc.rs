@@ -456,6 +456,10 @@ pub enum PendingStart {
     Flask(usize),
     /// DetectorBehaviour.Start: the `Game::detectors` index.
     Detector(usize),
+    /// SingleFloodlightBehaviour.Start: the `Game::floodlights` index.
+    Floodlight(usize),
+    /// SpikeGrenadeBehaviour.Start: the `Game::spike_grenades` index.
+    SpikeGrenade(usize),
     /// RandomCarTextureBehaviour.Start: the `Game::random_car_textures` index.
     CarTexture(usize),
     /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
@@ -915,6 +919,8 @@ impl Game {
                 PendingStart::MachineGun(m) => self.machine_gun_start(m),
                 PendingStart::Flask(f) => self.flask_start(f),
                 PendingStart::Detector(i) => self.detector_start(i),
+                PendingStart::Floodlight(i) => self.floodlight_start(i),
+                PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
                 PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),
                 PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
                 PendingStart::FirearmAttachmentPoint => {

@@ -222,6 +222,10 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         let t = &mut g.time;
         // Time.deltaTime: the unscaled frame time clamped to maximumDeltaTime, then scaled.
         let dt = real.min(t.maximumDeltaTime) * t.timeScale;
+        // TimeManager::Update's smoothDeltaTime: the counter c = c * 0.8 + 0.2 weights the frame by 0.2 / c.
+        t.smoothCount = t.smoothCount * 0.8 + 0.2;
+        let w = 0.2 / t.smoothCount;
+        t.smoothDeltaTime = (1.0 - w) * t.smoothDeltaTime + w * dt;
         let frame_time = t.timeAsDouble + dt as f64;
         while g.time.fixedTimeAsDouble + g.time.fixedDeltaTime as f64 <= frame_time {
             let t = &mut g.time;

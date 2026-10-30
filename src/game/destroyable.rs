@@ -438,6 +438,7 @@ impl Game {
             Step::LimbCrush(l) => self.limb_crush(l),
             Step::FirearmShoot(f) => self.firearm_shoot(f),
             Step::LaunchRoutine(l) => self.launcher_launch_routine(l),
+            Step::SpikeIgnite(i) => self.spike_grenade_resume(i),
             Step::ShrapnelEndOfFrame(at, n) => {
                 self.coroutine_seq += 1;
                 self.fixed_update_waits.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner: c.owner, step: Step::ShrapnelEmit(at, n) });
@@ -507,6 +508,8 @@ pub enum Step {
     /// WaitForFixedUpdate.
     ShrapnelEndOfFrame([f32; 2], i32),
     ShrapnelEmit([f32; 2], i32),
+    /// SpikeGrenadeBehaviour.IgniteRoutine after its WaitForSeconds(Delay): the `Game::spike_grenades` index.
+    SpikeIgnite(usize),
 }
 
 #[derive(Clone, Debug)]

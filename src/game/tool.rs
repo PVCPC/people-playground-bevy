@@ -455,7 +455,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_)))) => out.push(b),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_)))) => out.push(b),
                         _ => unimplemented!("{class}.Use"),
                     }
                 }
@@ -472,6 +472,10 @@ impl Game {
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
                 Behaviour::Led(i) => self.led_use(i),
                 Behaviour::Detector(i) => self.detector_use(i),
+                Behaviour::Generator(i) => self.generator_use(i),
+                Behaviour::Floodlight(i) => self.floodlight_use(i),
+                Behaviour::SpikeGrenade(i) => self.spike_grenade_use(i),
+                Behaviour::HeatingElement(i) => self.heating_element_use(i),
                 _ => unreachable!(),
             }
         }
