@@ -463,9 +463,7 @@ impl Game {
     /// Rigidbody2D.mass = v on the tool (Rigidbody2D::SetMass 180c23790): clamped, then b2Body::ResetMassData.
     fn tool_set_mass(&mut self, v: f32) {
         let body = self.tool.as_ref().unwrap().body;
-        let v = if 0.0001 <= v && v <= 1_000_000.0 { v } else if 0.0001 <= v { 1_000_000.0 } else { 0.0001 };
-        self.world.body_mut(body).rigidbody.mass = v;
-        self.world.reset_mass_data(body);
+        self.body_set_mass(body, v);
     }
 
     /// DragTool.OnSelect (never paused; nothing in the scene is Undraggable).

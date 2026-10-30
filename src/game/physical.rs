@@ -1,5 +1,6 @@
 //! PhysicalBehaviour and the Utils energy/temperature helpers.
 use super::{d, mathf, script, Game, Pose, Rigidbody};
+use crate::unity::Random;
 use crate::b2::contacts2d::{ContactPoint2D, ScriptCollision};
 use crate::b2::world::BodyType;
 
@@ -19,6 +20,8 @@ pub struct PhysicalProperties {
     pub name: String,
     /// PhysicMaterial friction, None without a material.
     pub friction: Option<f32>,
+    /// PhysicMaterial bounciness (0 without a material).
+    pub bounciness: f32,
     pub Softness: f32,
     pub Flammability: f32,
     pub Conducting: bool,
@@ -41,6 +44,19 @@ pub struct PhysicalProperties {
     pub LodgeStrengthMultiplier: f32,
     /// StabSound length; None when the array is null.
     pub StabSound: Option<usize>,
+}
+
+/// Instance ids of the components and objects PhysicalBehaviour.Awake/Start add (0 = none). A NodeBehaviour or
+/// ContextMenuOptionComponent the prefab already carries is set by the spawner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StartIds {
+    pub ActivationNode: i32,
+    pub ContextMenuOptions: i32,
+    pub audioSource: i32,
+    pub slidingAudioSource: i32,
+    /// selectionOutlineObject (its Transform, Optout and SpriteRenderer take the next three ids)
+    pub selectionOutlineObject: i32,
+    pub outlineSpriteRenderer: i32,
 }
 
 /// PhysicalBehaviour.ColliderBoolPair; the collider is identified by its PhysicalBehaviour.
@@ -98,8 +114,25 @@ script! {
         dirtyCharged: bool = false,
         dirtySmoke: bool = false,
         dirtyBubble: bool = false,
+        SpawnSpawnParticles: bool = true,
+        PlaySliderSound: bool = true,
+        ForceContinuous: bool = false,
     }
     links {
+        /// Object.GetHashCode(): Mono's object hash (UnityEngine.Object does not override it with the instance id),
+        /// a heap-address value that differs from run to run; it seeds Start's Random.InitState, so it is an input
+        /// (the recorder dumps it as `hash=`).
+        hash_code: i32 = 0,
+        /// The objects Awake and Start created, by instance id.
+        ids: StartIds = StartIds::default(),
+        /// An AudioSourceTimeScaleBehaviour sits on this object (the spawner sets it for prefab-carried ones).
+        audio_time_scale: bool = false,
+        /// rigidbody.sharedMaterial is not null in the prefab.
+        rigidbody_has_material: bool = false,
+        /// GetComponents<DecalControllerBehaviour>().Length at Start (prefab-carried ones).
+        prefab_decal_controllers: usize = 0,
+        /// spriteRenderer.bounds at Awake (center, extents).
+        InitialBounds: ([f32; 3], [f32; 3]) = ([0.0; 3], [0.0; 3]),
         name: String = String::new(),
         id: i32 = 0,
         /// The Lodged/Dislodged receiver component on the GameObject (ExcaliburBehaviour, a SyringeBehaviour), if any.
@@ -149,6 +182,160 @@ impl Game {
     /// Global.PhysicalObjectsInWorldByTransform looked up by a collider (the collider's transform).
     pub fn physical_of_collider(&self, collider: i32) -> Option<usize> {
         self.physicals.iter().position(|p| !p.destroyed && p.all_colliders.contains(&collider))
+    }
+}
+
+/// Utils.Mod
+fn utils_mod(a: f32, b: f32) -> f32 {
+    (d(a) - d(mathf::floor(a / b)) * b).f()
+}
+
+impl Game {
+    /// Rigidbody2D.mass = v (Rigidbody2D::SetMass 180c23790): clamped, then b2Body::ResetMassData.
+    pub(super) fn body_set_mass(&mut self, body: crate::b2::world::BodyId, v: f32) {
+        let v = if 0.0001 <= v && v <= 1_000_000.0 { v } else if 0.0001 <= v { 1_000_000.0 } else { 0.0001 };
+        self.world.body_mut(body).rigidbody.mass = v;
+        self.world.reset_mass_data(body);
+    }
+
+    /// PhysicalBehaviour.Awake. The body, fixtures, colliders and Transform exist and the fields hold their prefab
+    /// values. Not modelled: SortingGroup, ContinuousActivationTracker (activation propagation).
+    pub fn physical_awake(&mut self, p: usize) {
+        if self.physicals[p].ids.ActivationNode == 0 {
+            self.physicals[p].ids.ActivationNode = self.allocate_instance_id();
+        }
+        if self.physicals[p].isStatic {
+            self.physicals[p].PlaySliderSound = false;
+        }
+        if !self.physicals[p].enabled || !self.physicals[p].active {
+            self.physicals[p].isDisintegrated = true;
+        }
+        self.physicals[p].Temperature = self.AmbientTemperature;
+        self.physicals[p].InitialBounds = self.sprite_world_bounds(p);
+        let body = self.physicals[p].rigidbody.body;
+        self.physicals[p].TrueInitialMass = self.world.body(body).rigidbody.mass;
+        // rigidbody.useAutoMass = false: a flag change resets the mass data.
+        if self.world.body(body).rigidbody.use_auto_mass {
+            self.world.body_mut(body).rigidbody.use_auto_mass = false;
+            self.world.reset_mass_data(body);
+        }
+        if self.physicals[p].ids.ContextMenuOptions == 0 {
+            self.physicals[p].ids.ContextMenuOptions = self.allocate_instance_id();
+        }
+    }
+
+    /// The topmost Transform node above a physical object (None for a root).
+    fn transform_root(&self, p: usize) -> Option<usize> {
+        let (mut root, mut n) = (None, self.physicals[p].parent);
+        while let Some(i) = n {
+            root = Some(i);
+            n = self.transform_nodes[i].parent;
+        }
+        root
+    }
+
+    /// GetComponentInParent<AudioSourceTimeScaleBehaviour>(): on the object or any ancestor (the root carries it).
+    fn has_audio_time_scale_above(&self, p: usize) -> bool {
+        let root = self.transform_root(p);
+        self.physicals[p].audio_time_scale || root.is_some() && (0..self.physicals.len()).any(|q| self.physicals[q].audio_time_scale && self.transform_root(q) == root)
+    }
+
+    /// PhysicalBehaviour.Start, run in Start order (`physicals` is Global.PhysicalObjectsInWorld, which Start
+    /// appends to). Random.InitState(GetHashCode()) seeds with `hash_code`.
+    pub fn physical_start(&mut self, p: usize) {
+        if !self.has_audio_time_scale_above(p) {
+            // transform.root.gameObject.AddComponent<AudioSourceTimeScaleBehaviour>()
+            self.allocate_instance_id();
+            self.physicals[p].audio_time_scale = true;
+        }
+        let body = self.physicals[p].rigidbody.body;
+        if self.physicals[p].rigidbody.bodyType == 0 && self.physicals[p].LocalColliderGridPoints.as_ref().map_or(true, |g| g.is_empty()) {
+            unimplemented!("PhysicalBehaviour.BakeColliderGridPoints");
+        }
+        if self.physicals[p].prefab_decal_controllers != 0 {
+            unimplemented!("PhysicalBehaviour.Start: decalControllers.AddRange(prefab DecalControllerBehaviours)");
+        }
+        self.random = Random::new(self.physicals[p].hash_code);
+        let seed = self.random.range(-1500.0, 1500.0);
+        let int_seed = self.random.range_int(-1500, 1500);
+        self.physicals[p].seed = seed;
+        self.physicals[p].intSeed = int_seed;
+        self.physicals[p].affectSurroundingTimer = utils_mod(seed, 2.0);
+        self.physicals[p].InitialGravityScale = self.world.body(body).gravity_scale;
+        // Mathf.Sqrt(spriteRenderer.bounds.extents.sqrMagnitude * 4f)
+        let e = self.sprite_world_bounds(p).1;
+        let sqr = (d(e[0]) * e[0] + d(e[1]) * e[1] + d(e[2]) * e[2]).f();
+        self.physicals[p].ObjectArea = mathf::sqrt(sqr * 4.0);
+        // rigidbody.interpolation = Global.CurrentInterpolationMode (Interpolate: the game is not paused).
+        self.physicals[p].rigidbody.interpolation = 1;
+        self.physicals[p].InitialMass = self.physicals[p].rigidbody.mass(&self.world);
+        if !self.physicals[p].isStatic {
+            self.physicals[p].ids.audioSource = self.allocate_instance_id();
+            self.physicals[p].audioSource = true;
+            if self.physicals[p].PlaySliderSound {
+                self.physicals[p].ids.slidingAudioSource = self.allocate_instance_id();
+            }
+            self.physical_set_properties(p);
+            // CreateOutlineObject: new GameObject("Outline") (GameObject, Transform), Optout, SpriteRenderer.
+            self.physicals[p].ids.selectionOutlineObject = self.allocate_instance_id();
+            self.allocate_instance_id();
+            self.allocate_instance_id();
+            self.physicals[p].ids.outlineSpriteRenderer = self.allocate_instance_id();
+        }
+        // ShowOutline = false only deactivates the outline object (not modelled).
+        // CollisionQuality.Continuous is 1.
+        let mode = if self.prefs.CollisionQuality == 1 || self.physicals[p].ForceContinuous { 1 } else { 0 };
+        let mut rb = self.physicals[p].rigidbody.clone();
+        rb.set_collision_detection_mode(&mut self.world, mode);
+        self.physicals[p].rigidbody = rb;
+        self.physical_recalculate_mass_based_on_size(p);
+        if self.physicals[p].IsWeightless {
+            unimplemented!("PhysicalBehaviour.MakeWeightless");
+        }
+        if self.physicals[p].isDisintegrated {
+            unimplemented!("PhysicalBehaviour.Disintegrate");
+        }
+        if self.physicals[p].SpawnSpawnParticles && !self.physicals[p].isStatic {
+            unimplemented!("PhysicalBehaviour.SetupSpawnPrefab: Instantiate(Resources.Load(\"Prefabs/SpawnParticles\"))");
+        }
+        // The context menu buttons are not modelled.
+        for i in 0..self.physicals[p].LocalColliderGridPoints.as_ref().map_or(0, |g| g.len()) {
+            let c = self.random.inside_unit_circle();
+            let g = &mut self.physicals[p].LocalColliderGridPoints.as_mut().unwrap()[i];
+            *g = [g[0] + c[0] * 0.02, g[1] + c[1] * 0.02];
+        }
+        if self.physicals[p].Circumference < 0.0 {
+            unimplemented!("PhysicalBehaviour.CalculateCircumference");
+        }
+        if self.properties[self.physicals[p].Properties].SparksOnSlide {
+            unimplemented!("PhysicalBehaviour.Start: Instantiate(MetalScrapePrefab)");
+        }
+    }
+
+    /// PhysicalBehaviour.RecalculateMassBasedOnSize
+    pub fn physical_recalculate_mass_based_on_size(&mut self, p: usize) {
+        let s = self.lossy_scale(p);
+        let ph = &mut self.physicals[p];
+        ph.InitialMass = (d(ph.TrueInitialMass) * s[0].abs() * s[1].abs()).f();
+        if !ph.IsWeightless {
+            let (body, mass) = (ph.rigidbody.body, ph.InitialMass);
+            self.body_set_mass(body, mass);
+        }
+    }
+
+    /// PhysicalBehaviour.SetProperties: rigidbody.sharedMaterial = Properties.PhysicMaterial when it has none.
+    // ponytail: the native Rigidbody2D::SetSharedMaterial is not disassembled; the body's fixtures take the
+    // material's friction and bounciness (checked against the recorded fixtures) and no contacts may exist yet.
+    fn physical_set_properties(&mut self, p: usize) {
+        let props = &self.properties[self.physicals[p].Properties];
+        let (Some(friction), false) = (props.friction, self.physicals[p].rigidbody_has_material) else { return };
+        let bounciness = props.bounciness;
+        let body = self.physicals[p].rigidbody.body;
+        assert!(self.world.body(body).contacts.is_empty(), "Rigidbody2D.sharedMaterial with live contacts");
+        for f in self.world.body(body).fixtures.clone() {
+            let fixture = self.world.fixtures[f].as_mut().unwrap();
+            (fixture.friction, fixture.restitution) = (friction, bounciness);
+        }
     }
 }
 
@@ -998,5 +1185,165 @@ impl Game {
         rb.detached = Some(mass);
         rb.movement.listed = false;
         self.rigidbody_hierarchy_changed = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{dump, Game};
+    use crate::assets::db::{AssetDb, Component};
+    use crate::assets::mono::Value;
+    use crate::b2::world::BodyId;
+    use crate::game_assets::HumanRig;
+    use std::path::Path;
+
+    fn grid(v: &Value) -> Vec<[f32; 2]> {
+        v.array().unwrap().iter().map(|p| [p.get("x").unwrap().f32().unwrap(), p.get("y").unwrap().f32().unwrap()]).collect()
+    }
+
+    /// PhysicalBehaviour.Awake and Start on dump30start's first snapshot (the Person's 14 limbs, after the
+    /// game ran them): the fields reset to the Person prefab's values, then Awake and Start must rebuild what the
+    /// recording holds, bit for bit. SpawnSpawnParticles is switched off: Instantiate of the Resources prefab is
+    /// not rewritten, and it takes instance ids and nothing else in this check.
+    #[test]
+    fn start_matches_game() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(rig) = HumanRig::load(&root.join("local-cache"), &game) else { return };
+        let Ok(mut snaps) = dump::snapshots(&root.join("reference-probe/game/dump30start.txt")) else { return };
+        // The first snapshot (frame 428, right after the Starts) holds the fields; the first FS one with the b2 world builds the game.
+        let first = snaps.next().unwrap();
+        let fs = snaps.find(|s| s.pt == "FS" && s.of("b2World").next().is_some()).unwrap();
+        let mut g = Game::from_snapshot(&fs, &rig).unwrap();
+
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, cat) = db.mono(catalog).unwrap().unwrap();
+        let mut person = None;
+        for item in cat.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, sp) = db.mono(asset).unwrap().unwrap();
+            if let Some(p) = sp.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) {
+                if db.game_object(p).unwrap().name == "Person" {
+                    person = Some(p);
+                }
+            }
+        }
+        let prefab = db.prefab(person.unwrap()).unwrap();
+
+        // The Start order is the recording's: the Person's limbs as the snapshot lists their PhysicalBehaviours.
+        let records: Vec<_> = first.of("PhysicalBehaviour").collect();
+        let order: Vec<usize> = records
+            .iter()
+            .filter(|r| prefab.objects.iter().any(|o| o.name == r.name && o.components.iter().any(|(_, c)| matches!(c, Component::Rigidbody2D(_)))))
+            .map(|r| g.physicals.iter().position(|p| p.id == r.id).unwrap())
+            .collect();
+        assert_eq!(order.len(), 14);
+        let mut out = Vec::new();
+        for (n, &p) in order.iter().enumerate() {
+            let name = g.physicals[p].name.clone();
+            let r = records.iter().find(|r| r.id == g.physicals[p].id).unwrap();
+            let obj = prefab.objects.iter().find(|o| o.name == name).unwrap();
+            let rb = obj.components.iter().find_map(|(_, c)| match c { Component::Rigidbody2D(r) => Some(r.clone()), _ => None }).unwrap();
+            let fields = obj.components.iter().find_map(|(_, c)| match c { Component::Script { class, fields, .. } if class == "PhysicalBehaviour" => Some(fields.clone()), _ => None }).unwrap();
+            let body: BodyId = g.physicals[p].rigidbody.body;
+
+            // The recording.
+            let id_of = |k: &str| -> i32 { r.get(k).unwrap().rsplit_once('#').unwrap().1.parse().unwrap() };
+            let b = g.world.body(body);
+            let want_mass = [b.mass, b.inv_mass, b.i, b.inv_i].map(f32::to_bits);
+            let want_rb_mass = b.rigidbody.mass;
+            let ph = &g.physicals[p];
+            let f = |k: &str| f32::from_bits(u32::from_str_radix(r.get(k).unwrap(), 16).unwrap());
+            let want = (f("seed"), r.get("intSeed").unwrap().parse::<i32>().unwrap(), f("affectSurroundingTimer"), f("InitialGravityScale"), f("ObjectArea"), f("InitialMass"), f("TrueInitialMass"));
+            let want_grid: Vec<[f32; 2]> = r.get("LocalColliderGridPoints").unwrap().trim_matches(|c| c == '[' || c == ']').split(';').map(|p| {
+                let (x, y) = p.split_once(',').unwrap();
+                [f32::from_bits(u32::from_str_radix(x, 16).unwrap()), f32::from_bits(u32::from_str_radix(y, 16).unwrap())]
+            }).collect();
+            let want_circ = f("Circumference");
+            let want_ids = (id_of("ActivationNode"), id_of("ContextMenuOptions"), id_of("audioSource"), id_of("slidingAudioSource"), id_of("selectionOutlineObject"), id_of("outlineSpriteRenderer"));
+            let want_fx: Vec<(u32, u32)> = g.world.body(body).fixtures.iter().map(|&f| (g.world.fixture(f).friction.to_bits(), g.world.fixture(f).restitution.to_bits())).collect();
+            let want_mode = (ph.rigidbody.collisionDetectionMode, ph.rigidbody.interpolation);
+            let want_bounds = r.get("InitialBounds").unwrap().to_string();
+
+            // Back to the prefab.
+            for &f in &g.world.body(body).fixtures.clone() {
+                let fx = g.world.fixtures[f].as_mut().unwrap();
+                (fx.friction, fx.restitution) = (0.4, 0.0);
+            }
+            {
+                let b = g.world.body_mut(body);
+                b.rigidbody.mass = rb.mass;
+                b.rigidbody.use_auto_mass = rb.use_auto_mass;
+            }
+            g.world.reset_mass_data(body);
+            {
+                let ph = &mut g.physicals[p];
+                ph.seed = 0.0;
+                ph.intSeed = 0;
+                ph.affectSurroundingTimer = 0.0;
+                ph.InitialGravityScale = 0.0;
+                ph.ObjectArea = 0.0;
+                ph.InitialMass = 0.0;
+                ph.TrueInitialMass = 0.0;
+                ph.LocalColliderGridPoints = Some(grid(fields.get("LocalColliderGridPoints").unwrap()));
+                ph.Circumference = fields.get("Circumference").unwrap().f32().unwrap();
+                ph.ids = Default::default();
+                ph.audioSource = false;
+                ph.audio_time_scale = false;
+                ph.rigidbody.collisionDetectionMode = rb.collision_detection;
+                ph.rigidbody.interpolation = rb.interpolate;
+                ph.SpawnSpawnParticles = false;
+            }
+            let prefab_circ = g.physicals[p].Circumference;
+            g.next_instance_id = want_ids.0;
+            g.physical_awake(p);
+            // The first Start also adds the AudioSourceTimeScaleBehaviour to the root.
+            g.next_instance_id = want_ids.2 + if n == 0 { 2 } else { 0 };
+            g.physical_start(p);
+
+            let b = g.world.body(body);
+            let got_mass = [b.mass, b.inv_mass, b.i, b.inv_i].map(f32::to_bits);
+            let ph = &g.physicals[p];
+            let got = (ph.seed, ph.intSeed, ph.affectSurroundingTimer, ph.InitialGravityScale, ph.ObjectArea, ph.InitialMass, ph.TrueInitialMass);
+            let got_ids = (ph.ids.ActivationNode, ph.ids.ContextMenuOptions, ph.ids.audioSource, ph.ids.slidingAudioSource, ph.ids.selectionOutlineObject, ph.ids.outlineSpriteRenderer);
+            let got_fx: Vec<(u32, u32)> = g.world.body(body).fixtures.iter().map(|&f| (g.world.fixture(f).friction.to_bits(), g.world.fixture(f).restitution.to_bits())).collect();
+            let eq = |a: f32, b: f32| a.to_bits() == b.to_bits();
+            let mut bad = Vec::new();
+            if got_mass != want_mass {
+                bad.push(format!("mass words game {want_mass:08x?} ours {got_mass:08x?}"));
+            }
+            if !eq(b.rigidbody.mass, want_rb_mass) {
+                bad.push(format!("rigidbody.mass game {want_rb_mass} ours {}", b.rigidbody.mass));
+            }
+            if !(eq(got.0, want.0) && got.1 == want.1 && eq(got.2, want.2) && eq(got.3, want.3) && eq(got.4, want.4) && eq(got.5, want.5) && eq(got.6, want.6)) {
+                bad.push(format!("seed/intSeed/timer/gravity/area/mass/true game {want:?} ours {got:?}"));
+            }
+            if ph.LocalColliderGridPoints.as_ref().unwrap().iter().flatten().map(|v| v.to_bits()).ne(want_grid.iter().flatten().map(|v| v.to_bits())) {
+                bad.push(format!("grid game {want_grid:?} ours {:?}", ph.LocalColliderGridPoints));
+            }
+            if !eq(prefab_circ, want_circ) {
+                bad.push(format!("Circumference prefab {prefab_circ} game {want_circ}"));
+            }
+            if got_ids != want_ids {
+                bad.push(format!("ids game {want_ids:?} ours {got_ids:?}"));
+            }
+            if g.next_instance_id != want_ids.5 - 2 {
+                bad.push(format!("next id {} after the outline renderer {}", g.next_instance_id, want_ids.5));
+            }
+            if got_fx != want_fx {
+                bad.push(format!("fixture friction/restitution game {want_fx:08x?} ours {got_fx:08x?}"));
+            }
+            if (ph.rigidbody.collisionDetectionMode, ph.rigidbody.interpolation) != want_mode {
+                bad.push(format!("cdm/interpolation game {want_mode:?} ours {:?}", (ph.rigidbody.collisionDetectionMode, ph.rigidbody.interpolation)));
+            }
+            let (c, e) = ph.InitialBounds;
+            let ours = format!("Bounds(m_Center={:08x},{:08x},{:08x} m_Extents={:08x},{:08x},{:08x})", c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), e[0].to_bits(), e[1].to_bits(), e[2].to_bits());
+            if ours != want_bounds {
+                bad.push(format!("InitialBounds game {want_bounds} ours {ours}"));
+            }
+            out.extend(bad.into_iter().map(|m| format!("{name}: {m}")));
+        }
+        assert!(out.is_empty(), "{} mismatches:\n{}", out.len(), out.join("\n"));
     }
 }

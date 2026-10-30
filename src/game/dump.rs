@@ -164,9 +164,14 @@ fn list(text: &str) -> Vec<&str> {
 
 /// A PhysicsMaterial2D asset's friction from the exported project.
 fn material_friction(name: &str) -> Result<f32, String> {
+    material_value(name, "friction")
+}
+
+/// A PhysicsMaterial2D asset's float field from the exported project.
+fn material_value(name: &str, key: &str) -> Result<f32, String> {
     let path = format!("unity-export/ExportedProject/Assets/PhysicsMaterial2D/{name}.physicsMaterial2D");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-    let v = text.lines().find_map(|l| l.trim().strip_prefix("friction: ")).ok_or(format!("{path}: no friction"))?;
+    let v = text.lines().find_map(|l| l.trim().strip_prefix(&format!("{key}: "))).ok_or(format!("{path}: no {key}"))?;
     v.parse().map_err(|e| format!("{path}: {e}"))
 }
 
@@ -284,6 +289,10 @@ impl Game {
                 // Older recordings: the material asset's serialized value.
                 (None, m) => Some(material_friction(&m[1..m.find('#').unwrap()])?),
             };
+            p.bounciness = match r.req("PhysicMaterial")? {
+                "null" => 0.0,
+                m => material_value(&m[1..m.find('#').unwrap()], "bounciness")?,
+            };
             g.properties.push(p);
         }
 
@@ -336,6 +345,7 @@ impl Game {
             let mut p = Physical { name: r.name.clone(), id: r.id, ..Default::default() };
             load_fields(p.fields(), r)?;
             p.isStatic = r.get("isStatic") == Some("1");
+            p.hash_code = r.get("hash").map_or(0, |h| h.parse().unwrap());
             p.Properties = *props.get(&reference(r.req("Properties")?).unwrap()).ok_or("unknown PhysicalProperties")?;
             p.LocalColliderGridPoints = match r.req("LocalColliderGridPoints")? {
                 "null" => None,
