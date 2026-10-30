@@ -3,6 +3,7 @@
 //! (tools/recorder PPG_DUMP); methods keep the original statement order and float operation order.
 #![allow(non_snake_case, dead_code)]
 
+use std::collections::HashMap;
 pub mod circulation;
 pub mod dump;
 pub mod limb;
@@ -11,6 +12,7 @@ pub mod misc;
 pub mod person;
 pub mod physical;
 pub mod simulate;
+pub mod tool;
 
 use crate::b2::{
     math::Vec2 as V,
@@ -279,6 +281,7 @@ pub struct Time {
     pub maximumDeltaTime: f32,
     pub timeScale: f32,
     pub frameCount: i32,
+    pub unscaledDeltaTime: f32,
 }
 
 /// UnityEngine.Bounds in the xy plane.
@@ -320,6 +323,8 @@ pub struct Prefs {
     pub CrushForceMultiplier: f32,
     pub ProceduralFragments: bool,
     pub FancyEffects: bool,
+    pub ToolSelectionMode: i32,
+    pub GridSnap: f32,
 }
 
 /// CollisionQuality.Dynamic
@@ -341,6 +346,8 @@ impl Default for Prefs {
             CrushForceMultiplier: 1.0,
             ProceduralFragments: false,
             FancyEffects: true,
+            ToolSelectionMode: tool::SELECTION_AREA,
+            GridSnap: 0.25,
         }
     }
 }
@@ -653,12 +660,14 @@ pub enum BreakJoint {
     Spring(usize),
 }
 
-/// A Transform as the scripts read it: world position, rotation and lossy scale.
+/// A Transform as the scripts read it: world position and rotation, local scale, and the hierarchy's stored
+/// local position and rotation (None: derive them from the world pose).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pose {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub localScale: [f32; 3],
+    pub local: Option<([f32; 3], [f32; 4])>,
 }
 
 impl Pose {
@@ -717,6 +726,15 @@ pub struct Game {
     pub last_simulation: (f64, f32),
     /// PhysicsScene2D m_RigidbodyHierarchyChanged: the movement-state list is rebuilt after the next step.
     pub rigidbody_hierarchy_changed: bool,
+    /// The ToolController (recordings before the drag tool lack it).
+    pub tool: Option<tool::Tool>,
+    pub input: tool::Input,
+    /// Global.main.MousePosition
+    pub MousePosition: [f32; 3],
+    /// GameObject layers by the restore's object ids.
+    pub layers: HashMap<i32, i32>,
+    /// The restore's GameObject ids by name.
+    pub objects: HashMap<String, i32>,
 }
 
 impl Default for Random {

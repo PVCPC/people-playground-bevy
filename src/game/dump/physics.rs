@@ -185,27 +185,22 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         }
         let own = s.of("Rigidbody2D").find(|r| r.name == h.name).ok_or(format!("hinge {} without a body", h.name))?;
         let connected = h.req("connected")?.trim_start_matches('@');
-        let w = words(j);
-        let fl = |i: usize| f32::from_bits(w[i]);
-        let def = crate::b2::revolute::RevoluteDef {
-            local_anchor_a: V::new(fl(0), fl(1)),
-            local_anchor_b: V::new(fl(2), fl(3)),
-            enable_motor: w[8] & 0xff != 0,
-            max_motor_torque: fl(9),
-            motor_speed: fl(10),
-            enable_limit: w[11] & 0xff != 0,
-            reference_angle: fl(12),
-            lower_angle: fl(13),
-            upper_angle: fl(14),
-        };
         let a = bodies[&format!("{}#{}", own.name, own.id)];
         let b = *bodies.get(connected).ok_or(format!("hinge {} connects to {connected}", h.name))?;
-        let id = world.create_joint(def, a, b, false);
-        let rev = world.joints[id].as_mut().unwrap().revolute_mut();
-        rev.impulse = [fl(4), fl(5), fl(6)];
-        rev.motor_impulse = fl(7);
-        rev.limit_state = w[37];
-        joints.insert(format!("{}#{}", h.name, h.id), id);
+        joints.insert(format!("{}#{}", h.name, h.id), restore_revolute(&mut world, &words(j), a, b));
+    }
+    // DragTool's HingeJoint2D on the ToolController, made after the scene's hinges.
+    if let Some(tb) = s.of("ToolBody").next() {
+        let a = bodies[&format!("ToolController#{}", tb.id)];
+        for h in s.of("ToolJoint") {
+            let j = h.req("joint")?;
+            if j == "null" {
+                continue;
+            }
+            let connected = h.req("connected")?.trim_start_matches('@');
+            let b = *bodies.get(connected).ok_or(format!("drag joint connects to {connected}"))?;
+            joints.insert(format!("{}#{}", h.name, h.id), restore_revolute(&mut world, &words(j), a, b));
+        }
     }
     // Contacts, list tail first.
     let records: Vec<&Record> = s.of("b2Contact").collect();
@@ -276,6 +271,28 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
     }
     world.finish_restore(inv_dt0, world_flags & 1 != 0, moves)?;
     Ok(Restored { world, bodies, fixtures, joints, objects })
+}
+
+/// A b2RevoluteJoint from its recorded words (0x98..0x130), with the warm-start impulses and limit state.
+fn restore_revolute(world: &mut World, w: &[u32], a: BodyId, b: BodyId) -> JointId {
+    let fl = |i: usize| f32::from_bits(w[i]);
+    let def = crate::b2::revolute::RevoluteDef {
+        local_anchor_a: V::new(fl(0), fl(1)),
+        local_anchor_b: V::new(fl(2), fl(3)),
+        enable_motor: w[8] & 0xff != 0,
+        max_motor_torque: fl(9),
+        motor_speed: fl(10),
+        enable_limit: w[11] & 0xff != 0,
+        reference_angle: fl(12),
+        lower_angle: fl(13),
+        upper_angle: fl(14),
+    };
+    let id = world.create_joint(def, a, b, false);
+    let rev = world.revolute_mut(id);
+    rev.impulse = [fl(4), fl(5), fl(6)];
+    rev.motor_impulse = fl(7);
+    rev.limit_state = w[37];
+    id
 }
 
 fn contact_state(v: u32) -> Result<ContactState, String> {

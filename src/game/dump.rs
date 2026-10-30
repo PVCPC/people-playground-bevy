@@ -9,6 +9,7 @@ use crate::unity::transform::{Node as TransformNode, Trs};
 use crate::b2::{math::Rot, world::BodyDef};
 use crate::game_assets::{CurveCache, HumanRig};
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::Path;
 
 pub mod physics;
@@ -35,6 +36,7 @@ pub fn euler_z(q: [f32; 4]) -> f32 {
     }
 }
 
+#[derive(Clone)]
 pub struct Record {
     pub ty: String,
     pub name: String,
@@ -51,6 +53,7 @@ impl Record {
     }
 }
 
+#[derive(Clone)]
 pub struct Snapshot {
     pub pt: String,
     pub snap: Vec<(String, String)>,
@@ -91,29 +94,64 @@ fn key_value(item: &str) -> (String, String) {
 }
 
 pub fn parse(text: &str) -> Vec<Snapshot> {
-    let mut out: Vec<Snapshot> = Vec::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("snap ") {
-            let parts = split_top(rest, ' ');
-            out.push(Snapshot { pt: parts[0].into(), snap: parts[1..].iter().map(|p| key_value(p)).collect(), records: Vec::new() });
-        } else if let Some(rest) = line.strip_prefix("s ") {
-            let parts = split_top(rest, ' ');
-            let snap = out.last_mut().unwrap();
-            assert_eq!(parts[0], snap.pt);
-            snap.records.push(Record {
-                ty: parts[1].into(),
-                name: parts[2].into(),
-                id: parts[3].parse().unwrap(),
-                fields: parts[4..].iter().map(|p| key_value(p)).collect(),
-            });
-        }
-    }
-    out
+    Snapshots { lines: text.as_bytes().lines(), pending: None, header: Vec::new() }.collect()
 }
 
-/// `@Name#id` -> id; `null` -> None.
+/// A recording's snapshots read one at a time (a drag recording is too large to hold parsed); the other lines
+/// (the recorder's header) go to `header`.
+pub struct Snapshots<R> {
+    lines: std::io::Lines<R>,
+    pending: Option<Snapshot>,
+    pub header: Vec<String>,
+}
+
+pub fn snapshots(path: &Path) -> Result<Snapshots<std::io::BufReader<std::fs::File>>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Snapshots { lines: std::io::BufReader::with_capacity(1 << 20, file).lines(), pending: None, header: Vec::new() })
+}
+
+/// Only the recorder's header lines (collider and body layers come after the first snapshots).
+pub fn header(path: &Path) -> Result<Vec<String>, String> {
+    let mut s = snapshots(path)?;
+    while let Some(Ok(line)) = s.lines.next() {
+        if !line.starts_with("snap ") && !line.starts_with("s ") {
+            s.header.push(line);
+        }
+    }
+    Ok(s.header)
+}
+
+impl<R: BufRead> Iterator for Snapshots<R> {
+    type Item = Snapshot;
+    fn next(&mut self) -> Option<Snapshot> {
+        while let Some(Ok(line)) = self.lines.next() {
+            if let Some(rest) = line.strip_prefix("snap ") {
+                let parts = split_top(rest, ' ');
+                let snap = Snapshot { pt: parts[0].into(), snap: parts[1..].iter().map(|p| key_value(p)).collect(), records: Vec::new() };
+                if let Some(done) = self.pending.replace(snap) {
+                    return Some(done);
+                }
+            } else if let Some(rest) = line.strip_prefix("s ") {
+                let parts = split_top(rest, ' ');
+                let snap = self.pending.as_mut().unwrap();
+                assert_eq!(parts[0], snap.pt);
+                snap.records.push(Record {
+                    ty: parts[1].into(),
+                    name: parts[2].into(),
+                    id: parts[3].parse().unwrap(),
+                    fields: parts[4..].iter().map(|p| key_value(p)).collect(),
+                });
+            } else {
+                self.header.push(line);
+            }
+        }
+        self.pending.take()
+    }
+}
+
+/// `@Name#id` -> id; `null` and `destroyed` (a destroyed object, which reads as null) -> None.
 fn reference(text: &str) -> Option<i32> {
-    if text == "null" {
+    if text == "null" || text == "destroyed" {
         return None;
     }
     Some(text.rsplit_once('#').unwrap().1.parse().unwrap())
@@ -199,6 +237,7 @@ impl Game {
         };
         if let Some(r) = restored.as_mut() {
             g.world = std::mem::replace(&mut r.world, World::new(V::ZERO));
+            g.objects = r.objects.clone();
         }
 
         let props = ids(s, "PhysicalProperties");
@@ -317,6 +356,7 @@ impl Game {
                         position: floats(rb.req("tpos")?),
                         rotation: floats(rb.req("trot")?),
                         localScale: floats(rb.req("scale")?),
+                        local: rb.get("tlpos").zip(rb.get("tlrot")).map(|(p, q)| (floats(p), floats(q))),
                     };
                 }
                 None => {
@@ -586,7 +626,41 @@ impl Game {
             }
         }
         g.people.push(p);
+        if let Some(r) = s.of("ToolControllerBehaviour").next() {
+            g.tool = Some(load_tool(&g, s, r, restored.as_ref().ok_or("a tool without the b2 world")?)?);
+        }
         Ok(g)
+    }
+
+    /// GameObject layers from the recorder's header: `collider <name> layer=<n> ...` and
+    /// `body <name> ... layer=<n>`.
+    pub fn load_layers(&mut self, header: &[String]) {
+        for line in header {
+            let (name, layer) = if let Some(rest) = line.strip_prefix("collider ") {
+                let Some((name, tail)) = rest.split_once(" layer=") else { continue };
+                (name, tail.split(' ').next().unwrap())
+            } else if let Some(rest) = line.strip_prefix("body ") {
+                let Some((name, tail)) = rest.split_once(' ') else { continue };
+                let Some(layer) = tail.split(' ').find_map(|kv| kv.strip_prefix("layer=")) else { continue };
+                (name, layer)
+            } else {
+                continue;
+            };
+            if let Some(&id) = self.objects.get(name) {
+                self.layers.insert(id, layer.parse().unwrap());
+            }
+        }
+    }
+
+    /// InputSystem's controls and the cursor from a recording's snapshot header (`mouse=` and `drag=D,H,U`).
+    pub fn load_input(&mut self, s: &Snapshot) {
+        if let Some((_, m)) = s.snap.iter().find(|(k, _)| k == "mouse") {
+            self.input.mouse = floats(m);
+        }
+        if let Some((_, d)) = s.snap.iter().find(|(k, _)| k == "drag") {
+            let b: Vec<bool> = d.split(',').map(|x| x == "1").collect();
+            self.input.controls.insert("drag".into(), super::tool::Control { down: b[0], held: b[1], up: b[2] });
+        }
     }
 
     fn load_time(&mut self, s: &Snapshot) {
@@ -600,6 +674,7 @@ impl Game {
             maximumDeltaTime: f(s.snap("maxDt")),
             timeScale: f(s.snap("timeScale")),
             frameCount: s.snap("frame").parse().unwrap(),
+            unscaledDeltaTime: f(s.snap("unscaledDt")),
         };
         // Older recordings lack it: the Default map prefab sets Ambient_temperature 20.
         self.AmbientTemperature = s.snap.iter().find(|(k, _)| k == "ambient").map_or(20.0, |(_, v)| f(v));
@@ -615,6 +690,7 @@ impl Game {
     /// The FixedUpdate scripts between CameraShakeBehaviour (FS) and CameraControlBehaviour (FM).
     pub fn fixed_update_scripts(&mut self) {
         self.run_pending_starts();
+        self.tool_fixed_update();
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
                 self.physical_fixed_update(p);
@@ -657,6 +733,7 @@ impl Game {
         for a in 0..self.ambient_audio.len() {
             self.play_audio_at_random_update(a);
         }
+        self.tool_update();
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
                 self.physical_update(p);
@@ -689,6 +766,8 @@ impl Game {
             }
         }
         self.node_controller_update();
+        // Global.Update: UpdateMousePosition (timeScale stays at its target).
+        self.MousePosition = self.input.mouse;
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
         self.gore_string_delayed_calls(true);
@@ -910,6 +989,121 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
 }
 
 /// RigidbodyMovementState2D from the recorder's `move` words (Rigidbody2D+0x98 on).
+/// The ToolController's script state and drag joint against a snapshot's records.
+fn compare_tool(g: &Game, s: &Snapshot) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let (Some(t), Some(r)) = (g.tool.as_ref(), s.of("ToolControllerBehaviour").next()) else { return Ok(out) };
+    let d = s.of("DragTool").next().ok_or("no DragTool")?;
+    let sel = s.of("Selection").next().ok_or("no Selection")?;
+    let name = |p: Option<usize>| p.map_or("null".to_string(), |p| g.physicals[p].name.clone());
+    let reffed = |v: &str| if v == "null" { "null".to_string() } else { v.trim_start_matches('@').rsplit_once('#').unwrap().0.to_string() };
+    let mut check = |what: &str, game: String, ours: String| {
+        if game != ours {
+            out.push(format!("{what}: game {game} ours {ours}"));
+        }
+    };
+    let hex = |v: &[f32]| v.iter().map(|x| format!("{:08x}", x.to_bits())).collect::<Vec<_>>().join(",");
+    if let Some((_, m)) = s.snap.iter().find(|(k, _)| k == "mouse") {
+        check("Global.MousePosition", m.clone(), hex(&g.MousePosition));
+    }
+    check("isCurrentlyHolding", r.req("isCurrentlyHolding")?.into(), (t.isCurrentlyHolding as u8).to_string());
+    check("currentlyHovering", reffed(r.req("currentlyHovering")?), name(t.currentlyHovering));
+    check("hover", reffed(sel.req("hovering")?), name(t.hover));
+    let selected: Vec<String> = list(sel.req("selected")?).into_iter().map(reffed).collect();
+    check("rawSelection", selected.join(";"), t.rawSelection.iter().map(|&p| name(Some(p))).collect::<Vec<_>>().join(";"));
+    check("ActiveSingleSelected", reffed(d.req("ActiveSingleSelected")?), name(t.ActiveSingleSelected));
+    check("selectedRigidbody", reffed(d.req("selectedRigidbody")?), name(t.selectedRigidbody));
+    check("offset", d.req("offset")?.into(), hex(&t.offset));
+    check("prevMousePos", d.req("prevMousePos")?.into(), hex(&t.prevMousePos));
+    check("snappedMouseDelta", d.req("snappedMouseDelta")?.into(), hex(&t.snappedMouseDelta));
+    check("currentRotation", d.req("currentRotation")?.into(), hex(&[t.currentRotation]));
+    check("controlRotation", d.req("controlRotation")?.into(), (t.controlRotation as u8).to_string());
+    check("initialSnappingFinished", d.req("initialSnappingFinished")?.into(), (t.initialSnappingFinished as u8).to_string());
+    if let Some(rb) = s.of("ToolBody").next() {
+        check("ToolController position", rb.req("tpos")?.into(), hex(&t.position));
+    }
+    let game_joint = reference(d.req("dragJoint")?);
+    check("dragJoint", game_joint.map_or("null", |_| "joint").into(), t.dragJoint.as_ref().map_or("null", |_| "joint").into());
+    if let (Some(id), Some(j)) = (game_joint, t.dragJoint.as_ref()) {
+        let h = s.of("ToolJoint").find(|h| h.id == id).ok_or(format!("no ToolJoint #{id}"))?;
+        let m = h.req("motor")?;
+        check("drag motor", m.into(), format!("{},{}", j.useMotor as u8, hex(&[j.motorSpeed, j.maxMotorTorque])));
+        let w = words(h.req("joint")?);
+        match j.joint {
+            None => check("drag b2 joint", "live".into(), "none".into()),
+            Some(jid) => {
+                let def = g.world.revolute(jid).def;
+                let ours = [def.local_anchor_a.x, def.local_anchor_a.y, def.local_anchor_b.x, def.local_anchor_b.y];
+                check("drag joint anchors", hex(&w[0..4].iter().map(|&x| f32::from_bits(x)).collect::<Vec<_>>()), hex(&ours));
+                check("drag joint motor", format!("{},{:08x},{:08x}", w[8] & 0xff, w[9], w[10]), format!("{},{}", def.enable_motor as u8, hex(&[def.max_motor_torque, def.motor_speed])));
+                check("drag joint angles", format!("{:08x},{:08x},{:08x}", w[12], w[13], w[14]), hex(&[def.reference_angle, def.lower_angle, def.upper_angle]));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The ToolController's components from a recording.
+fn load_tool(g: &Game, s: &Snapshot, r: &Record, restored: &physics::Restored) -> Result<super::tool::Tool, String> {
+    let rb = s.of("ToolBody").next().ok_or("no ToolBody")?;
+    let d = s.of("DragTool").next().ok_or("no DragTool")?;
+    let sel = s.of("Selection").next().ok_or("no Selection")?;
+    let physical = |t: &str| -> Result<Option<usize>, String> {
+        match reference(t) {
+            None => Ok(None),
+            Some(id) => g.physicals.iter().position(|p| p.id == id).map(Some).ok_or(format!("no physical #{id}")),
+        }
+    };
+    // A Rigidbody2D reference: the physical on its object.
+    let rigidbody = |t: &str| -> Result<Option<usize>, String> {
+        if t == "null" {
+            return Ok(None);
+        }
+        let name = t.trim_start_matches('@').rsplit_once('#').unwrap().0;
+        g.physicals.iter().position(|p| p.name == name).map(Some).ok_or(format!("no physical {name}"))
+    };
+    let b = |k: &str| -> Result<bool, String> { Ok(d.req(k)? == "1") };
+    let drag_joint = match reference(d.req("dragJoint")?) {
+        None => None,
+        Some(id) => {
+            let h = s.of("ToolJoint").find(|h| h.id == id).ok_or(format!("no ToolJoint #{id}"))?;
+            let m = h.req("motor")?;
+            let (on, rest) = m.split_once(',').unwrap();
+            let [speed, torque]: [f32; 2] = floats(rest);
+            let joint = restored.joints.get(&format!("{}#{}", h.name, h.id)).copied();
+            Some(super::tool::DragJoint { joint, motorSpeed: speed, maxMotorTorque: torque, useMotor: on == "1", destroy_at: None })
+        }
+    };
+    let mask = r.req("SelectionLayer")?;
+    let mask = mask.trim_start_matches("LayerMask(m_Mask=").trim_end_matches(')').parse().map_err(|e| format!("SelectionLayer: {e}"))?;
+    Ok(super::tool::Tool {
+        body: *restored.bodies.get(&format!("ToolController#{}", rb.id)).ok_or("no ToolController body")?,
+        position: floats(rb.req("tpos")?),
+        rotation: floats(rb.req("trot")?),
+        SelectionLayer: mask,
+        isCurrentlyHolding: r.req("isCurrentlyHolding")? == "1",
+        currentlyHovering: physical(r.req("currentlyHovering")?)?,
+        isSelecting: r.req("isSelecting")? == "1",
+        selectionDragStart: floats(r.req("selectionDragStart")?),
+        rawSelection: list(sel.req("selected")?).into_iter().map(|t| physical(t).map(Option::unwrap)).collect::<Result<_, _>>()?,
+        hover: physical(sel.req("hovering")?)?,
+        offset: floats(d.req("offset")?),
+        dragJoint: drag_joint,
+        destroying: Vec::new(),
+        controlRotation: b("controlRotation")?,
+        selectedRigidbody: rigidbody(d.req("selectedRigidbody")?)?,
+        rotationSpeed: f(d.req("rotationSpeed")?),
+        currentRotation: f(d.req("currentRotation")?),
+        snappedMouseDelta: floats(d.req("snappedMouseDelta")?),
+        prevMousePos: floats(d.req("prevMousePos")?),
+        initialSnappingFinished: b("initialSnappingFinished")?,
+        isActive: b("isActive")?,
+        shouldSendContinuousUseMessage: b("shouldSendContinuousUseMessage")?,
+        initialTranslationSnapOffset: floats(d.req("initialTranslationSnapOffset")?),
+        ActiveSingleSelected: physical(d.req("ActiveSingleSelected")?)?,
+    })
+}
+
 fn movement_state(w: &[u32]) -> MovementState {
     let v = |i: usize| f32::from_bits(w[i]);
     let pose = |i: usize| ([v(i), v(i + 1), v(i + 2)], [v(i + 3), v(i + 4), v(i + 5), v(i + 6)]);
@@ -957,46 +1151,54 @@ fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<S
 /// --loop-test: load the first snapshot with the b2 world once, then run the game loop through the rest of the
 /// recording (FixedUpdate scripts, physics pass, Update) taking only Time from it, comparing at every point.
 pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
-    let text = std::fs::read_to_string(dump).map_err(|e| e.to_string())?;
-    let snaps = parse(&text);
-    if !snaps.iter().any(|s| s.of("Contacts2D").next().is_some()) {
+    let mut snaps = snapshots(dump)?.skip_while(|s| !(s.pt == "FS" && s.of("b2World").next().is_some()));
+    let first = snaps.next().ok_or("no FS snapshot")?;
+    if first.of("Contacts2D").next().is_none() {
         return Err("--loop-test needs a recording with Contacts2D (dump12 on)".into());
     }
-    let start = snaps.iter().position(|s| s.pt == "FS" && s.of("b2World").next().is_some()).ok_or("no FS snapshot")?;
-    let mut g = Game::from_snapshot(&snaps[start], rig)?;
-    for (n, pair) in snaps[start..].windows(2).enumerate() {
+    let mut g = Game::from_snapshot(&first, rig)?;
+    g.load_layers(&header(dump)?);
+    g.load_input(&first);
+    g.MousePosition = g.input.mouse;
+    let mut prev = first.clone();
+    let mut count = 1;
+    for (n, cur) in snaps.enumerate() {
+        count += 1;
         // Only Time comes from the recording: the scripts' Random state carries over.
         let random = g.random.clone();
-        g.load_time(&pair[0]);
+        g.load_time(&prev);
         g.random = random;
+        g.load_input(&cur);
         let mut diffs = Vec::new();
-        match (pair[0].pt.as_str(), pair[1].pt.as_str()) {
+        match (prev.pt.as_str(), cur.pt.as_str()) {
             ("FS", "FM") => g.fixed_update_scripts(),
             ("FM", "FE") => {
                 g.simulate_physics();
-                diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
+                diffs = compare_physics(&mut g, &prev, &cur)?;
             }
             ("US", "UE") => g.update_scripts(),
             // PreUpdate's Physics2DUpdate at the frame's time.
             ("FE", "US") => {
                 let random = g.random.clone();
-                g.load_time(&pair[1]);
+                g.load_time(&cur);
                 g.random = random;
                 g.interpolate_bodies();
-                diffs = compare_transforms(&g, &snaps[start], &pair[1])?;
+                diffs = compare_transforms(&g, &first, &cur)?;
             }
             _ => {}
         }
-        diffs.extend(compare(&mut g, &pair[1]));
+        diffs.extend(compare(&mut g, &cur));
+        diffs.extend(compare_tool(&g, &cur)?);
         if !diffs.is_empty() {
-            eprintln!("diverged at {} frame {} (after {n} matching points, {}→{}):", pair[1].pt, pair[1].snap("frame"), pair[0].pt, pair[1].pt);
+            eprintln!("diverged at {} frame {} (after {n} matching points, {}→{}):", cur.pt, cur.snap("frame"), prev.pt, cur.pt);
             for d in diffs.iter().take(25) {
                 eprintln!("  {d}");
             }
             return Err(format!("{} diffs", diffs.len()));
         }
+        prev = cur;
     }
-    println!("loop points {}, all match", snaps.len() - start);
+    println!("loop points {count}, all match");
     Ok(())
 }
 

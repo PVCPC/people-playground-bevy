@@ -87,6 +87,7 @@ script! {
         ChargeBurns: bool = true,
         ForceNoChargeParticles: bool = false,
         Deletable: bool = true,
+        Selectable: bool = true,
         Disintegratable: bool = true,
         dirtyFire: bool = false,
         dirtyCharged: bool = false,
@@ -886,6 +887,12 @@ impl Game {
                 self.hinges[h].joint = None;
             } else if let Some(l) = self.limbs.iter().position(|l| l.gore.joint == Some(j)) {
                 self.limbs[l].gore.joint = None;
+            } else if let Some(t) = self.tool.as_mut().filter(|t| t.dragJoint.iter().chain(&t.destroying).any(|d| d.joint == Some(j))) {
+                for d in t.dragJoint.iter_mut().chain(&mut t.destroying) {
+                    if d.joint == Some(j) {
+                        d.joint = None;
+                    }
+                }
             } else {
                 unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge or gore string");
             }

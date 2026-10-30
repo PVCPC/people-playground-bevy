@@ -796,16 +796,6 @@ impl Game {
 }
 
 impl Game {
-    /// Transform.InverseTransformPoint of a physical object's transform.
-    // ponytail: managed-style inverse TRS (inverse rotation, then divide by scale); the native cached
-    // worldToLocal matrix may differ in the last bit. Only distance thresholds read the result.
-    pub fn inverse_transform_point(&self, p: usize, world: [f32; 3]) -> [f32; 3] {
-        let t = &self.physicals[p].transform;
-        let rel = [world[0] - t.position[0], world[1] - t.position[1], world[2] - t.position[2]];
-        let r = mathf::rotate([-t.rotation[0], -t.rotation[1], -t.rotation[2], t.rotation[3]], rel);
-        [r[0] / t.localScale[0], r[1] / t.localScale[1], r[2] / t.localScale[2]]
-    }
-
     /// SkinMaterialHandler.AddDamagePoint
     pub fn skin_add_damage_point(&mut self, l: usize, ty: i32, global_position: [f32; 2], intensity: f32) {
         if self.skins[l].currentDamagePointCount < 128 && !(intensity <= mathf::EPSILON) {
@@ -1114,7 +1104,7 @@ impl Game {
     /// frequency and damping ratio, breakForce infinite (so out of the break-limit list).
     fn create_spring_joint(&mut self, l: usize, other: usize, anchor: [f32; 2], connected_anchor: [f32; 2], distance: f32, frequency: f32, damping_ratio: f32) {
         let (pa, pb) = (self.limbs[l].PhysicalBehaviour, self.limbs[other].PhysicalBehaviour);
-        let (sa, sb) = (self.physicals[pa].transform.localScale, self.physicals[pb].transform.localScale);
+        let (sa, sb) = (self.lossy_scale(pa), self.lossy_scale(pb));
         let (a, b) = (self.physicals[pa].rigidbody.body, self.physicals[pb].rigidbody.body);
         // SpringJoint2D::SetDistance / SetFrequency / SetDampingRatio.
         let clamp = |v: f32, lo: f32, hi: f32| if lo <= v && v <= hi { v } else if lo <= v { hi } else { lo };
@@ -1276,20 +1266,24 @@ impl Game {
     // ponytail: callbacks queued during this pass wait for the next (timeStamp); nothing here queues any.
     pub fn gore_string_delayed_calls(&mut self, dynamic: bool) {
         let now = self.time.timeAsDouble;
-        let mut due: Vec<(f64, bool, usize)> = Vec::new();
+        // (time, kind: 0 break force, 1 gore string destroy, 2 drag joint destroy, limb)
+        let mut due: Vec<(f64, u8, usize)> = Vec::new();
         for l in 0..self.limbs.len() {
             let g = &self.limbs[l].gore;
             // A deactivated limb's coroutines stopped with it.
             if let Some(t) = g.break_at.filter(|&t| dynamic && t <= now && self.limb_active(l)) {
-                due.push((t, false, l));
+                due.push((t, 0, l));
             }
             if let Some(t) = g.destroy_at.filter(|&t| t <= now) {
-                due.push((t, true, l));
+                due.push((t, 1, l));
             }
         }
+        due.extend(self.tool_due_destroys(now).into_iter().map(|t| (t, 2, 0)));
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        for (_, destroy, l) in due {
-            if destroy {
+        for (t, kind, l) in due {
+            if kind == 2 {
+                self.tool_run_destroy(t);
+            } else if kind == 1 {
                 if self.limbs[l].gore.destroy_at.is_some() {
                     self.remove_spring_joint(l);
                 }

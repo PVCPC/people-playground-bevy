@@ -256,6 +256,26 @@ impl Body {
         self.torque += r.x * force.y - r.y * force.x;
     }
 
+    /// Rigidbody2D::AddForce (180c1bf80) with ForceMode2D.Force: dynamic bodies only, waking the body.
+    pub fn apply_force_to_center(&mut self, force: Vec2) {
+        if self.kind != BodyType::Dynamic {
+            return;
+        }
+        self.wake_up();
+        self.force = self.force + force;
+    }
+
+    /// Rigidbody2D::SetVelocity (180c242f0) on a non-static body: wakes it only for a non-zero velocity.
+    pub fn set_linear_velocity(&mut self, v: Vec2) {
+        if self.kind == BodyType::Static {
+            return;
+        }
+        if 0.0 < v.x * v.x + v.y * v.y {
+            self.wake_up();
+        }
+        self.linear_velocity = v;
+    }
+
     /// b2Body::ApplyTorque (Rigidbody2D.AddTorque).
     pub fn apply_torque(&mut self, torque: f32) {
         if self.kind != BodyType::Dynamic {
@@ -597,6 +617,25 @@ impl World {
         b.sweep.a = angle;
         b.sweep.a0 = angle;
         self.synchronize_fixtures(id);
+    }
+
+    /// b2World::QueryAABB (180bb9c20) on a point's AABB: each overlapping proxy's fixture, in tree order.
+    pub fn query_point(&self, p: Vec2) -> Vec<FixtureId> {
+        let mut out = Vec::new();
+        let tree = &self.broad_phase.tree;
+        tree.query(&super::broadphase::Aabb { lower: p, upper: p }, |proxy| {
+            out.push(tree.user_data(proxy));
+            true
+        });
+        out
+    }
+
+    pub fn revolute(&self, id: JointId) -> &super::revolute::RevoluteJoint {
+        self.joints[id].as_ref().unwrap().revolute()
+    }
+
+    pub fn revolute_mut(&mut self, id: JointId) -> &mut super::revolute::RevoluteJoint {
+        self.joints[id].as_mut().unwrap().revolute_mut()
     }
 
     /// The wake b2World::DestroyJoint gives each end.

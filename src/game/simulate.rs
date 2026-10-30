@@ -66,6 +66,7 @@ impl Game {
         }
         self.world.step(dt, self.velocityIterations, self.positionIterations);
         self.write_back_transforms();
+        self.tool_write_back();
         // After a Rigidbody2D joined or changed, the list is rebuilt from every non-static body.
         if self.rigidbody_hierarchy_changed {
             for p in &mut self.physicals {
@@ -111,7 +112,8 @@ impl Game {
             // Transform::SetPositionAndRotation stores it local to the parent; Transform.position/rotation read
             // it back.
             let pose = ([x, y, t.position[2]], qmul(qmul(body, undo), cur));
-            (t.position, t.rotation) = transform::set_get_world(&chain, pose.0, pose.1);
+            let (local, world) = transform::set_world(&chain, pose.0, pose.1);
+            (t.position, t.rotation, t.local) = (world.0, world.1, Some(local));
             let m = &mut self.physicals[p].rigidbody.movement;
             (m.current, m.body) = (pose, pose);
         }
@@ -154,7 +156,8 @@ impl Game {
             let chain = self.parent_chain(p);
             let ph = &mut self.physicals[p];
             ph.rigidbody.movement.current = pose;
-            (ph.transform.position, ph.transform.rotation) = transform::set_get_world(&chain, pose.0, pose.1);
+            let (local, world) = transform::set_world(&chain, pose.0, pose.1);
+            (ph.transform.position, ph.transform.rotation, ph.transform.local) = (world.0, world.1, Some(local));
         }
     }
 

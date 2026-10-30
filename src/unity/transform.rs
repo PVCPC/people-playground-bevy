@@ -126,6 +126,52 @@ pub fn global_rotation(p: &Trs, q: [f32; 4]) -> [f32; 4] {
     }
 }
 
+/// A rotation's 3x3 matrix columns, as CalculateGlobalRS / CalculateGlobalSM build them.
+fn rot_columns(q: __m128) -> [__m128; 3] {
+    unsafe {
+        let (x3, x5, x4) = (sh!(q, 0x71), sh!(q, 0x8e), sh!(q, 0xdb));
+        let (xx, yy, zz) = (sh!(q, 0x00), sh!(q, 0x55), sh!(q, 0xaa));
+        let c0 = _mm_add_ps(
+            _mm_add_ps(_mm_mul_ps(_mm_mul_ps(k([0xc0000000, 0x40000000, 0xc0000000, 0]), yy), x3), _mm_mul_ps(_mm_mul_ps(k([0xc0000000, 0x40000000, 0x40000000, 0]), zz), x5)),
+            k([0x3f800000, 0, 0, 0]),
+        );
+        let c1 = _mm_add_ps(
+            _mm_add_ps(_mm_mul_ps(_mm_mul_ps(k([0xc0000000, 0xc0000000, 0x40000000, 0]), zz), x4), _mm_mul_ps(_mm_mul_ps(k([0x40000000, 0xc0000000, 0x40000000, 0]), xx), x3)),
+            k([0, 0x3f800000, 0, 0]),
+        );
+        let c2 = _mm_add_ps(
+            _mm_add_ps(_mm_mul_ps(_mm_mul_ps(k([0x40000000, 0xc0000000, 0xc0000000, 0]), xx), x5), _mm_mul_ps(_mm_mul_ps(k([0x40000000, 0x40000000, 0xc0000000, 0]), yy), x4)),
+            k([0, 0, 0x3f800000, 0]),
+        );
+        [c0, c1, c2]
+    }
+}
+
+/// a × m by columns: a0·m.x + (a1·m.y + a2·m.z).
+fn mat_mul(a: &[__m128; 3], m: &[__m128; 3]) -> [__m128; 3] {
+    unsafe { m.map(|c| _mm_add_ps(_mm_mul_ps(a[0], sh!(c, 0x00)), _mm_add_ps(_mm_mul_ps(a[1], sh!(c, 0x55)), _mm_mul_ps(a[2], sh!(c, 0xaa))))) }
+}
+
+/// Transform::GetWorldScaleLossy (1807f1960): the diagonal of CalculateGlobalSM (1800d6390), the inverse world
+/// rotation times CalculateGlobalRS (1800d5f40). `nodes` is the object's own local TRS, then each parent up to
+/// the root; `rot` its world rotation (CalculateGlobalRotation).
+pub fn lossy_scale(nodes: &[Trs], rot: [f32; 4]) -> [f32; 3] {
+    unsafe {
+        let scaled = |n: &Trs| {
+            let [c0, c1, c2] = rot_columns(ld(n.q));
+            let s = ld(n.s);
+            [_mm_mul_ps(c0, sh!(s, 0x00)), _mm_mul_ps(c1, sh!(s, 0x55)), _mm_mul_ps(c2, sh!(s, 0xaa))]
+        };
+        let mut m = scaled(&nodes[0]);
+        for n in &nodes[1..] {
+            m = mat_mul(&scaled(n), &m);
+        }
+        let inv = rot_columns(_mm_xor_ps(ld(rot), k(CONJ)));
+        let sm = mat_mul(&inv, &m);
+        [out(sm[0])[0], out(sm[1])[1], out(sm[2])[2]]
+    }
+}
+
 /// A Transform without a rigidbody of its own (a limbs' group object or the person root).
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -135,19 +181,20 @@ pub struct Node {
     pub parent: Option<usize>,
 }
 
-/// Transform::SetPositionAndRotation on an object whose parents are `chain` (direct parent first, root last),
-/// read back through Transform.position/rotation.
-pub fn set_get_world(chain: &[Trs], pos: [f32; 3], rot: [f32; 4]) -> ([f32; 3], [f32; 4]) {
+/// Transform::SetPositionAndRotation on an object whose parents are `chain` (direct parent first, root last): the
+/// stored local position and rotation, and the world pose Transform.position/rotation read back.
+pub fn set_world(chain: &[Trs], pos: [f32; 3], rot: [f32; 4]) -> (([f32; 3], [f32; 4]), ([f32; 3], [f32; 4])) {
     // The world→local recursion reaches the root first.
     let (mut p, mut q) = ([pos[0], pos[1], pos[2], 0.0], rot);
     for n in chain.iter().rev() {
         (p, q) = inverse(n, p, q);
     }
     q = normalize(q);
+    let local = ([p[0], p[1], p[2]], q);
     for n in chain {
         (p, q) = (global_position(n, p), global_rotation(n, q));
     }
-    ([p[0], p[1], p[2]], q)
+    (local, ([p[0], p[1], p[2]], q))
 }
 
 #[cfg(test)]
@@ -157,7 +204,7 @@ mod tests {
     #[test]
     fn identity_parent_round_trip() {
         let n = Trs { t: [0.0; 4], q: [0.0, 0.0, 0.0, 1.0], s: [1.0, 1.0, 1.0, 0.0] };
-        let (p, q) = set_get_world(&[n, n], [0.5, -2.0, 0.0], [0.0, 0.0, 0.6, 0.8]);
+        let (_, (p, q)) = set_world(&[n, n], [0.5, -2.0, 0.0], [0.0, 0.0, 0.6, 0.8]);
         assert_eq!(p, [0.5, -2.0, 0.0]);
         assert_eq!(q[2..], [0.6, 0.8]);
     }
