@@ -136,6 +136,10 @@ script! {
         /// DisintegrationCounterBehaviour.DisintegrationCount (the root object's).
         DisintegrationCount: i32 = 0,
         DismembermentClips: usize = 0,
+        /// A pending Object.Destroy(root gameObject): the DelayedCallManager time it runs at.
+        destroy_at: Option<f64> = None,
+        /// The root GameObject (and its whole hierarchy) was destroyed.
+        destroyed: bool = false,
     }
 }
 
@@ -157,8 +161,91 @@ impl Game {
     pub fn person_on_child_disintegrated(&mut self, person: usize) {
         self.people[person].DisintegrationCount += 1;
         if self.people[person].DisintegrationCount >= self.people[person].Limbs.len() as i32 {
-            unimplemented!("DisintegrationCounterBehaviour: Object.Destroy of the whole person");
+            // Object.Destroy(base.transform.root.gameObject): DestroyObjectDelayed queues it on the
+            // DelayedCallManager at min(fixedTimeAsDouble, the frame's time), like Destroy(Joint); a second
+            // Destroy finds nothing left to do.
+            let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+            self.people[person].destroy_at.get_or_insert(at);
         }
+    }
+
+    /// The people's queued root-GameObject destroys due by now (DelayedCallManager times), as (time, person).
+    pub fn person_due_destroys(&self, now: f64) -> Vec<(f64, usize)> {
+        (0..self.people.len()).filter_map(|p| self.people[p].destroy_at.filter(|&at| at <= now).map(|at| (at, p))).collect()
+    }
+
+    /// The delayed Object.Destroy of a person's root GameObject (DestroyObjectHighLevel): the whole hierarchy
+    /// goes, so every script on it gets OnDisable (while active) and OnDestroy, and its components vanish.
+    pub fn person_run_destroy(&mut self, person: usize) {
+        self.people[person].destroy_at = None;
+        if self.people[person].destroyed {
+            return;
+        }
+        let limbs = self.people[person].Limbs.clone();
+        // DisintegrationCount reached the limb count, so every limb went through PhysicalBehaviour.Disintegrate and
+        // its GameObject is inactive (no OnDisable left to run, the b2 body, joints and colliders already gone).
+        for &l in &limbs {
+            let p = self.limbs[l].PhysicalBehaviour;
+            if self.limb_active(l) || self.physicals[p].rigidbody.detached.is_none() {
+                unimplemented!("Object.Destroy of a person with an active limb: OnDisable order of the hierarchy");
+            }
+        }
+        // PersonBehaviour.OnDestroy: AliveBehaviour.AliveByTransform.Remove(transform), a lookup nothing rewritten reads.
+        // DisintegrationCounterBehaviour.OnDestroy: its OnDisintegration handlers go with the objects.
+        // The root's other scripts (IncreaseStatOnStart, HingeJointLimitAutofixBehaviour, Optout) have no OnDestroy.
+        // The limbs' OnDestroy calls only touch their own object and other people's flags, so their order among
+        // the limbs does not change a result; each limb's scripts run in component order.
+        for &l in &limbs {
+            let p = self.limbs[l].PhysicalBehaviour;
+            // PhysicalBehaviour.OnDestroy: DestroyStabJoint for each penetration (Disintegrate refused any).
+            if !self.physicals[p].penetrations.is_empty() {
+                unimplemented!("PhysicalBehaviour.DestroyStabJoint");
+            }
+            // PhysicalObjectsInWorld / PhysicalObjectsInWorldByTransform / CameraControlBehaviour.CurrentlyFollowing
+            // remove it: the object leaves every manager loop (the camera list has no rewritten state).
+            self.physicals[p].enabled = false;
+            self.physicals[p].destroyed = true;
+            // An empty Collision2D exit to each collider still in the stay buffer (SendMessage skips inactive
+            // objects, and a destroyed collider reads null).
+            for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {
+                if pair.Active && !self.physicals[pair.Coll].destroyed && self.physicals[pair.Coll].active {
+                    self.physical_on_collision_exit(pair.Coll, &crate::b2::contacts2d::ScriptCollision::default());
+                }
+            }
+            // InvokeOnItemRemoved: the modding event only.
+            // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove(this); Destroy(myStatus) is UI and
+            // DestroyWith is only filled by attachments, which are not rewritten.
+            self.limbs[l].enabled = false;
+            // ConnectedNodeBehaviour.OnDestroy: DisconnectFromEverything, then NodeController.Nodes.Remove (the
+            // node is isolated and nothing reads it afterwards, so its slot in the update loop changes nothing).
+            self.node_disconnect_from_everything(l);
+            // SkinMaterialHandler.OnDestroy: Destroy(material), rendering only.
+            // GoreStringBehaviour.OnDestroy
+            if self.limbs[l].goreString {
+                self.gore_string_destroy_joint(l);
+            }
+            // GripBehaviour.OnDestroy: ModdingApi listener removal only.
+        }
+        for &l in &limbs {
+            // The limb's joints are destroyed with it: the SpringJoint2D (and the queued Destroy(Joint) with it) ...
+            self.remove_spring_joint(l);
+            // ... and the HingeJoint2D (Joint2D::Cleanup finds its b2 joint gone for a disintegrated limb).
+            if let Some(h) = self.limbs[l].Joint {
+                if let Some(j) = self.hinges[h].joint.take() {
+                    self.world.destroy_joint(j);
+                }
+                self.hinges[h].destroyed = true;
+                self.joint_break_limits.retain(|&k| k != super::BreakJoint::Hinge(h));
+            }
+            // The bleeding particles are children of the limb (and the extraDecals splat of the particle).
+            for i in self.circulations[l].BleedingParticles.clone() {
+                self.bleeding[i].destroyed = true;
+                if let Some(s) = self.bleeding[i].BloodSplatController {
+                    self.splats[s].destroyed = true;
+                }
+            }
+        }
+        self.people[person].destroyed = true;
     }
 
     pub fn add_pain(&mut self, person: usize, intensity: f32) {
@@ -187,6 +274,9 @@ impl Game {
 
     /// PersonBehaviour.FixedUpdate
     pub fn person_fixed_update(&mut self, person: usize) {
+        if self.people[person].destroyed {
+            return;
+        }
         if self.people[person].BrainDamaged && self.person_is_alive(person) && self.random.value() > 0.99 {
             self.person_wince(person, 120.0);
             if self.people[person].SeizureTime <= mathf::EPSILON && self.random.value() > 0.95 {
@@ -202,6 +292,9 @@ impl Game {
 
     /// PersonBehaviour.Update
     pub fn person_update(&mut self, person: usize) {
+        if self.people[person].destroyed {
+            return;
+        }
         let dt = self.time.deltaTime;
         if self.people[person].BrainDamaged {
             if !self.prefs.BrainDamage {
@@ -323,6 +416,9 @@ impl Game {
 
     /// PersonBehaviour.LateUpdate -> DetermineActivePose
     pub fn person_late_update(&mut self, person: usize) {
+        if self.people[person].destroyed {
+            return;
+        }
         use pose_state::*;
         let p = &self.people[person];
         if p.dead {
@@ -365,4 +461,26 @@ impl Game {
 pub fn normalized(v: [f32; 3]) -> [f32; 3] {
     let num = (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).0.sqrt() as f32;
     if num > 1e-5 { [v[0] / num, v[1] / num, v[2] / num] } else { [0.0, 0.0, 0.0] }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The last disintegration queues the root GameObject's Destroy once, at min(fixed time, frame time).
+    #[test]
+    fn last_disintegration_queues_destroy() {
+        let mut g = Game::default();
+        g.time.fixedTimeAsDouble = 2.0;
+        g.time.timeAsDouble = 3.0;
+        g.people.push(Person { Limbs: vec![0, 1], ..Default::default() });
+        g.person_on_child_disintegrated(0);
+        assert_eq!(g.people[0].destroy_at, None);
+        g.person_on_child_disintegrated(0);
+        g.time.fixedTimeAsDouble = 4.0;
+        g.person_on_child_disintegrated(0);
+        assert_eq!(g.people[0].destroy_at, Some(2.0));
+        assert_eq!(g.person_due_destroys(1.9), vec![]);
+        assert_eq!(g.person_due_destroys(2.0), vec![(2.0, 0)]);
+    }
 }

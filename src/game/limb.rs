@@ -79,6 +79,8 @@ script! {
         StrengthMultipliers: Vec<f32> = Vec::new(),
         SpeciesIdentity: String = "Human".into(),
         BloodLiquidType: String = "BLOOD".into(),
+        /// The BloodDecal DecalDescriptor's name.
+        BloodDecal: String = "Dense_blood".into(),
         enabled: bool = true,
         /// The GoreStringBehaviour component: present, enabled and its `Joint` (a SpringJoint2D).
         goreString: bool = true,
@@ -322,10 +324,10 @@ impl Game {
             return;
         }
         let limb = &self.limbs[l];
-        let mut num = limb.BreakingThreshold
-            * 120.0
-            * mathf::clamp(1.0 - self.skins[l].rottenProgress, 0.1, 1.0)
-            * self.mass_strength_ratio(l);
+        // One float expression: Mono evaluates the chain in double.
+        let mut num = (d(limb.BreakingThreshold) * 120.0f32 * mathf::clamp(1.0 - self.skins[l].rottenProgress, 0.1, 1.0)
+            * self.mass_strength_ratio(l))
+        .f();
         num /= self.prefs.FragilityMultiplier;
         if !limb.IsAndroid {
             num *= mathf::clamp(mathf::map_range(-100.0, 0.0, 0.1, 1.0, ph.Temperature), 0.1, 1.0);
@@ -889,10 +891,14 @@ impl Game {
                 self.cut(l, point, normal);
             }
             if !(num < 3.0) || !(self.limbs[l].Health > self.limbs[l].InitialHealth * 0.2) {
-                // PhysicalBehaviour.CreateImpactEffect: instantiates the ShotImpact effect prefab.
-                // Decal message: decals are presentation; GetComputedColor still caches the blood colour.
+                let p = self.limbs[l].PhysicalBehaviour;
+                self.create_impact_effect(p, point, normal, mathf::clamp(num / 4.0, 1.0, 2.0));
                 let fallback = self.original_blood_color(l);
-                self.get_computed_color(l, fallback);
+                let colour = self.get_computed_color(l, fallback);
+                if let Some(other) = self.collision_physical(c) {
+                    let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                    self.physical_decal(other, ty, point, 1.0, colour);
+                }
             }
         }
     }
@@ -938,9 +944,13 @@ impl Game {
                 * mathf::lerp(self.positionIterations as f32 / 16.0, 1.0, 0.2);
             let force = d(get_min_impulse(&buffer, contacts)) * self.prefs.CrushForceMultiplier / mass_strength_ratio * self.prefs.FragilityMultiplier;
             if !(force < threshold) {
-                // Decal message: decals are presentation; GetComputedColor still caches the blood colour.
                 let fallback = self.original_blood_color(l);
-                self.get_computed_color(l, fallback);
+                let colour = self.get_computed_color(l, fallback);
+                if let Some(other) = self.collision_physical(c) {
+                    let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                    let at = self.physicals[p].transform.position;
+                    self.physical_decal(other, ty, [at[0], at[1]], 1.0, colour);
+                }
                 self.limb_crush(l);
             }
         }
@@ -1319,7 +1329,7 @@ impl Game {
     // ponytail: callbacks queued during this pass wait for the next (timeStamp); nothing here queues any.
     pub fn gore_string_delayed_calls(&mut self, dynamic: bool) {
         let now = self.time.timeAsDouble;
-        // (time, kind: 0 break force, 1 gore string destroy, 2 drag joint destroy, limb)
+        // (time, kind: 0 break force, 1 gore string destroy, 2 drag joint destroy, 3 person destroy, limb/person)
         let mut due: Vec<(f64, u8, usize)> = Vec::new();
         for l in 0..self.limbs.len() {
             let g = &self.limbs[l].gore;
@@ -1332,9 +1342,12 @@ impl Game {
             }
         }
         due.extend(self.tool_due_destroys(now).into_iter().map(|t| (t, 2, 0)));
+        due.extend(self.person_due_destroys(now).into_iter().map(|(t, p)| (t, 3, p)));
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
-            if kind == 2 {
+            if kind == 3 {
+                self.person_run_destroy(l);
+            } else if kind == 2 {
                 self.tool_run_destroy(t);
             } else if kind == 1 {
                 if self.limbs[l].gore.destroy_at.is_some() {

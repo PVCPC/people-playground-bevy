@@ -252,12 +252,62 @@ pub struct Decal {
     pub colour: [f32; 4],
 }
 
+/// A DecalDescriptor asset: the fields DecalControllerBehaviour reads (Color is white in both).
+#[derive(Debug)]
+pub struct DecalDescriptor {
+    pub name: &'static str,
+    pub IgnoreRadius: f32,
+    /// Sprites.Length
+    pub Sprites: usize,
+    pub MaxDripCount: i32,
+}
+
+pub static SPARSE_BLOOD: DecalDescriptor = DecalDescriptor { name: "Sparse blood", IgnoreRadius: 0.2, Sprites: 32, MaxDripCount: 0 };
+pub static DENSE_BLOOD: DecalDescriptor = DecalDescriptor { name: "Dense blood", IgnoreRadius: 0.3, Sprites: 32, MaxDripCount: 0 };
+
+/// The descriptor asset of a recorded reference name ("Dense_blood").
+pub fn decal_descriptor(name: &str) -> &'static DecalDescriptor {
+    [&SPARSE_BLOOD, &DENSE_BLOOD].into_iter().find(|d| d.name.replace(' ', "_") == name).unwrap_or_else(|| unimplemented!("DecalDescriptor {name}"))
+}
+
+/// A DecalControllerBehaviour: its descriptor and its decals (localDecalPositions with the sprites' data).
+#[derive(Clone, Debug)]
+pub struct DecalController {
+    pub descriptor: &'static DecalDescriptor,
+    pub decals: Vec<Decal>,
+}
+
+/// A BloodPuff poolable (the Human PhysicalProperties' ShotImpact), from the pool PoolGenerator made for it.
+#[derive(Clone, Debug)]
+pub struct BloodPuff {
+    /// gameObject.activeSelf: false while it waits in the pool.
+    pub active: bool,
+    /// The Extra decal emitter's FancyBloodSplatController and whether that child is active (ActivateIfFancyEffects).
+    pub splat: usize,
+    pub emitter_active: bool,
+    /// The root ParticleSystem's time: 3 s, not looping, one burst at 0 whose particles live 0.1-0.3 s, so it
+    /// stops (stopAction Callback: PoolableParticleSystemHelper returns it) when the time reaches 3 s.
+    pub particle_time: f32,
+}
+
+/// ObjectPoolBehaviour: createdObjects and availableObjects (HashSets in slot order).
+#[derive(Clone, Debug, Default)]
+pub struct ObjectPool {
+    pub created: Vec<usize>,
+    pub available: SlotSet<usize>,
+    pub inactivityTimer: f32,
+}
+
 /// A behaviour whose Start is still due.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PendingStart {
     Splat(usize),
     /// ExplosionSoundBehviour on a BloodExplosion (three Near clips, StartWhenAwake, no distant sound).
     BloodExplosionSound,
+    /// A new BloodPuff's ExplosionSoundBehviour (eight Near clips).
+    BloodPuffSound,
+    /// ExistifUnderwater.Start of a new BloodPuff's Extra decal emitter (Invert: off under water).
+    BloodPuffEmitterWater(usize),
 }
 
 impl Game {
@@ -473,6 +523,150 @@ impl Game {
                 PendingStart::BloodExplosionSound => {
                     self.pick_random(3);
                 }
+                PendingStart::BloodPuffSound => {
+                    self.pick_random(8);
+                }
+                PendingStart::BloodPuffEmitterWater(b) => {
+                    let s = self.blood_puffs[b].splat;
+                    let p = self.splats[s].parent_position;
+                    if self.is_point_under_water([p[0], p[1]]) {
+                        self.blood_puffs[b].emitter_active = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// WaterBehaviour.IsPointUnderWater: the WaterBehaviour.waters list is empty, as no water object exists (spawning
+    /// one is not rewritten).
+    pub fn is_point_under_water(&self, _point: [f32; 2]) -> bool {
+        false
+    }
+
+    /// PhysicalBehaviour.CreateImpactEffect of a Human (ShotImpact: BloodPuff poolable, tagged Poolable).
+    pub fn create_blood_puff(&mut self, p: usize, position: [f32; 2], z: f32, size: f32) {
+        let Some(b) = self.pool_request_blood_puff(position) else { return };
+        // localScale *= size (presentation); eulerAngles = (0, 0, z): the emitter's rotation (its local one is identity).
+        let half = z * mathf::DEG2RAD * 0.5;
+        self.splats[self.blood_puffs[b].splat].rotation = [0.0, 0.0, half.sin(), half.cos()];
+        // BroadcastMessage("OnImpactCreated") down the object: a limb's CirculationBehaviour.
+        if let Some(l) = self.limbs.iter().position(|l| l.PhysicalBehaviour == p) {
+            let original = self.original_blood_color(l);
+            let color = if mathf::map_range(0.0, 1.0, 0.0, 1.0, self.circulations[l].TotalLiquidAmount) > 0.05 {
+                self.get_computed_color(l, original)
+            } else {
+                original
+            };
+            // BloodImpactBehaviour.SetColor: the particles' start colour and the emitter's decal colour.
+            let mut color = color;
+            if self.prefs.GorelessMode {
+                color = super::circulation::change_red_to_orange(color);
+            }
+            color[3] = 0.4;
+            self.splats[self.blood_puffs[b].splat].DecalColourMultiplier = color;
+        }
+    }
+
+    /// PoolGenerator.RequestPrefab(BloodPuff poolable): ObjectPoolBehaviour.Request.
+    fn pool_request_blood_puff(&mut self, position: [f32; 2]) -> Option<usize> {
+        let pool = self.blood_puff_pool.get_or_insert_with(Default::default);
+        pool.inactivityTimer = 0.0;
+        let first = pool.available.iter().next().copied();
+        if let Some(b) = first {
+            pool.available.remove_where(|&x| x == b);
+            // transform.position = position; SetActive(true) replays the particle systems (playOnAwake).
+            let puff = &mut self.blood_puffs[b];
+            puff.active = true;
+            puff.particle_time = 0.0;
+            let s = puff.splat;
+            let emitter = puff.emitter_active;
+            self.splats[s].parent_position = [position[0], position[1], 0.0];
+            // OnPoolableInitialised, then OnPoolableReinitialised in hierarchy order: ExplosionSoundBehviour.Start
+            // (Play), PoolableSizeHelper (localScale), the emitter's FancyBloodSplatController.Start if active.
+            self.pick_random(8);
+            if emitter {
+                self.splat_start(s);
+            }
+            return Some(b);
+        }
+        // PoolGenerator.PoolSize
+        if self.blood_puff_pool.as_ref().unwrap().created.len() >= 256 {
+            return None;
+        }
+        // Instantiate(Prefab, position, identity). Awake in hierarchy order: the root's ExplosionSoundBehviour,
+        // PoolableParticleSystemHelper and PoolableSizeHelper; the Extra decal emitter's and water puff's
+        // ActivateIfFancyEffects each draw `Chance(1) > Random.value`.
+        let emitter_active = 1.0 > self.random.value() && self.prefs.FancyEffects;
+        let _water_puff = 1.0 > self.random.value() && self.prefs.FancyEffects;
+        self.splats.push(FancyBloodSplat {
+            UnparentAtStart: false,
+            DirectionMode: 0,
+            Continuous: false,
+            Direction: [0.0, 1.0],
+            SpawningChance: 0.1,
+            AmountRange: [1.0, 5.0],
+            AngleRandomisation: 90.0,
+            LifetimeInSeconds: [1.0, 2.0],
+            EjectionForce: [0.5, 3.0],
+            DecalColourMultiplier: [1.0, 1.0, 1.0, 1.0],
+            Size: 0.2,
+            DestroyWhenNoParticles: false,
+            TriggerOnCollide: false,
+            particles: Default::default(),
+            parent_position: [position[0], position[1], 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            started: false,
+            destroyed: false,
+            CollisionLayers: 10752,
+            attached: None,
+            parent_person: None,
+        });
+        let s = self.splats.len() - 1;
+        let b = self.blood_puffs.len();
+        self.blood_puffs.push(BloodPuff { active: true, splat: s, emitter_active, particle_time: 0.0 });
+        // Starts in the same order: ExplosionSoundBehviour (Play), the Debris and Trail ExistifUnderwaters (on
+        // above water), then the emitter's FancyBloodSplatController and ExistifUnderwater.
+        self.pending_starts.push(PendingStart::BloodPuffSound);
+        if emitter_active {
+            self.pending_starts.push(PendingStart::Splat(s));
+            self.pending_starts.push(PendingStart::BloodPuffEmitterWater(b));
+        }
+        let pool = self.blood_puff_pool.as_mut().unwrap();
+        pool.created.push(b);
+        Some(b)
+    }
+
+    /// ObjectPoolBehaviour.Update of the BloodPuff pool: Clear after 300 s with every object back.
+    pub fn blood_puff_pool_update(&mut self) {
+        let dt = self.time.deltaTime;
+        let Some(pool) = &mut self.blood_puff_pool else { return };
+        if pool.created.is_empty() {
+            return;
+        }
+        pool.inactivityTimer += dt;
+        if pool.inactivityTimer > 300.0 && pool.available.iter().count() == pool.created.len() {
+            for &b in &pool.created {
+                self.splats[self.blood_puffs[b].splat].destroyed = true;
+            }
+            pool.created.clear();
+            pool.available.clear();
+            pool.inactivityTimer = 0.0;
+        }
+    }
+
+    /// The particle systems' update after LateUpdate: a BloodPuff whose root system ran its 3 s stops, and
+    /// PoolableParticleSystemHelper.OnParticleSystemStopped returns it to the pool (SetActive(false)).
+    pub fn blood_puff_particles_update(&mut self) {
+        let dt = self.time.deltaTime;
+        for b in 0..self.blood_puffs.len() {
+            let puff = &mut self.blood_puffs[b];
+            if !puff.active {
+                continue;
+            }
+            puff.particle_time += dt;
+            if puff.particle_time >= 3.0 {
+                puff.active = false;
+                self.blood_puff_pool.as_mut().unwrap().available.add(b);
             }
         }
     }
@@ -498,6 +692,10 @@ impl Game {
         }
         // Objects instantiated during this step have not had Start yet and are not in this FixedUpdate pass.
         if !self.splats[s].started {
+            return;
+        }
+        // A pooled BloodPuff's emitter: no FixedUpdate while it or the puff is inactive.
+        if self.blood_puffs.iter().any(|b| b.splat == s && !(b.active && b.emitter_active)) {
             return;
         }
         self.splats[s].particles.remove_where(|p| p.Life <= 0.0);
@@ -526,7 +724,7 @@ impl Game {
             let Some(hit) = self.overlap_point_first(position, mask) else { continue };
             let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| l.PhysicalBehaviour == hit && l.Person == person));
             if colour[3] > 0.05 && !same_root {
-                self.physical_decal(hit, position, size, colour);
+                self.physical_decal(hit, &SPARSE_BLOOD, position, size, colour);
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
                 if self.splats[s].TriggerOnCollide {
                     unimplemented!("FancyBloodSplatController.OnCollide");
@@ -554,7 +752,7 @@ impl Game {
     }
 
     /// initialParent.position of a splat that moves with its limb.
-    fn update_splat_pose(&mut self, s: usize) {
+    pub(super) fn update_splat_pose(&mut self, s: usize) {
         let Some((p, bleeding, _)) = self.splats[s].attached else { return };
         let mut v = bleeding.t;
         for node in self.local_chain(p).iter().rev() {

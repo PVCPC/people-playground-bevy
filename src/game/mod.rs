@@ -11,7 +11,9 @@ pub mod map;
 pub mod misc;
 pub mod person;
 pub mod physical;
+pub mod shatter;
 pub mod simulate;
+pub mod temperature;
 pub mod tool;
 
 use crate::b2::{
@@ -694,6 +696,8 @@ pub struct Game {
     pub properties: Vec<PhysicalProperties>,
     /// Global.PhysicalObjectsInWorld order.
     pub physicals: Vec<Physical>,
+    /// AmbientTemperatureGridBehaviour.Instance (the Main scene's grid; nothing in the dumps records it).
+    pub ambient_grid: temperature::AmbientTemperatureGridBehaviour,
     pub limbs: Vec<Limb>,
     pub circulations: Vec<Circulation>,
     pub nodes: Vec<Node>,
@@ -705,6 +709,9 @@ pub struct Game {
     pub splats: Vec<FancyBloodSplat>,
     /// Behaviours instantiated since the last delayed-Start pass, in Awake order.
     pub pending_starts: Vec<misc::PendingStart>,
+    /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
+    pub blood_puffs: Vec<misc::BloodPuff>,
+    pub blood_puff_pool: Option<misc::ObjectPool>,
     pub hinges: Vec<Hinge>,
     /// The map's scripts that draw UnityEngine.Random (scene order).
     pub ambient_audio: Vec<PlayAudioAtRandom>,

@@ -160,6 +160,12 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         t.frameCount += 1;
         g.interpolate_bodies();
         g.update_scripts();
+        // ponytail: every active limb counts as drawn; cull against the camera once sprite bounds are loaded.
+        for l in 0..g.limbs.len() {
+            if g.limb_active(l) {
+                g.skin_will_render(l);
+            }
+        }
     }))
     .map_err(|panic| {
         panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()

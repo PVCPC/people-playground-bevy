@@ -116,11 +116,14 @@ script! {
         /// The collider's GameObject is active (Collider.gameObject.activeSelf).
         active: bool = true,
         enabled: bool = true,
+        /// The GameObject was destroyed (Object.Destroy ran): removed from PhysicalObjectsInWorld.
+        destroyed: bool = false,
         /// Set when the oracle loads a component it has no data for.
         has_fire_map: bool = false,
-        /// The DecalControllerBehaviour PhysicalBehaviour.Decal adds for Sparse blood, the only descriptor any
-        /// splat sends (none until the first decal).
-        decals: Option<Vec<super::misc::Decal>> = None,
+        /// The DecalControllerBehaviours PhysicalBehaviour.Decal added, one per descriptor, in add order.
+        decal_controllers: Vec<super::misc::DecalController> = Vec::new(),
+        /// spriteRenderer's local AABB (center, extents); None when no sprite data was loaded.
+        sprite_bounds: Option<([f32; 3], [f32; 3])> = None,
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).
@@ -133,7 +136,7 @@ script! {
 impl Game {
     /// Global.PhysicalObjectsInWorldByTransform looked up by a collider (the collider's transform).
     pub fn physical_of_collider(&self, collider: i32) -> Option<usize> {
-        self.physicals.iter().position(|p| p.collider == collider)
+        self.physicals.iter().position(|p| !p.destroyed && p.collider == collider)
     }
 }
 
@@ -261,8 +264,7 @@ impl Game {
         if self.physicals[p].SimulateTemperature {
             if self.physicals[p].AmbientTemperatureTransfer {
                 if self.prefs.AmbientTemperatureTransfer {
-                    // ponytail: AmbientTemperatureGridBehaviour.TransferHeat; the preference is off by default.
-                    unimplemented!("AmbientTemperatureGridBehaviour");
+                    self.TransferHeat(p);
                 } else {
                     let h = self.heat_capacity(p);
                     let ambient = self.AmbientTemperature;
@@ -304,7 +306,7 @@ impl Game {
             ph.Temperature = mathf::clamp(-273.15, ph.Temperature, 5_000_000.0);
         }
         self.on_collision_stay_without_sleep(p);
-        if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && self.physicals[p].decals.is_some() {
+        if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && !self.physicals[p].decal_controllers.is_empty() {
             // ponytail: underwater decal fading is visual only; decals are not rewritten yet.
         }
         // ponytail: penetrations stay empty until stabbing is rewritten.
@@ -495,25 +497,33 @@ impl Game {
         }
     }
 
-    /// PhysicalBehaviour.Decal with a Sparse blood instruction, then the DecalControllerBehaviour it added (a
-    /// later receiver of the same message finds the decal already there: IsNearOtherDecal).
-    pub fn physical_decal(&mut self, p: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
-        if self.physicals[p].decals.is_none() {
-            if !(self.physicals[p].DisplayBloodDecals && self.prefs.Decals) {
-                return;
-            }
-            self.physicals[p].decals = Some(Vec::new());
+    /// SendMessage("Decal", new DecalInstruction(type, position, colour, size)) to a physical object:
+    /// PhysicalBehaviour.Decal adds a DecalControllerBehaviour for a new descriptor and calls it, then every
+    /// DecalControllerBehaviour on the object receives the message too (the new one finds its decal: IsNearOtherDecal).
+    pub fn physical_decal(&mut self, p: usize, ty: &'static super::misc::DecalDescriptor, position: [f32; 2], size: f32, colour: [f32; 4]) {
+        let size = mathf::max(0.05, size);
+        let ph = &mut self.physicals[p];
+        if ph.DisplayBloodDecals && self.prefs.Decals && ph.decal_controllers.iter().all(|c| !std::ptr::eq(c.descriptor, ty)) {
+            ph.decal_controllers.push(super::misc::DecalController { descriptor: ty, decals: Vec::new() });
+            let c = self.physicals[p].decal_controllers.len() - 1;
+            self.decal_controller_decal(p, c, ty, position, size, colour);
         }
-        // DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
-        if !self.prefs.Decals {
+        for c in 0..self.physicals[p].decal_controllers.len() {
+            self.decal_controller_decal(p, c, ty, position, size, colour);
+        }
+    }
+
+    /// DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
+    fn decal_controller_decal(&mut self, p: usize, c: usize, ty: &'static super::misc::DecalDescriptor, position: [f32; 2], size: f32, colour: [f32; 4]) {
+        if !self.prefs.Decals || !std::ptr::eq(self.physicals[p].decal_controllers[c].descriptor, ty) {
             return;
         }
         let local = self.inverse_transform_point(p, [position[0], position[1], 0.0]);
         let local = [local[0], local[1]];
-        // IsNearOtherDecal: IgnoreRadius 0.2.
-        let radius = 0.2f32 * 0.2;
+        // IsNearOtherDecal
+        let radius = ty.IgnoreRadius * ty.IgnoreRadius;
         let at = self.transform_point3(p, [local[0], local[1], 0.0]);
-        let near = self.physicals[p].decals.as_ref().unwrap().iter().any(|decal| {
+        let near = self.physicals[p].decal_controllers[c].decals.iter().any(|decal| {
             let o = self.transform_point3(p, [decal.position[0], decal.position[1], 0.0]);
             let v = [at[0] - o[0], at[1] - o[1], at[2] - o[2]];
             (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).f() < radius
@@ -522,14 +532,38 @@ impl Game {
             return;
         }
         let size = size * self.random.range(1.0, 1.2);
-        // Sprites.PickRandom() of its 32; Color white times the instruction's multiplier.
-        let sprite = self.pick_random(32).unwrap();
+        // Sprites.PickRandom(); Color (white) times the instruction's multiplier.
+        let sprite = self.pick_random(ty.Sprites).unwrap();
         let mut colour = colour;
         if self.prefs.GorelessMode {
             colour = super::circulation::change_red_to_orange(colour);
         }
-        // WillDrip: Sparse blood has no drips.
-        self.physicals[p].decals.as_mut().unwrap().push(super::misc::Decal { position: local, size, sprite, colour });
+        if ty.MaxDripCount > 0 {
+            unimplemented!("DecalControllerBehaviour.Decal: {} drip streaks", ty.name);
+        }
+        self.physicals[p].decal_controllers[c].decals.push(super::misc::Decal { position: local, size, sprite, colour });
+    }
+
+    /// spriteRenderer.bounds: the sprite's local AABB through the object's transforms (center, extents).
+    pub fn sprite_world_bounds(&self, p: usize) -> ([f32; 3], [f32; 3]) {
+        let Some((c, e)) = self.physicals[p].sprite_bounds else {
+            unimplemented!("SpriteRenderer.bounds of {}: the sprite's local bounds are not loaded", self.physicals[p].name)
+        };
+        let chain: Vec<_> = self.local_chain(p).into_iter().rev().collect();
+        crate::unity::transform::transform_aabb(c, e, &chain)
+    }
+
+    /// PhysicalBehaviour.CreateImpactEffect
+    pub fn create_impact_effect(&mut self, p: usize, position: [f32; 2], direction: [f32; 2], size: f32) {
+        if mathf::sqr_magnitude(direction) <= f32::EPSILON || size.is_nan() {
+            return;
+        }
+        let z = (d((direction[1] as f64).atan2(direction[0] as f64) as f32) * 57.29578f32 - 90.0f32).f();
+        let props = &self.properties[self.physicals[p].Properties].name;
+        if props != "Human" {
+            unimplemented!("PhysicalBehaviour.CreateImpactEffect: the ShotImpact of {props}");
+        }
+        self.create_blood_puff(p, position, z, size);
     }
 
     /// Transform.TransformPoint for a 2D point of a physical object's transform.

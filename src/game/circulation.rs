@@ -593,13 +593,17 @@ impl Game {
     /// Every caller passes makeSound = false, so DripSounds is always nulled.
     pub fn create_bleeding_particle(&mut self, l: usize, world_position: [f32; 2], direction: [f32; 2], laminarity: f32) {
         if !self.limbs[l].IsAndroid && !self.limbs[l].IsZombie && self.circulations[l].BleedingPointCount < 8 {
-            // BleedingParticle.prefab (Resources/prefabs). The ClosestPoint onto the sprite bounds and
-            // the rotation only feed the splat's decal positions and directions (presentation), so the
-            // position is the unclamped worldPosition - direction * 0.1f and transform.up = direction
-            // is a z rotation.
-            let position = [(d(world_position[0]) - d(direction[0]) * 0.1f32).f(), (d(world_position[1]) - d(direction[1]) * 0.1f32).f(), 0.0];
-            let angle = (direction[1] as f64).atan2(direction[0] as f64) - std::f64::consts::FRAC_PI_2;
-            let rotation = [0.0, 0.0, (angle * 0.5).sin() as f32, (angle * 0.5).cos() as f32];
+            use crate::unity::transform::{bounds_closest_point, from_to_rotation_up, set_world, Trs};
+            let p = self.limbs[l].PhysicalBehaviour;
+            let (c, e) = self.sprite_world_bounds(p);
+            let (closest, _) = bounds_closest_point([world_position[0], world_position[1], 0.0], c, e);
+            // Instantiate(BleedingParticle.prefab, worldPosition - direction * 0.1f, identity, limb): the world pose
+            // under the limb (the prefab's scale is 1), then transform.up = direction sets the world rotation.
+            let at = [closest[0] - direction[0] * 0.1, closest[1] - direction[1] * 0.1, 0.0];
+            let chain: Vec<Trs> = self.local_chain(p).into_iter().rev().collect();
+            let ((t, _), _) = set_world(&chain, at, [0.0, 0.0, 0.0, 1.0]);
+            let ((_, q), _) = set_world(&chain, at, from_to_rotation_up([direction[0], direction[1], 0.0]));
+            let local = Trs { t: [t[0], t[1], t[2], 0.0], q, s: [1.0, 1.0, 1.0, 0.0] };
             let b = self.bleeding.len();
             // Awake of the clone's hierarchy (Trail, extraDecals, water puff): the two
             // ActivateIfFancyEffects each draw `Chance(1) > Random.value` before reading FancyEffects.
@@ -622,16 +626,19 @@ impl Game {
                     DestroyWhenNoParticles: true,
                     TriggerOnCollide: false,
                     particles: Default::default(),
-                    parent_position: position,
-                    rotation,
+                    parent_position: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
                     started: false,
                     destroyed: false,
                     CollisionLayers: 10752,
-                    attached: None,
+                    // The extraDecals child's local rotation is identity.
+                    attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
                     parent_person: Some(self.limbs[l].Person),
                 });
-                self.pending_starts.push(super::misc::PendingStart::Splat(self.splats.len() - 1));
-                Some(self.splats.len() - 1)
+                let s = self.splats.len() - 1;
+                self.update_splat_pose(s);
+                self.pending_starts.push(super::misc::PendingStart::Splat(s));
+                Some(s)
             } else {
                 None
             };

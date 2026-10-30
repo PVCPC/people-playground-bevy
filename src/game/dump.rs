@@ -333,6 +333,14 @@ impl Game {
             p.LooseEndSize = f(r.req("LooseEndSize")?);
             p.OverrideImpactSounds = list(r.req("OverrideImpactSounds")?).len();
             p.audioSource = r.req("audioSource")? != "null";
+            // From dump17 on: the SpriteRenderer's local AABB (center, extents).
+            if let Some(b) = r.get("sbounds") {
+                if r.req("sdraw")? != "0,0,0" {
+                    return Err(format!("{}: a sliced, tiled or flipped sprite ({})", r.name, r.req("sdraw")?));
+                }
+                let [cx, cy, cz, ex, ey, ez]: [f32; 6] = floats(b);
+                p.sprite_bounds = Some(([cx, cy, cz], [ex, ey, ez]));
+            }
             if let Some(rs) = &restored {
                 let collider = |k: &String| k.split(':').next()?.rsplit_once('#').filter(|(o, _)| *o == r.name).map(|(_, id)| id.parse::<i32>().unwrap());
                 p.collider = rs.fixtures.keys().find_map(collider).unwrap_or(0);
@@ -488,6 +496,7 @@ impl Game {
             l.StrengthMultipliers = list(r.req("StrengthMultipliers")?).into_iter().map(f).collect();
             l.SpeciesIdentity = r.req("SpeciesIdentity")?.trim_matches('"').into();
             l.BloodLiquidType = r.req("BloodLiquidType")?.trim_matches('"').into();
+            l.BloodDecal = r.req("BloodDecal")?.trim_start_matches('@').split('#').next().unwrap().into();
             if circ_ids.len() != 0 && i >= circ_ids.len() {
                 return Err("limb without circulation".into());
             }
@@ -748,6 +757,7 @@ impl Game {
     pub fn fixed_update_scripts(&mut self) {
         self.run_pending_starts();
         self.tool_fixed_update();
+        self.ambient_grid_fixed_update();
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
                 self.physical_fixed_update(p);
@@ -825,6 +835,8 @@ impl Game {
         self.node_controller_update();
         // Global.Update: UpdateMousePosition (timeScale stays at its target).
         self.MousePosition = self.input.mouse;
+        // The BloodPuff pool (made at runtime: after the scene's behaviours).
+        self.blood_puff_pool_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
         self.gore_string_delayed_calls(true);
@@ -846,14 +858,28 @@ impl Game {
         if self.time.frameCount % 2 == 0 {
             self.chunksUpToDate = false;
         }
-        // SkinMaterialHandler.OnWillRenderObject (every limb is on screen in the recordings); bloodColor is render state.
-        for l in 0..self.limbs.len() {
-            if !self.limb_active(l) {
-                continue;
-            }
-            let blood = super::circulation::liquid_color(super::circulation::liquid(&self.limbs[l].BloodLiquidType));
-            self.get_computed_color(l, blood);
+        self.blood_puff_particles_update();
+    }
+
+    /// The render after LateUpdate: SkinMaterialHandler.OnWillRenderObject of each limb the camera drew, in call
+    /// order (the UE snapshot's `rendered`; before dump17 every limb was on screen). bloodColor is render state.
+    pub fn render_callbacks(&mut self, s: &Snapshot) -> Result<(), String> {
+        let drawn: Vec<usize> = match s.snap.iter().find(|(k, _)| k == "rendered") {
+            Some((_, names)) => names.split(';').filter(|n| !n.is_empty()).map(|n| {
+                self.limbs.iter().position(|l| self.physicals[l.PhysicalBehaviour].name == n).ok_or(format!("rendered: no limb {n}"))
+            }).collect::<Result<_, _>>()?,
+            None => (0..self.limbs.len()).filter(|&l| self.limb_active(l)).collect(),
+        };
+        for l in drawn {
+            self.skin_will_render(l);
         }
+        Ok(())
+    }
+
+    /// SkinMaterialHandler.OnWillRenderObject
+    pub fn skin_will_render(&mut self, l: usize) {
+        let blood = super::circulation::liquid_color(super::circulation::liquid(&self.limbs[l].BloodLiquidType));
+        self.get_computed_color(l, blood);
     }
 }
 
@@ -984,7 +1010,21 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     for (x, r) in g.grips.iter_mut().zip(s.of("GripBehaviour")) {
         check(format!("Grip {}", r.name), x.fields(), r);
     }
-    for (x, r) in g.splats.iter_mut().zip(s.of("FancyBloodSplatController")) {
+    // The recorder's order: the person's hierarchy (each limb's bleeding particles, their extraDecals splats),
+    // then the other splats in creation order.
+    let mut bleeding: Vec<usize> = (0..g.bleeding.len()).filter(|&b| !g.bleeding[b].destroyed).collect();
+    bleeding.sort_by_key(|&b| g.bleeding[b].CirculationBehaviour);
+    let mut splats: Vec<usize> = bleeding.iter().filter_map(|&b| g.bleeding[b].BloodSplatController).collect();
+    splats.extend((0..g.splats.len()).filter(|i| !splats.contains(i)).collect::<Vec<_>>());
+    splats.retain(|&i| !g.splats[i].destroyed);
+    let inactive: Vec<usize> = g.blood_puffs.iter().filter(|b| !(b.active && b.emitter_active)).map(|b| b.splat).collect();
+    for (&i, r) in splats.iter().zip(s.of("FancyBloodSplatController")) {
+        if let Some(a) = r.get("active") {
+            if (a == "1") == inactive.contains(&i) {
+                particles.push(format!("Splat {}.active: game {a}", r.id));
+            }
+        }
+        let x = &mut g.splats[i];
         check(format!("Splat {}", r.id), x.fields(), r);
         let theirs = r.get("particles").unwrap_or("");
         if theirs.contains("free=") {
@@ -999,8 +1039,8 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
             }
         }
     }
-    for (x, r) in g.bleeding.iter_mut().zip(s.of("BleedingParticleBehaviour")) {
-        check(format!("Bleeding {}", r.id), x.fields(), r);
+    for (&b, r) in bleeding.iter().zip(s.of("BleedingParticleBehaviour")) {
+        check(format!("Bleeding {}", r.id), g.bleeding[b].fields(), r);
     }
     for (x, r) in g.people.iter_mut().zip(s.of("PersonBehaviour")) {
         check(format!("Person {}", r.name), x.fields(), r);
@@ -1054,6 +1094,18 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     let w = words(s.snap("random"));
     if g.random.state != [w[0], w[1], w[2], w[3]] {
         out.push(format!("random: game {w:08x?} ours {:08x?}", g.random.state));
+    }
+    // SpriteRenderer.bounds from the sprite's local AABB and our transforms.
+    for r in s.of("PhysicalBehaviour") {
+        let (Some(theirs), Some(p)) = (r.get("rbounds"), g.physicals.iter().position(|x| x.id == r.id)) else { continue };
+        if g.physicals[p].sprite_bounds.is_none() {
+            continue;
+        }
+        let (c, e) = g.sprite_world_bounds(p);
+        let ours = [c, e].concat().iter().map(|v| format!("{:08x}", v.to_bits())).collect::<Vec<_>>().join(",");
+        if theirs != ours {
+            particles.push(format!("{}.bounds: game {theirs} ours {ours}", r.name));
+        }
     }
     out.extend(particles);
     out
@@ -1265,7 +1317,10 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 g.simulate_physics();
                 diffs = compare_physics(&mut g, &prev, &cur)?;
             }
-            ("US", "UE") => g.update_scripts(),
+            ("US", "UE") => {
+                g.update_scripts();
+                g.render_callbacks(&cur)?;
+            }
             // PreUpdate's Physics2DUpdate at the frame's time.
             ("FE", "US") => {
                 let random = g.random.clone();
@@ -1320,6 +1375,7 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
         let mut diffs = Vec::new();
         if update {
             g.update_scripts();
+            g.render_callbacks(&pair[1])?;
         } else if physics {
             g.simulate_physics();
             diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
