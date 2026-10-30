@@ -1585,6 +1585,15 @@ impl Game {
                 }
                 let b = self.tr_new(class, v, inst.objects[o].components[c], *enabled, l.arenas.physical.get(&o).copied(), physics(o))?;
                 translated.insert((o, c), b);
+                if b.has_collision() {
+                    // SendMessage of a collision goes to the GameObject of the PhysicalBehaviour that took it.
+                    let physical = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("{class}: collision messages on a GameObject without a PhysicalBehaviour"));
+                    if l.arenas.limb.contains_key(&o) {
+                        unimplemented!("{class} on a limb: SendMessage order with LimbBehaviour");
+                    }
+                    let after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                    self.tr.collision_scripts.push(super::translated::rt::CollisionScript { physical, index: c, after_physical, b });
+                }
             }
         }
         for (&(o, c), &b) in &translated {
@@ -1623,6 +1632,7 @@ impl Game {
                         None => None,
                         Some(t) => Some(*match arena {
                             "DamagableMachineryBehaviour" => &machinery,
+                            "LimbBehaviour" => &l.arenas.limb,
                             _ => unimplemented!("{class}.{name}: a {arena}"),
                         }.get(&t).ok_or_else(|| format!("{class}.{name}: no {arena} there"))?),
                     }),

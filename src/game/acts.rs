@@ -55,6 +55,7 @@ pub enum CollisionScript {
     ActOnCollide(usize),
     Sticky(usize),
     Bulb(usize),
+    Translated(super::translated::TBehaviour),
 }
 
 impl Game {
@@ -65,12 +66,22 @@ impl Game {
             CollisionScript::ActOnCollide(a) => self.act_on_collide_enter(a, c),
             CollisionScript::Sticky(s) => self.sticky_grenade_collision_enter(s, c),
             CollisionScript::Bulb(b) => self.bulb_on_collision_enter(b, c),
+            CollisionScript::Translated(t) => self.tr_on_collision_enter2d(t, c),
         }
     }
 
     pub(super) fn collision_stay_script(&mut self, s: CollisionScript, c: &ScriptCollision) {
-        if let CollisionScript::Destroyable(x) = s {
-            self.destroyable_on_collision(x, c);
+        match s {
+            CollisionScript::Destroyable(x) => self.destroyable_on_collision(x, c),
+            CollisionScript::Translated(t) => self.tr_on_collision_stay2d(t, c),
+            _ => {}
+        }
+    }
+
+    /// OnCollisionExit2D: of the scripts beside a PhysicalBehaviour, only translated ones take it.
+    pub(super) fn collision_exit_script(&mut self, s: CollisionScript, c: &ScriptCollision) {
+        if let CollisionScript::Translated(t) = s {
+            self.tr_on_collision_exit2d(t, c);
         }
     }
 

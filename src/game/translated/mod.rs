@@ -25,11 +25,14 @@ pub struct Translated {
     pub jack_o_latern_behaviour: Vec<jack_o_latern_behaviour::JackOLaternBehaviour>,
     pub siren_behaviour: Vec<siren_behaviour::SirenBehaviour>,
     pub target_line_renderer: Vec<target_line_renderer::TargetLineRenderer>,
+    /// The components that take collision messages, by the PhysicalBehaviour on their GameObject.
+    pub collision_scripts: Vec<rt::CollisionScript>,
 }
 
 impl Default for Translated {
     fn default() -> Self {
         Self {
+            collision_scripts: Vec::new(),
             cosmetic_rotation_behaviour: Vec::new(),
             disable_when_wet: Vec::new(),
             fan_behaviour: Vec::new(),
@@ -110,6 +113,20 @@ impl TBehaviour {
             TBehaviour::GuideTemperatureBehaviour(_) => false,
             TBehaviour::JackOLaternBehaviour(_) => false,
             TBehaviour::SirenBehaviour(_) => true,
+            TBehaviour::TargetLineRenderer(_) => false,
+        }
+    }
+
+    /// It has OnCollisionEnter2D, OnCollisionStay2D or OnCollisionExit2D.
+    pub fn has_collision(self) -> bool {
+        match self {
+            TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::FanBehaviour(_) => false,
+            TBehaviour::FireSoundEmitter(_) => false,
+            TBehaviour::GuideTemperatureBehaviour(_) => false,
+            TBehaviour::JackOLaternBehaviour(_) => false,
+            TBehaviour::SirenBehaviour(_) => false,
             TBehaviour::TargetLineRenderer(_) => false,
         }
     }
@@ -326,6 +343,30 @@ impl Game {
         }
     }
 
+    pub fn tr_on_collision_enter2d(&mut self, b: TBehaviour, c: &crate::b2::contacts2d::ScriptCollision) {
+        match b {
+            _ => {}
+        }
+    }
+
+    pub fn tr_on_collision_stay2d(&mut self, b: TBehaviour, c: &crate::b2::contacts2d::ScriptCollision) {
+        match b {
+            _ => {}
+        }
+    }
+
+    pub fn tr_on_collision_exit2d(&mut self, b: TBehaviour, c: &crate::b2::contacts2d::ScriptCollision) {
+        match b {
+            _ => {}
+        }
+    }
+
+    pub fn tr_on_fragment_hit(&mut self, b: TBehaviour, fragment_force: f32) {
+        match b {
+            _ => unreachable!("{b:?} has no OnFragmentHit"),
+        }
+    }
+
     pub fn tr_phase(&mut self, phase: Phase, b: TBehaviour) {
         match (phase, b) {
             (Phase::Update, TBehaviour::CosmeticRotationBehaviour(i)) => self.cosmetic_rotation_behaviour_update(i),
@@ -339,4 +380,9 @@ impl Game {
             _ => {}
         }
     }
+}
+
+/// The class has a method for SendMessage/BroadcastMessage `msg` (one the rewrite sends).
+pub fn receives(class: &str, msg: &str) -> bool {
+    matches!((class, msg), ("FanBehaviour", "Use") | ("SirenBehaviour", "Use"))
 }

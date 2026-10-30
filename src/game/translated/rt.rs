@@ -18,6 +18,17 @@ pub enum Xf {
     Collider(i32),
 }
 
+/// A translated component that takes collision messages: its place among the scripts on its PhysicalBehaviour's
+/// GameObject (SendMessage goes in component order).
+#[derive(Clone, Copy, Debug)]
+pub struct CollisionScript {
+    pub physical: usize,
+    /// Its component index on the GameObject, and whether that comes after the PhysicalBehaviour's.
+    pub index: usize,
+    pub after_physical: bool,
+    pub b: super::TBehaviour,
+}
+
 /// Shot, as SendMessage("Shot"/"ExitShot") passes it.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
@@ -204,6 +215,22 @@ impl Game {
             w = crate::unity::transform::global_vector(node, w);
         }
         [w[0], w[1], w[2]]
+    }
+
+    /// Collision2D.rigidbody: the PhysicalBehaviour of the Rigidbody2D (by its instance id), None for none.
+    pub fn tr_rigidbody_physical(&self, rb: Option<i32>) -> Option<usize> {
+        let id = rb?;
+        let w = &self.world;
+        Some(self.physicals.iter().position(|p| p.rigidbody.detached.is_none() && w.body(p.rigidbody.body).user.is_some_and(|u| u.id == id))
+            .unwrap_or_else(|| unimplemented!("Collision2D.rigidbody: a Rigidbody2D without a PhysicalBehaviour")))
+    }
+
+    /// Collision2D.transform: the rigidbody's Transform, else the collider's.
+    pub fn tr_collision_transform(&self, c: &crate::b2::contacts2d::ScriptCollision) -> Xf {
+        match self.tr_rigidbody_physical(c.rigidbody) {
+            Some(p) => Xf::Physical(p),
+            None => Xf::Collider(c.collider),
+        }
     }
 
     /// GameObject.activeInHierarchy

@@ -555,6 +555,7 @@ impl Game {
             if let Some(b) = g.bulbs.iter().position(|b| b.Phys == p && b.after_physical == after) {
                 v.push((g.bulbs[b].index, S::Bulb(b)));
             }
+            v.extend(g.tr.collision_scripts.iter().filter(|s| s.physical == p && s.after_physical == after).map(|s| (s.index, S::Translated(s.b))));
             v.sort_by_key(|&(i, _)| i);
             v
         };
@@ -584,7 +585,15 @@ impl Game {
                     self.collision_stay_script(s, c);
                 }
             }
-            Message::CollisionExit => self.physical_on_collision_exit(p, c),
+            Message::CollisionExit => {
+                for (_, s) in before {
+                    self.collision_exit_script(s, c);
+                }
+                self.physical_on_collision_exit(p, c);
+                for (_, s) in after {
+                    self.collision_exit_script(s, c);
+                }
+            }
             Message::TriggerEnter | Message::TriggerStay | Message::TriggerExit => {}
         }
     }

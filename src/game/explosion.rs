@@ -646,7 +646,10 @@ impl Game {
     /// receivers among the rewritten scripts).
     fn broadcast_on_fragment_hit(&mut self, collider: i32, game_object: i32, force: f32) {
         let Some(p) = self.physical_of_collider(collider) else {
-            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour", "BulbBehaviour"]) {
+            let bare = &self.bare_colliders[&collider];
+            if bare.receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour", "BulbBehaviour"])
+                || bare.scripts.iter().any(|s| super::translated::receives(s, "OnFragmentHit"))
+            {
                 unimplemented!("BroadcastMessage OnFragmentHit to the scripts of a collider without a PhysicalBehaviour");
             }
             return;
@@ -661,7 +664,9 @@ impl Game {
                 }
                 for k in 0..inst.objects[x].components.len() {
                     if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_)) {
+                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_))
+                            || matches!(b, Behaviour::Translated(t) if super::translated::receives(t.class(), "OnFragmentHit"))
+                        {
                             out.push(b);
                         }
                     }
@@ -678,6 +683,7 @@ impl Game {
                 // GlowtubeBehaviour.OnFragmentHit
                 Behaviour::Glowtube(g) => self.glowtube_break(g),
                 Behaviour::Bulb(b) => self.bulb_on_fragment_hit(b),
+                Behaviour::Translated(t) => self.tr_on_fragment_hit(t, force),
                 _ => unreachable!(),
             }
         }
