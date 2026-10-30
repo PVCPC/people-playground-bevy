@@ -28,7 +28,7 @@ script! {
 impl Game {
     /// ResistorBehaviour.Start
     pub fn resistor_behaviour_start(&mut self, this: usize) {
-        self.tr.resistor_behaviour[this].flipped = ((self.tr_lossy_scale(rt::nn(Some(rt::Xf::this(self.tr.resistor_behaviour[this].this_physical, self.tr.resistor_behaviour[this].this_physics))))[0] as f64) < (0.0 as f64));
+        self.tr.resistor_behaviour[this].flipped = (({ let r0 = self.tr_lossy_scale(rt::nn(Some(rt::Xf::this(self.tr.resistor_behaviour[this].this_physical, self.tr.resistor_behaviour[this].this_physics)))); r0[0] } as f64) < (0.0 as f64));
         return;
     }
 
@@ -37,8 +37,8 @@ impl Game {
         let mut num: f32 = 0.0;
         let mut num2: f32 = 0.0;
         let mut num3: f32 = 0.0;
-        num = ((((self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].joint_angle(&self.world) as f64) - (self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits[0] as f64))) as f32);
-        num2 = (((({ let a1 = self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits[0]; (a1).abs() } as f64) + (self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits[1] as f64))) as f32);
+        num = ((((self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].joint_angle(&self.world) as f64) - ({ let r0 = self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits; r0[0] } as f64))) as f32);
+        num2 = (((({ let a3 = { let r1 = self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits; r1[0] }; (a3).abs() } as f64) + ({ let r3 = self.hinges[self.tr_hinge(self.tr.resistor_behaviour[this].HandleJoint)].limits; r3[1] } as f64))) as f32);
         num3 = mathf::clamp01(((((num as f64) / (num2 as f64))) as f32));
         if self.tr.resistor_behaviour[this].flipped {
             self.tr.resistor_behaviour[this].ResistorPower = num3;

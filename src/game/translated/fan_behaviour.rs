@@ -74,7 +74,7 @@ impl Game {
     pub fn fan_behaviour_update(&mut self, this: usize) {
         let mut value: f32 = 0.0;
         if self.tr.fan_behaviour[this].HelicopterAudioSource {
-            value = { let a1 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))))[0]; let a2 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))))[1]; mathf::max(a1, a2) };
+            value = { let a3 = { let r0 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics)))); r0[0] }; let a4 = { let r1 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics)))); r1[1] }; mathf::max(a3, a4) };
             { let _ = mathf::map_range(self.tr.fan_behaviour[this].HelicopterVolumeScaleRange[0], self.tr.fan_behaviour[this].HelicopterVolumeScaleRange[1], 0.0, 1.0, value); rt::pres(self.tr.fan_behaviour[this].HelicopterAudioSource); };
             { let _ = mathf::map_range(self.tr.fan_behaviour[this].HelicopterVolumeScaleRange[0], self.tr.fan_behaviour[this].HelicopterVolumeScaleRange[1], 1.0, 0.20000000298023224, value); rt::pres(self.tr.fan_behaviour[this].Audio); };
         }
@@ -142,11 +142,11 @@ impl Game {
         let mut i: i32 = 0;
         let mut collider2D: i32 = 0;
         let mut value: Option<usize> = None;
-        num = { let a2 = rt::v2({ let a1 = rt::v3(self.tr.fan_behaviour[this].DeathLocalStartPos); self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a1) }); let a3 = [self.tr.fan_behaviour[this].DeathSize[0], self.tr.fan_behaviour[this].DeathSize[1]]; let a4 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))))[2]; let a5 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a2, a3, a4, a5); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
+        num = { let a3 = rt::v2({ let a1 = rt::v3(self.tr.fan_behaviour[this].DeathLocalStartPos); self.tr_transform_point(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a1) }); let a4 = [self.tr.fan_behaviour[this].DeathSize[0], self.tr.fan_behaviour[this].DeathSize[1]]; let a5 = { let r1 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics)))); r1[2] }; let a6 = self.tr.fan_behaviour[this].Mask; { let h = self.tr_overlap_box(a3, a4, a5, a6); rt::fill(&mut self.tr.fan_behaviour__buffer, h) } };
         if (num == 0) {
             return;
         }
-        vector = rt::mul({ let a6 = rt::v3(self.tr.fan_behaviour[this].DeathDirection); self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a6) }, (((((({ let a7 = ((((self.time.time as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64))) as f32); mathf::sin(a7) } as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64)) * (2.0 as f64)) * ((mathf::min(self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge(), 2.0) as f64) + (1.0 as f64)))) as f32));
+        vector = rt::mul({ let a7 = rt::v3(self.tr.fan_behaviour[this].DeathDirection); self.tr_transform_vector(rt::nn(Some(rt::Xf::this(self.tr.fan_behaviour[this].this_physical, self.tr.fan_behaviour[this].this_physics))), a7) }, (((((({ let a8 = ((((self.time.time as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64))) as f32); mathf::sin(a8) } as f64) * (self.cosmetic_rotation_behaviour_get_current_speed(rt::nn(self.tr.fan_behaviour[this].Blades)) as f64)) * (2.0 as f64)) * ((mathf::min(self.physicals[rt::nn(self.tr.fan_behaviour[this].physicalBehaviour)].Charge(), 2.0) as f64) + (1.0 as f64)))) as f32));
         i = 0;
         let mut s1 = 0usize;
         'c1: loop {

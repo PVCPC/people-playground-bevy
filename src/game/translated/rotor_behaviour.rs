@@ -74,7 +74,7 @@ impl Game {
 
     /// RotorBehaviour.GetScaledSpeed
     pub fn rotor_behaviour_get_scaled_speed(&mut self, this: usize) -> f32 {
-        return ((((self.tr.rotor_behaviour[this].Speed as f64) * ((((if !((self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.rotor_behaviour[this].this_physical, self.tr.rotor_behaviour[this].this_physics))))[0] as f64) < (0.0 as f64)) { 1 } else { -1 }) as f64) as f32) as f64))) as f32);
+        return ((((self.tr.rotor_behaviour[this].Speed as f64) * ((((if !(({ let r0 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.rotor_behaviour[this].this_physical, self.tr.rotor_behaviour[this].this_physics)))); r0[0] } as f64) < (0.0 as f64)) { 1 } else { -1 }) as f64) as f32) as f64))) as f32);
     }
 
     /// RotorBehaviour.FixedUpdate

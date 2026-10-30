@@ -344,6 +344,19 @@ impl Game {
         })
     }
 
+    /// Transform.root: the topmost Transform above it (SetParent included).
+    pub fn tr_root(&mut self, xf: Xf) -> Xf {
+        let Xf::Physical(p) = xf else { unimplemented!("Transform.root of a Transform without a PhysicalBehaviour ({xf:?})") };
+        let root = self.with_component_instance(self.physicals[p].transform_id, |_, inst, o| {
+            let mut r = o;
+            while let Some(q) = inst.objects[r].parent {
+                r = q;
+            }
+            inst.objects[r].components[0]
+        });
+        self.tr_go_transform(Go::Local(root))
+    }
+
     /// GameObject.transform
     pub fn tr_go_transform(&mut self, go: Go) -> Xf {
         let id = go.local();

@@ -3,6 +3,7 @@
 
 pub mod rt;
 pub mod adrenaline_liquid;
+pub mod aerial_faith_plate_behaviour;
 pub mod blood;
 pub mod bone_hurting_juice_liquid;
 pub mod coagulation_liquid;
@@ -47,6 +48,7 @@ use crate::game::{Game, Phase};
 /// The translated classes' components, by class.
 #[derive(Clone, Debug)]
 pub struct Translated {
+    pub aerial_faith_plate_behaviour: Vec<aerial_faith_plate_behaviour::AerialFaithPlateBehaviour>,
     pub conveyor_belt_behaviour: Vec<conveyor_belt_behaviour::ConveyorBeltBehaviour>,
     pub cosmetic_rotation_behaviour: Vec<cosmetic_rotation_behaviour::CosmeticRotationBehaviour>,
     pub deformation_behaviour: Vec<deformation_behaviour::DeformationBehaviour>,
@@ -88,6 +90,7 @@ impl Default for Translated {
     fn default() -> Self {
         Self {
             collision_scripts: Vec::new(),
+            aerial_faith_plate_behaviour: Vec::new(),
             conveyor_belt_behaviour: Vec::new(),
             cosmetic_rotation_behaviour: Vec::new(),
             deformation_behaviour: Vec::new(),
@@ -131,6 +134,7 @@ pub const LIQUID_CLASSES: &[&str] = &["AdrenalineLiquid", "Blood", "BoneHurtingJ
 /// A translated component: its class and its index in that class's arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TBehaviour {
+    AerialFaithPlateBehaviour(usize),
     ConveyorBeltBehaviour(usize),
     CosmeticRotationBehaviour(usize),
     DeformationBehaviour(usize),
@@ -150,11 +154,12 @@ pub enum TBehaviour {
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["AerialFaithPlateBehaviour", "ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
         match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => "AerialFaithPlateBehaviour",
             TBehaviour::ConveyorBeltBehaviour(_) => "ConveyorBeltBehaviour",
             TBehaviour::CosmeticRotationBehaviour(_) => "CosmeticRotationBehaviour",
             TBehaviour::DeformationBehaviour(_) => "DeformationBehaviour",
@@ -178,6 +183,7 @@ impl TBehaviour {
     /// It has Update, FixedUpdate or LateUpdate (a behaviour manager list).
     pub fn managed(self) -> bool {
         match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => false,
             TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => true,
             TBehaviour::DeformationBehaviour(_) => false,
@@ -201,6 +207,7 @@ impl TBehaviour {
     /// It has Start.
     pub fn has_start(self) -> bool {
         match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => true,
             TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
@@ -224,6 +231,7 @@ impl TBehaviour {
     /// It has Use (Messages.IUse).
     pub fn has_use(self) -> bool {
         match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => true,
             TBehaviour::ConveyorBeltBehaviour(_) => true,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
@@ -247,6 +255,7 @@ impl TBehaviour {
     /// It has OnCollisionEnter2D, OnCollisionStay2D or OnCollisionExit2D.
     pub fn has_collision(self) -> bool {
         match self {
+            TBehaviour::AerialFaithPlateBehaviour(_) => false,
             TBehaviour::ConveyorBeltBehaviour(_) => false,
             TBehaviour::CosmeticRotationBehaviour(_) => false,
             TBehaviour::DeformationBehaviour(_) => false,
@@ -319,6 +328,7 @@ pub enum LinkVal {
 
 pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
     match class {
+        "AerialFaithPlateBehaviour" => &[("launchJoint", LinkKind::Hinge), ("phys", LinkKind::Physical), ("audio", LinkKind::Present)],
         "ConveyorBeltBehaviour" => &[("WheelJoints", LinkKind::Hinges), ("PhysicalBehaviour", LinkKind::Physical)],
         "CosmeticRotationBehaviour" => &[],
         "DeformationBehaviour" => &[],
@@ -344,6 +354,13 @@ impl Game {
     /// A new component of `class` with its serialized plain fields; the links come after.
     pub fn tr_new(&mut self, class: &str, values: &crate::assets::mono::Value, id: i32, enabled: bool, physical: Option<usize>, physics: bool) -> Result<TBehaviour, String> {
         Ok(match class {
+            "AerialFaithPlateBehaviour" => {
+                let mut x = aerial_faith_plate_behaviour::AerialFaithPlateBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.aerial_faith_plate_behaviour.push(x);
+                TBehaviour::AerialFaithPlateBehaviour(self.tr.aerial_faith_plate_behaviour.len() - 1)
+            }
             "ConveyorBeltBehaviour" => {
                 let mut x = conveyor_belt_behaviour::ConveyorBeltBehaviour::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
@@ -469,6 +486,9 @@ impl Game {
 
     pub fn tr_link(&mut self, b: TBehaviour, field: &str, v: LinkVal) {
         match (b, field, v) {
+            (TBehaviour::AerialFaithPlateBehaviour(i), "launchJoint", LinkVal::Hinge(v)) => self.tr.aerial_faith_plate_behaviour[i].launchJoint = v,
+            (TBehaviour::AerialFaithPlateBehaviour(i), "phys", LinkVal::Physical(v)) => self.tr.aerial_faith_plate_behaviour[i].phys = v,
+            (TBehaviour::AerialFaithPlateBehaviour(i), "audio", LinkVal::Present(v)) => self.tr.aerial_faith_plate_behaviour[i].audio = v,
             (TBehaviour::ConveyorBeltBehaviour(i), "WheelJoints", LinkVal::Hinges(v)) => self.tr.conveyor_belt_behaviour[i].WheelJoints = v,
             (TBehaviour::ConveyorBeltBehaviour(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.conveyor_belt_behaviour[i].PhysicalBehaviour = v,
             (TBehaviour::DisableWhenWet(i), "PhysicalBehaviour", LinkVal::Physical(v)) => self.tr.disable_when_wet[i].PhysicalBehaviour = v,
@@ -514,6 +534,7 @@ impl Game {
     /// Behaviour.enabled.
     pub fn tr_enabled(&self, b: TBehaviour) -> bool {
         match b {
+            TBehaviour::AerialFaithPlateBehaviour(i) => self.tr.aerial_faith_plate_behaviour[i].enabled,
             TBehaviour::ConveyorBeltBehaviour(i) => self.tr.conveyor_belt_behaviour[i].enabled,
             TBehaviour::CosmeticRotationBehaviour(i) => self.tr.cosmetic_rotation_behaviour[i].enabled,
             TBehaviour::DeformationBehaviour(i) => self.tr.deformation_behaviour[i].enabled,
@@ -557,6 +578,7 @@ impl Game {
 
     pub fn tr_start(&mut self, b: TBehaviour) {
         match b {
+            TBehaviour::AerialFaithPlateBehaviour(i) => self.aerial_faith_plate_behaviour_start(i),
             TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_start(i),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_start(i),
             TBehaviour::GyrostabiliserBehaviour(i) => self.gyrostabiliser_behaviour_start(i),
@@ -592,6 +614,7 @@ impl Game {
 
     pub fn tr_use(&mut self, b: TBehaviour, activation: rt::Activation) {
         match b {
+            TBehaviour::AerialFaithPlateBehaviour(i) => self.aerial_faith_plate_behaviour_use(i, activation),
             TBehaviour::ConveyorBeltBehaviour(i) => self.conveyor_belt_behaviour_use(i, activation),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_use(i, activation),
             TBehaviour::GyrostabiliserBehaviour(i) => self.gyrostabiliser_behaviour_use(i, activation),
@@ -802,5 +825,5 @@ impl Game {
 
 /// The class has a method for SendMessage/BroadcastMessage `msg` (one the rewrite sends).
 pub fn receives(class: &str, msg: &str) -> bool {
-    matches!((class, msg), ("ConveyorBeltBehaviour", "Use") | ("FanBehaviour", "Use") | ("GyrostabiliserBehaviour", "Use") | ("HoverboxBehaviour", "Use") | ("IndustrialGyrostabiliserBehaviour", "Use") | ("MotorisedHingeBehaviour", "Use") | ("RotorBehaviour", "Use") | ("SirenBehaviour", "Use"))
+    matches!((class, msg), ("AerialFaithPlateBehaviour", "Use") | ("ConveyorBeltBehaviour", "Use") | ("FanBehaviour", "Use") | ("GyrostabiliserBehaviour", "Use") | ("HoverboxBehaviour", "Use") | ("IndustrialGyrostabiliserBehaviour", "Use") | ("MotorisedHingeBehaviour", "Use") | ("RotorBehaviour", "Use") | ("SirenBehaviour", "Use"))
 }

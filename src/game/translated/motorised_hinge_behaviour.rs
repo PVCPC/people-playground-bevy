@@ -80,7 +80,7 @@ impl Game {
 
     /// MotorisedHingeBehaviour.GetScaledDelta
     pub fn motorised_hinge_behaviour_get_scaled_delta(&mut self, this: usize) -> f32 {
-        return ((((self.tr.motorised_hinge_behaviour[this].Delta as f64) * ((((if ((self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.motorised_hinge_behaviour[this].this_physical, self.tr.motorised_hinge_behaviour[this].this_physics))))[0] as f64) > (0.0 as f64)) { 1 } else { -1 }) as f64) as f32) as f64))) as f32);
+        return ((((self.tr.motorised_hinge_behaviour[this].Delta as f64) * ((((if (({ let r0 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.motorised_hinge_behaviour[this].this_physical, self.tr.motorised_hinge_behaviour[this].this_physics)))); r0[0] } as f64) > (0.0 as f64)) { 1 } else { -1 }) as f64) as f32) as f64))) as f32);
     }
 
     /// MotorisedHingeBehaviour.OnDisable

@@ -50,7 +50,7 @@ impl Game {
                 num2 = ((((self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.mass(&self.world) as f64) / (1.5 as f64))) as f32);
                 num3 = ((((((self.tr.gyrostabiliser_behaviour[this].Intensity as f64) * (mathf::clamp(self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].Charge(), 1.0, 5.0) as f64)) * (num2 as f64)) * (num2 as f64))) as f32);
                 { let v = ((((self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.angular_velocity(&self.world) as f64) * (mathf::pow(0.5, num3) as f64))) as f32); self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.set_angular_velocity(&mut self.world, v); };
-                { let a2 = (((({ let a1 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.gyrostabiliser_behaviour[this].this_physical, self.tr.gyrostabiliser_behaviour[this].this_physics))))[2]; mathf::delta_angle(a1, 0.0) } as f64) * (num3 as f64))) as f32); self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.add_torque(&mut self.world, a2) };
+                { let a3 = (((({ let a2 = { let r0 = self.tr_euler_angles(rt::nn(Some(rt::Xf::this(self.tr.gyrostabiliser_behaviour[this].this_physical, self.tr.gyrostabiliser_behaviour[this].this_physics)))); r0[2] }; mathf::delta_angle(a2, 0.0) } as f64) * (num3 as f64))) as f32); self.physicals[rt::nn(self.tr.gyrostabiliser_behaviour[this].physicalBehaviour)].rigidbody.add_torque(&mut self.world, a3) };
             }
         }
         return;

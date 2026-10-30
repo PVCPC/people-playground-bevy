@@ -119,6 +119,6 @@ impl Game {
 
     /// ConveyorBeltBehaviour.get_FinalSpeed
     pub fn conveyor_belt_behaviour_get_final_speed(&mut self, this: usize) -> f32 {
-        return (((((self.tr.conveyor_belt_behaviour[this].Speed as f64) + ((self.physicals[rt::nn(self.tr.conveyor_belt_behaviour[this].PhysicalBehaviour)].Charge() as f64) * (self.tr.conveyor_belt_behaviour[this].ChargeInfluence as f64))) * (self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.conveyor_belt_behaviour[this].this_physical, self.tr.conveyor_belt_behaviour[this].this_physics))))[0] as f64))) as f32);
+        return (((((self.tr.conveyor_belt_behaviour[this].Speed as f64) + ((self.physicals[rt::nn(self.tr.conveyor_belt_behaviour[this].PhysicalBehaviour)].Charge() as f64) * (self.tr.conveyor_belt_behaviour[this].ChargeInfluence as f64))) * ({ let r0 = self.tr_local_scale(rt::nn(Some(rt::Xf::this(self.tr.conveyor_belt_behaviour[this].this_physical, self.tr.conveyor_belt_behaviour[this].this_physics)))); r0[0] } as f64))) as f32);
     }
 }
