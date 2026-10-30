@@ -14,6 +14,7 @@ pub mod person;
 pub mod physical;
 pub mod shatter;
 pub mod spawn;
+pub mod scene;
 pub mod simulate;
 pub mod stab;
 pub mod temperature;
@@ -359,6 +360,8 @@ pub struct Prefs {
     pub Decals: bool,
     pub ToolSelectionMode: i32,
     pub GridSnap: f32,
+    pub PhysicsIterations: i32,
+    pub ShowTutorial: bool,
 }
 
 /// CollisionQuality.Dynamic
@@ -383,7 +386,59 @@ impl Default for Prefs {
             Decals: true,
             ToolSelectionMode: tool::SELECTION_AREA,
             GridSnap: 0.25,
+            PhysicsIterations: 32,
+            ShowTutorial: true,
         }
+    }
+}
+
+impl Prefs {
+    /// UserPreferenceManager.Load: config.json in the game folder (the working directory), deserialized by
+    /// Newtonsoft over the defaults with unknown members ignored; without the file, the defaults.
+    pub fn load(game: &std::path::Path) -> Prefs {
+        match std::fs::read_to_string(game.join("config.json")) {
+            Ok(text) => Prefs::from_json(&text).unwrap_or_else(|e| unimplemented!("UserPreferenceManager.LoadFromLegacyStorage (config.json: {e})")),
+            Err(_) => Prefs::default(),
+        }
+    }
+
+    /// The members the simulation reads. An enum takes its name or its number (Newtonsoft's StringEnumConverter
+    /// writes names); a value of the wrong type fails the whole file.
+    pub fn from_json(text: &str) -> Result<Prefs, String> {
+        let json: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let obj = json.as_object().ok_or("not an object")?;
+        let mut p = Prefs::default();
+        for (k, v) in obj {
+            let bool = || v.as_bool().ok_or_else(|| format!("{k}: not a bool"));
+            let float = || v.as_f64().map(|x| x as f32).ok_or_else(|| format!("{k}: not a number"));
+            let int = || v.as_i64().and_then(|x| i32::try_from(x).ok()).ok_or_else(|| format!("{k}: not an int"));
+            let enumeration = |names: &[&str]| match v {
+                serde_json::Value::String(s) => names.iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as i32).ok_or_else(|| format!("{k}: no member {s}")),
+                _ => int(),
+            };
+            match k.as_str() {
+                "CollisionQuality" => p.CollisionQuality = enumeration(&["Discrete", "Continuous", "Dynamic"])?,
+                "AmbientTemperatureTransfer" => p.AmbientTemperatureTransfer = bool()?,
+                "BrainDamage" => p.BrainDamage = bool()?,
+                "AutoHealWounds" => p.AutoHealWounds = bool()?,
+                "StopAnimationOnDamage" => p.StopAnimationOnDamage = bool()?,
+                "FragilityMultiplier" => p.FragilityMultiplier = float()?,
+                "LimbCrushing" => p.LimbCrushing = bool()?,
+                "GorelessMode" => p.GorelessMode = bool()?,
+                "DropOnDeath" => p.DropOnDeath = bool()?,
+                "DismembermentLooseTissue" => p.DismembermentLooseTissue = bool()?,
+                "CrushForceMultiplier" => p.CrushForceMultiplier = float()?,
+                "ProceduralFragments" => p.ProceduralFragments = bool()?,
+                "FancyEffects" => p.FancyEffects = bool()?,
+                "Decals" => p.Decals = bool()?,
+                "ToolSelectionMode" => p.ToolSelectionMode = enumeration(&["Area", "Mass"])?,
+                "GridSnap" => p.GridSnap = float()?,
+                "PhysicsIterations" => p.PhysicsIterations = int()?,
+                "ShowTutorial" => p.ShowTutorial = bool()?,
+                _ => {}
+            }
+        }
+        Ok(p)
     }
 }
 
@@ -795,5 +850,18 @@ pub struct Game {
 impl Default for Random {
     fn default() -> Self {
         Random::new(0)
+    }
+}
+
+#[cfg(test)]
+mod prefs_tests {
+    use super::*;
+
+    #[test]
+    fn prefs_from_json() {
+        let p = Prefs::from_json(r#"{"CollisionQuality": "Continuous", "ToolSelectionMode": 1, "PhysicsIterations": 16, "ShowTutorial": false, "GridSnap": 0.5, "Resolution": {"x": 1}}"#).unwrap();
+        assert_eq!((p.CollisionQuality, p.ToolSelectionMode, p.PhysicsIterations, p.ShowTutorial, p.GridSnap), (1, tool::SELECTION_MASS, 16, false, 0.5));
+        assert_eq!(p.FragilityMultiplier, 1.0);
+        assert!(Prefs::from_json(r#"{"LimbCrushing": 1}"#).is_err());
     }
 }
