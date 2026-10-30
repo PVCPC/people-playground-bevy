@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub mod ballistics;
 pub mod circulation;
 pub mod container;
+pub mod coroutine;
 pub mod acts;
 pub mod car;
 pub mod tyre;
@@ -390,6 +391,10 @@ pub struct Time {
     /// one starts at the steady state (the counter at its fixed point 1, the average at the frame's dt).
     pub smoothDeltaTime: f32,
     pub smoothCount: f32,
+    /// TimeManager +0x60: the frame's time (`timeAsDouble` is the fixed step's during FixedUpdate).
+    pub dynamicTimeAsDouble: f64,
+    /// Time.realtimeSinceStartup
+    pub realtimeSinceStartup: f64,
 }
 
 /// UnityEngine.Bounds in the xy plane.
@@ -1275,6 +1280,8 @@ pub struct Game {
     /// Global.BulletCrackClips length.
     pub bullet_crack_clips: usize,
     pub coroutine_seq: u64,
+    /// The translated routines (`coroutine::Routine`) the queues above resume.
+    pub co: coroutine::Coroutines,
     /// The components of destroyed GameObjects (they read null).
     pub destroyed_components: std::collections::HashSet<i32>,
     pub act_on_destroy: HashMap<i32, destroyable::ActOnDestroy>,
@@ -1295,6 +1302,8 @@ pub struct Game {
     pub instantiate_objects: HashMap<i32, (Option<crate::assets::db::ObjRef>, destroyable::InstantiateObject)>,
     /// Object.Destroy calls queued for the delayed-call pass: (time, a component id on the object).
     pub object_destroys: Vec<(f64, i32)>,
+    /// Object.Destroy(component) calls queued for the delayed-call pass: (time, the component's id).
+    pub component_destroys: Vec<(f64, i32)>,
     /// Object.Destroy(FixedJoint2D) calls queued for the delayed-call pass: (time, `fixed_joints` index).
     pub joint_destroys: Vec<(f64, usize)>,
     /// The manager entry of each registered script component (by instance id), for SetActive.

@@ -392,6 +392,8 @@ impl Game {
     /// WaitForEndOfFrame: the coroutines that reached it run on, in the order they got there; one that waits for
     /// the end of a frame again here waits for the next.
     pub fn end_of_frame_calls(&mut self) {
+        // PostLateUpdate.ScriptRunDelayedDynamicFrameRate, before TriggerEndOfFrameCallbacks.
+        self.routines_dynamic_pass();
         for c in std::mem::take(&mut self.end_of_frame) {
             // A coroutine stopped since is gone from the list.
             self.resume_coroutine(c);

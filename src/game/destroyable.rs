@@ -245,6 +245,11 @@ impl Game {
             g.coroutines.retain(|c| !gone.contains(&c.owner));
             g.end_of_frame.retain(|c| !gone.contains(&c.owner));
             g.fixed_update_waits.retain(|c| !gone.contains(&c.owner));
+            for &x in &objects {
+                for &c in &inst.objects[x].components {
+                    g.stop_all_coroutines(c);
+                }
+            }
             g.set_active_scripts(inst, o, false);
             for &x in &objects {
                 let key = inst.objects[x].components[0];
@@ -469,6 +474,7 @@ impl Game {
                 self.start_wait(id, duration, Step::DoAtTimeOnceNext(d, k + 1));
             }
             Step::DoAtTimeOnceNext(d, i) => self.do_at_time_once_next(d, i),
+            Step::Routine(id, _) => self.co_run(id),
         }
     }
 
@@ -521,6 +527,9 @@ pub enum Step {
     SpikeIgnite(usize),
     /// BulbBehaviour.Shot's WaitAFrame after its WaitForSeconds(0.05): the `Game::bulbs` index.
     BulbBreak(usize),
+    /// A translated routine (`coroutine::Routine`) by id, and for a yield null / WaitForSeconds the frame count from
+    /// which DelayedCallManager::Update runs it (kWaitForNextFrame: the frame it was started in + 1; else i64::MIN).
+    Routine(u64, i64),
 }
 
 #[derive(Clone, Debug)]

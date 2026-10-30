@@ -852,6 +852,9 @@ impl Game {
             unscaledDeltaTime: f(s.snap("unscaledDt")),
             smoothDeltaTime: f(s.snap("dt")),
             smoothCount: 1.0,
+            // The recordings lack the frame's time during FixedUpdate: its own.
+            dynamicTimeAsDouble: s.of("Time").next().and_then(|r| r.get("timeAsDouble")).map_or(f(s.snap("time")) as f64, |w| f64::from_bits(u64::from_str_radix(w, 16).unwrap())),
+            realtimeSinceStartup: 0.0,
         };
         // Older recordings lack it: the Default map prefab sets Ambient_temperature 20.
         self.AmbientTemperature = s.snap.iter().find(|(k, _)| k == "ambient").map_or(20.0, |(_, v)| f(v));

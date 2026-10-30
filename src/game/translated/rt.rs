@@ -287,6 +287,63 @@ impl Game {
         })
     }
 
+    /// Object.Destroy(gameObject, t): the GameObject goes at the end of the frame (or after `t`).
+    pub fn tr_destroy_go(&mut self, go: Option<Go>, t: f32) {
+        let go = go.unwrap_or_else(|| unimplemented!("Object.Destroy(null)"));
+        self.destroy_object_after(go.local(), t);
+    }
+
+    /// Object.Destroy(this) of a translated script: it goes at the end of the frame (or after `t`).
+    pub fn tr_destroy_component(&mut self, id: i32, t: f32) {
+        if !self.destroyed_components.contains(&id) && !self.component_destroys.iter().any(|&(_, i)| i == id) {
+            let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble) + t as f64;
+            self.component_destroys.push((at, id));
+        }
+    }
+
+    /// The delayed Destroy of a translated script: RemoveFromManager with OnDisable if it was running, OnDestroy if
+    /// it woke, its coroutines stop, and `(bool)` reads false.
+    pub fn tr_run_component_destroy(&mut self, id: i32) {
+        self.component_destroys.retain(|&(_, i)| i != id);
+        if !self.destroyed_components.insert(id) {
+            return;
+        }
+        self.stop_all_coroutines(id);
+        if let Some((_, b)) = self.behaviour_of.remove(&id) {
+            let super::super::Behaviour::Translated(t) = b else { unreachable!("Destroy(this) of a hand-written script") };
+            let running = self.tr_enabled(t) && self.with_component_instance(id, |_, inst, o| inst.objects[o].active);
+            self.behaviours.remove(b);
+            if running {
+                self.tr_on_disable(t);
+            }
+            self.tr_on_destroy(t);
+        }
+    }
+
+    /// Object.Instantiate(original, position, rotation) of a prefab asset: the clone's Awake/OnEnable run inside.
+    pub fn tr_instantiate(&mut self, original: Option<Go>, position: [f32; 3], rotation: [f32; 4]) -> Option<Go> {
+        let r = match original {
+            Some(Go::Asset(r)) => r,
+            Some(Go::Local(id)) => unimplemented!("Object.Instantiate of a scene GameObject (component {id})"),
+            None => unimplemented!("Object.Instantiate(null) (ArgumentException)"),
+        };
+        let mut db = self.assets.take().expect("Object.Instantiate without the game's data");
+        let spawned = db.prefab(r).and_then(|prefab| self.spawn(&mut db, &prefab, position, rotation, None));
+        self.assets = Some(db);
+        let (inst, _) = spawned.unwrap_or_else(|e| panic!("Object.Instantiate: {e}"));
+        let root = inst.objects[0].components[0];
+        self.unsynced.push(inst);
+        Some(Go::Local(root))
+    }
+
+    /// GetComponent<T>() != null for a MonoBehaviour class T (exactly that class: none of the game's are subclassed).
+    pub fn tr_has_script(&mut self, id: i32, class: &str) -> bool {
+        use crate::assets::db::Component;
+        self.with_component_instance(id, |_, inst, o| {
+            inst.prefab.objects[o].components.iter().any(|(_, c)| matches!(c, Component::Script { class: k, .. } if k == class))
+        })
+    }
+
     /// GameObject.transform
     pub fn tr_go_transform(&mut self, go: Go) -> Xf {
         let id = go.local();

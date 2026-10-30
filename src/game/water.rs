@@ -421,6 +421,7 @@ impl Game {
             self.coroutines.retain(|c| c.owner != id);
             self.end_of_frame.retain(|c| c.owner != id);
             self.fixed_update_waits.retain(|c| c.owner != id);
+            self.stop_all_coroutines(id);
             // Behaviour::RemoveFromManager with the OnDisable.
             if let Some(&(_, b)) = self.behaviour_of.get(&id) {
                 self.behaviours.remove(b);

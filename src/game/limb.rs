@@ -1455,8 +1455,10 @@ impl Game {
         due.extend(self.frozen_in_ice_due_destroys(now).into_iter().map(|(t, i)| (t, 4, i)));
         due.extend(self.object_due_destroys(now).into_iter().map(|(t, id)| (t, 5, id as usize)));
         due.extend(self.joint_due_destroys(now).into_iter().map(|(t, f)| (t, 7, f)));
+        due.extend(self.component_destroys.iter().filter(|&&(at, _)| at <= now).map(|&(t, id)| (t, 8, id as usize)));
         if dynamic {
-            due.extend(self.coroutines.iter().filter(|c| c.at <= now).map(|c| (c.at, 6, c.seq as usize)));
+            let frame = self.time.frameCount as i64;
+            due.extend(self.coroutines.iter().filter(|c| c.at <= now && super::coroutine::frame_reached(c, frame)).map(|c| (c.at, 6, c.seq as usize)));
         }
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
@@ -1466,6 +1468,8 @@ impl Game {
                     let c = self.coroutines.remove(i);
                     self.resume_coroutine(c);
                 }
+            } else if kind == 8 {
+                self.tr_run_component_destroy(l as i32);
             } else if kind == 7 {
                 self.run_joint_destroy(l);
             } else if kind == 5 {

@@ -236,6 +236,10 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         let w = 0.2 / t.smoothCount;
         t.smoothDeltaTime = (1.0 - w) * t.smoothDeltaTime + w * dt;
         let frame_time = t.timeAsDouble + dt as f64;
+        // TimeManager::Update (the first system of the loop): the frame count, the dynamic time and the clock.
+        t.frameCount += 1;
+        t.dynamicTimeAsDouble = frame_time;
+        t.realtimeSinceStartup += real as f64;
         while g.time.fixedTimeAsDouble + g.time.fixedDeltaTime as f64 <= frame_time {
             let t = &mut g.time;
             t.fixedTimeAsDouble += t.fixedDeltaTime as f64;
@@ -246,7 +250,6 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
         }
         let t = &mut g.time;
         (t.timeAsDouble, t.time, t.deltaTime) = (frame_time, frame_time as f32, dt);
-        t.frameCount += 1;
         g.interpolate_bodies();
         g.update_scripts();
         // OnWillRenderObject for the limbs the camera draws: renderer.bounds against the orthographic view (the
