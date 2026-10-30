@@ -187,7 +187,8 @@ impl Game {
         }
         let prefab = prefab.ok_or_else(|| format!("no map {map:?}; the maps are {names:?}"))?;
         let prefab = db.prefab(prefab)?;
-        self.load_map(db, &prefab)?;
+        let (inst, _) = self.load_map(db, &prefab)?;
+        self.unsynced.push(inst);
         Ok(())
     }
 

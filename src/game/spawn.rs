@@ -892,9 +892,20 @@ impl Game {
             if !matches!(j.kind, JointData::Hinge { .. }) {
                 unimplemented!("{}: Joint2D ReCreate for {:?}", prefab.objects[jo].name, j.kind);
             }
+            // ReCreate takes the component's current properties: a linked hinge's, which scripts may have set.
+            let mut j = j.clone();
+            let linked = self.hinges.iter().position(|h| h.joint == Some(id));
+            if let Some(h) = linked {
+                let h = &self.hinges[h];
+                j.kind = JointData::Hinge { use_motor: h.useMotor, motor_speed: h.motor[0], max_motor_torque: h.motor[1], use_limits: h.useLimits, lower: h.limits[0], upper: h.limits[1] };
+                (j.enabled, j.anchor, j.break_force, j.break_torque) = (h.enabled, h.anchor, h.breakForce, h.breakTorque);
+            }
             self.hinge_joint2d_cleanup(inst, jo, jc);
             if inst.objects[jo].active && j.enabled {
-                self.hinge_joint2d_create(inst, prefab, jo, jc, j);
+                self.hinge_joint2d_create(inst, prefab, jo, jc, &j);
+            }
+            if let Some(h) = linked {
+                self.hinges[h].joint = inst.joints.get(&(jo, jc)).copied();
             }
         }
     }

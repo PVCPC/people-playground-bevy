@@ -57,15 +57,19 @@ fn new_game(game: &Path, map: &str, item: Option<&str>) -> Result<Game, String> 
 }
 
 /// --play-test: 30 s of 60 fps frames without a window; prints where each limb ends up. A --play-map-test with
-/// --item spawns the item at the map's center on frame 30.
+/// --item spawns the item at the map's center on frame 30 and a flipped one on frame 60.
 pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
     let mut g = load(start, rig)?;
     for n in 0..1800 {
-        // With a catalog item selected: "spawnRight" released at the map's center on frame 30.
+        // With a catalog item selected: "spawnRight" released at the map's center on frame 30, "spawnLeft" 3 m
+        // to the right on frame 60.
         if g.catalog_selected.is_some() {
-            let up = n == 30;
-            g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: n == 29, held: n == 29, up });
-            g.input.mouse = [g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0];
+            for (key, at, dx) in [("spawnRight", 30, 0.0), ("spawnLeft", 60, 3.0)] {
+                g.input.controls.insert(key.into(), crate::game::tool::Control { down: n == at - 1, held: n == at - 1, up: n == at });
+                if n == at {
+                    g.input.mouse = [g.BoundingBox.center[0] + dx, g.BoundingBox.center[1], 0.0];
+                }
+            }
         }
         if let Err(m) = step(&mut g, 1.0 / 60.0) {
             return Err(format!("frame {n}: {m}"));

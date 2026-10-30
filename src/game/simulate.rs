@@ -48,10 +48,10 @@ fn slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 
 impl Game {
     /// PhysicsManager2D::Simulate after the FixedUpdate scripts.
-    // ponytail: SyncTransforms and the MovePosition/MoveRotation half of SetupMovementStates do nothing here: no
-    // rewritten script moves a Transform or calls MovePosition/MoveRotation. UpdateEffectors waits for the first
-    // Effector2D.
+    // ponytail: the MovePosition/MoveRotation half of SetupMovementStates does nothing here: no rewritten script
+    // calls MovePosition/MoveRotation. UpdateEffectors waits for the first Effector2D.
     pub fn simulate_physics(&mut self) {
+        self.sync_pending();
         let dt = self.time.fixedDeltaTime;
         self.last_simulation = (self.time.fixedTimeAsDouble, dt);
         // SetupMovementStatesJobData::Job (180bf2680): each listed body's last pose becomes the one to interpolate
@@ -124,6 +124,15 @@ impl Game {
         }
     }
 
+    /// PhysicsManager2D::SyncTransforms for the instances with Transform changes, in the order they were made
+    /// (`Instance::sync_transforms` has the cross-hierarchy caveat).
+    pub fn sync_pending(&mut self) {
+        for mut inst in std::mem::take(&mut self.unsynced) {
+            let prefab = inst.prefab.clone();
+            self.sync_transforms(&mut inst, &prefab);
+        }
+    }
+
     /// The physical's Transform ancestors, direct parent first.
     fn parent_chain(&self, p: usize) -> Vec<transform::Trs> {
         let mut chain = Vec::new();
@@ -137,8 +146,8 @@ impl Game {
 
     /// PhysicsManager2D::Update (180bf9980) before the Update scripts: each awake interpolating body's Transform
     /// goes to its pose between the last two physics steps, by how far the frame time is past the last one.
-    // ponytail: SyncTransforms/ClearTransformChanges do nothing here (no rewritten script moves a Transform).
     pub fn interpolate_bodies(&mut self) {
+        self.sync_pending();
         let (last_time, last_delta) = self.last_simulation;
         if last_delta < f32::from_bits(0x34000000) {
             return;

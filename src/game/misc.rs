@@ -1,6 +1,6 @@
 //! The small per-limb scripts: ConnectedNodeBehaviour, SkinMaterialHandler, GForceMeasureBehaviour,
 //! GripBehaviour, BleedingParticleBehaviour and FancyBloodSplatController.
-use super::{d, mathf, script, Game};
+use super::{d, mathf, script, Field, Game};
 
 /// FixedIntervalDistributor
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -227,6 +227,8 @@ script! {
         TriggerOnCollide: bool = false,
     }
     links {
+        /// The DecalDescriptor's name (every splat prefab uses Sparse blood).
+        Decal: String = "Sparse_blood".into(),
         particles: SlotSet<SplatParticle> = SlotSet::default(),
         /// initialParent world position and the controller's own rotation (read live when attached).
         parent_position: [f32; 3] = [0.0, 0.0, 0.0],
@@ -252,28 +254,85 @@ pub struct Decal {
     pub colour: [f32; 4],
 }
 
-/// A DecalDescriptor asset: the fields DecalControllerBehaviour reads (Color is white in both).
-#[derive(Debug)]
+/// A DecalDescriptor asset: the fields DecalControllerBehaviour reads (DripParticle only feeds the drip streaks,
+/// which are not rewritten).
+#[derive(Clone, Debug, PartialEq)]
 pub struct DecalDescriptor {
-    pub name: &'static str,
+    pub name: String,
+    pub Color: [f32; 4],
     pub IgnoreRadius: f32,
     /// Sprites.Length
     pub Sprites: usize,
+    pub MinDripCount: i32,
     pub MaxDripCount: i32,
 }
 
-pub static SPARSE_BLOOD: DecalDescriptor = DecalDescriptor { name: "Sparse blood", IgnoreRadius: 0.2, Sprites: 32, MaxDripCount: 0 };
-pub static DENSE_BLOOD: DecalDescriptor = DecalDescriptor { name: "Dense blood", IgnoreRadius: 0.3, Sprites: 32, MaxDripCount: 0 };
+impl DecalDescriptor {
+    /// The ScriptableObject `name` with its serialized fields.
+    pub fn read(name: &str, v: &crate::assets::mono::Value) -> Result<Self, String> {
+        let get = |n: &str| v.get(n).ok_or_else(|| format!("DecalDescriptor {name}: no {n}"));
+        let mut d = DecalDescriptor { name: name.to_string(), Color: [0.0; 4], IgnoreRadius: 0.0, Sprites: 0, MinDripCount: 0, MaxDripCount: 0 };
+        d.Color.set(get("Color")?)?;
+        d.IgnoreRadius.set(get("IgnoreRadius")?)?;
+        d.Sprites = get("Sprites")?.array().ok_or("DecalDescriptor.Sprites")?.len();
+        d.MinDripCount.set(get("MinDripCount")?)?;
+        d.MaxDripCount.set(get("MaxDripCount")?)?;
+        Ok(d)
+    }
 
-/// The descriptor asset of a recorded reference name ("Dense_blood").
-pub fn decal_descriptor(name: &str) -> &'static DecalDescriptor {
-    [&SPARSE_BLOOD, &DENSE_BLOOD].into_iter().find(|d| d.name.replace(' ', "_") == name).unwrap_or_else(|| unimplemented!("DecalDescriptor {name}"))
+    /// What recordings (which carry no AssetDb) stand for: the two blood descriptors as the game data holds them
+    /// (`decal_descriptors_match_data` compares them).
+    pub fn shipped(name: &str) -> Option<Self> {
+        let (name, radius) = match name.replace(' ', "_").as_str() {
+            "Sparse_blood" => ("Sparse blood", 0.2),
+            "Dense_blood" => ("Dense blood", 0.3),
+            _ => return None,
+        };
+        Some(DecalDescriptor { name: name.into(), Color: [1.0; 4], IgnoreRadius: radius, Sprites: 32, MinDripCount: 0, MaxDripCount: 0 })
+    }
 }
 
-/// A DecalControllerBehaviour: its descriptor and its decals (localDecalPositions with the sprites' data).
+impl Game {
+    /// The arena index of the DecalDescriptor named `name` (a recording writes it with underscores).
+    fn decal_descriptor_index(&self, name: &str) -> Option<usize> {
+        self.decal_descriptors.iter().position(|d| d.name.replace(' ', "_") == name.replace(' ', "_"))
+    }
+
+    /// The DecalDescriptor asset's arena index, loading it on first use (assets are shared by name).
+    pub fn load_decal_descriptor(&mut self, db: &mut crate::assets::db::AssetDb, asset: crate::assets::db::ObjRef) -> Result<usize, String> {
+        let (_, mb, v) = db.mono(asset)?.ok_or("DecalDescriptor is not a MonoBehaviour")?;
+        if let Some(i) = self.decal_descriptor_index(&mb.name) {
+            return Ok(i);
+        }
+        self.decal_descriptors.push(DecalDescriptor::read(&mb.name, &v)?);
+        Ok(self.decal_descriptors.len() - 1)
+    }
+
+    /// A DecalDescriptor by name: already linked, else from the game's data when the Game holds it, else (a
+    /// recording) the shipped table.
+    pub fn decal_descriptor(&mut self, name: &str) -> usize {
+        if let Some(i) = self.decal_descriptor_index(name) {
+            return i;
+        }
+        if let Some(mut db) = self.assets.take() {
+            let found = db.find_scripts("DecalDescriptor").unwrap().into_iter().find(|&r| db.mono(r).unwrap().is_some_and(|(_, mb, _)| mb.name.replace(' ', "_") == name.replace(' ', "_")));
+            let i = found.map(|r| self.load_decal_descriptor(&mut db, r).unwrap());
+            self.assets = Some(db);
+            if let Some(i) = i {
+                return i;
+            }
+        }
+        let Some(d) = DecalDescriptor::shipped(name) else { unimplemented!("DecalDescriptor {name}") };
+        self.decal_descriptors.push(d);
+        self.decal_descriptors.len() - 1
+    }
+}
+
+/// A DecalControllerBehaviour: its descriptor (an index into `Game.decal_descriptors`) and its decals
+/// (localDecalPositions with the sprites' data).
 #[derive(Clone, Debug)]
 pub struct DecalController {
-    pub descriptor: &'static DecalDescriptor,
+    pub descriptor: usize,
     pub decals: Vec<Decal>,
 }
 
@@ -704,6 +763,7 @@ impl Game {
             Size: 0.2,
             DestroyWhenNoParticles: false,
             TriggerOnCollide: false,
+            Decal: "Sparse_blood".into(),
             particles: Default::default(),
             parent_position: [position[0], position[1], 0.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
@@ -820,7 +880,8 @@ impl Game {
             let Some(hit) = self.overlap_point_first(position, mask) else { continue };
             let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| l.PhysicalBehaviour == hit && l.Person == person));
             if colour[3] > 0.05 && !same_root {
-                self.physical_decal(hit, &SPARSE_BLOOD, position, size, colour);
+                let ty = self.decal_descriptor(&self.splats[s].Decal.clone());
+                self.physical_decal(hit, ty, position, size, colour);
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
                 if self.splats[s].TriggerOnCollide {
                     unimplemented!("FancyBloodSplatController.OnCollide");
@@ -908,5 +969,37 @@ impl Game {
         ];
         let n = mathf::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
         [q[0] / n, q[1] / n, q[2] / n, q[3] / n]
+    }
+}
+
+#[cfg(test)]
+mod decal_tests {
+    use super::*;
+    use crate::assets::db::AssetDb;
+
+    /// The shipped table equals the DecalDescriptor assets, and every FancyBloodSplatController in the data
+    /// (prefabs and scenes) uses Sparse blood, the descriptor the splat constructors name.
+    #[test]
+    fn decal_descriptors_match_data() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let mut g = Game::default();
+        let assets = db.find_scripts("DecalDescriptor").unwrap();
+        assert!(!assets.is_empty());
+        for r in assets {
+            let (_, mb, v) = db.mono(r).unwrap().unwrap();
+            let data = DecalDescriptor::read(&mb.name, &v).unwrap();
+            if let Some(shipped) = DecalDescriptor::shipped(&mb.name) {
+                assert_eq!(shipped, data);
+            }
+            let i = g.load_decal_descriptor(&mut db, r).unwrap();
+            assert_eq!(g.decal_descriptors[i], data);
+        }
+        assert!(["Sparse blood", "Dense blood"].iter().all(|n| g.decal_descriptor_index(n).is_some()));
+        for r in db.find_scripts("FancyBloodSplatController").unwrap() {
+            let (_, _, v) = db.mono(r).unwrap().unwrap();
+            let decal = db.resolve(r.file, v.get("Decal").unwrap().pptr().unwrap()).unwrap();
+            assert_eq!(db.mono(decal).unwrap().unwrap().1.name, "Sparse blood");
+        }
     }
 }

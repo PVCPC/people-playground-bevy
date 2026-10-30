@@ -828,6 +828,11 @@ pub struct Game {
     pub vital_parts: std::collections::HashMap<usize, Vec<[f32; 6]>>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
+    /// The DecalDescriptor assets in use (DecalController.descriptor indexes it).
+    pub decal_descriptors: Vec<misc::DecalDescriptor>,
+    /// Instances whose Transform changes (an Awake's or the catalog's scale) wait for Physics2D's next
+    /// SyncTransforms (`sync_pending`); after it nothing moves their Transforms but the bodies.
+    pub unsynced: Vec<spawn::Instance>,
     /// The game's data, for what scripts instantiate at run time (the catalog); None when loaded from a recording.
     pub assets: Option<Box<crate::assets::db::AssetDb>>,
     /// CatalogBehaviour.SelectedItem: the SpawnableAsset's name (the catalog UI is not rewritten).

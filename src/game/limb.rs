@@ -850,7 +850,7 @@ impl Game {
                     let colour = self.get_computed_color(l, fallback);
                     // SendMessage skips an inactive stabber.
                     if self.physicals[stabber].active {
-                        let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                        let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
                         self.physical_decal(stabber, ty, point, 1.0, colour);
                     }
                 }
@@ -985,7 +985,7 @@ impl Game {
                 let fallback = self.original_blood_color(l);
                 let colour = self.get_computed_color(l, fallback);
                 if let Some(other) = self.collision_physical(c) {
-                    let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                    let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
                     self.physical_decal(other, ty, point, 1.0, colour);
                 }
             }
@@ -1036,7 +1036,7 @@ impl Game {
                 let fallback = self.original_blood_color(l);
                 let colour = self.get_computed_color(l, fallback);
                 if let Some(other) = self.collision_physical(c) {
-                    let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                    let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
                     let at = self.physicals[p].transform.position;
                     self.physical_decal(other, ty, [at[0], at[1]], 1.0, colour);
                 }
@@ -1127,6 +1127,7 @@ impl Game {
                     Size: 0.3,
                     DestroyWhenNoParticles: true,
                     TriggerOnCollide: false,
+                    Decal: "Sparse_blood".into(),
                     particles: Default::default(),
                     parent_position: position,
                     rotation: [0.0, 0.0, 0.0, 1.0],

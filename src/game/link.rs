@@ -44,6 +44,12 @@ pub struct Linked {
     pub parent_audio: Option<usize>,
 }
 
+/// The clone's Transform as a physical object's.
+fn pose(inst: &Instance, o: usize) -> Pose {
+    let trs = inst.objects[o].trs;
+    Pose { position: inst.position(o), rotation: inst.rotation(o), localScale: [trs.s[0], trs.s[1], trs.s[2]], local: Some(([trs.t[0], trs.t[1], trs.t[2]], trs.q)) }
+}
+
 fn script<'a>(prefab: &'a Prefab, o: usize, class: &str) -> Option<(usize, bool, &'a Value)> {
     prefab.objects[o].components.iter().enumerate().find_map(|(c, (_, comp))| match comp {
         Component::Script { class: k, enabled, fields, .. } if k == class => Some((c, *enabled, fields)),
@@ -254,13 +260,7 @@ impl Game {
             p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached: None };
             // Rigidbody2D::Create set the scene's m_RigidbodyHierarchyChanged.
             self.rigidbody_hierarchy_changed |= rb.body_type != 2;
-            let trs = inst.objects[o].trs;
-            p.transform = Pose {
-                position: inst.position(o),
-                rotation: inst.rotation(o),
-                localScale: [trs.s[0], trs.s[1], trs.s[2]],
-                local: Some(([trs.t[0], trs.t[1], trs.t[2]], trs.q)),
-            };
+            p.transform = pose(inst, o);
             p.parent = inst.objects[o].parent.map(|t| l.arenas.node[&t]);
             p.LocalColliderGridPoints = Some(array(v, "LocalColliderGridPoints")?.iter().map(floats::<2>).collect::<Result<_, _>>()?);
             // Awake's GetComponent<LocalFirePropagationMap>() and Start's GetComponents<DecalControllerBehaviour>().
@@ -330,7 +330,8 @@ impl Game {
             b.SpeciesIdentity = string(v, "SpeciesIdentity")?;
             b.BloodLiquidType = string(v, "BloodLiquidType")?;
             let decal = db.resolve(file, field(v, "BloodDecal")?.pptr().ok_or("BloodDecal")?).ok_or("LimbBehaviour without a BloodDecal")?;
-            b.BloodDecal = db.mono(decal)?.ok_or("BloodDecal is not a MonoBehaviour")?.1.name;
+            let decal = self.load_decal_descriptor(db, decal)?;
+            b.BloodDecal = self.decal_descriptors[decal].name.clone();
             self.vital_parts.insert(self.limbs.len(), array(v, "VitalParts")?.iter().map(bounds).collect::<Result<_, _>>()?);
             // Awake's GetComponent<GoreStringBehaviour>().
             b.goreString = false;
@@ -503,6 +504,20 @@ impl Game {
         Ok((inst, linked))
     }
 
+    /// The linked objects' Transforms after a script changed the clone's.
+    fn refresh_transforms(&mut self, inst: &Instance, linked: &Linked) {
+        for (&o, &n) in &linked.nodes {
+            self.transform_nodes[n].trs = inst.objects[o].trs;
+        }
+        for (&o, &p) in &linked.physicals {
+            self.physicals[p].transform = pose(inst, o);
+        }
+        if let Some(person) = linked.person {
+            let s = inst.objects[0].trs.s;
+            self.people[person].localScale = [s[0], s[1], s[2]];
+        }
+    }
+
     /// CatalogBehaviour.Update (no pause menu, dialog or UI block; no contraption is ever selected): releasing
     /// "spawnRight" spawns SelectedItem facing right, else releasing "spawnLeft" spawns it flipped.
     pub fn catalog_update(&mut self) {
@@ -516,8 +531,9 @@ impl Game {
         let mut db = self.assets.take().expect("CatalogBehaviour.Update without the game's data");
         let spawned = self.catalog_spawn(&mut db, &item, self.MousePosition, flipped);
         self.assets = Some(db);
-        if let Err(e) = spawned {
-            panic!("CatalogBehaviour.Spawn({item}): {e}");
+        match spawned {
+            Ok((inst, _)) => self.unsynced.push(inst),
+            Err(e) => panic!("CatalogBehaviour.Spawn({item}): {e}"),
         }
     }
 
@@ -539,9 +555,11 @@ impl Game {
             }
         }
         let prefab = db.prefab(prefab.ok_or_else(|| format!("no catalog item {asset:?}"))?)?;
-        let (inst, linked) = self.spawn(db, &prefab, position, [0.0, 0.0, 0.0, 1.0], None)?;
+        let (mut inst, linked) = self.spawn(db, &prefab, position, [0.0, 0.0, 0.0, 1.0], None)?;
         if flipped {
-            unimplemented!("CatalogBehaviour.Spawn flipped: localScale.x *= -1");
+            let s = inst.objects[0].trs.s;
+            inst.set_local_scale(0, [s[0] * -1.0, s[1], s[2]]);
+            self.refresh_transforms(&inst, &linked);
         }
         for _ in 0..4 {
             self.allocate_instance_id();
@@ -606,9 +624,7 @@ impl Game {
                 "PersonBehaviour" => {
                     if let Some(s) = self.person_awake(linked.person.unwrap()) {
                         inst.set_local_scale(0, s);
-                        if let Some(&n) = linked.nodes.get(&0) {
-                            self.transform_nodes[n].trs.s = [s[0], s[1], s[2], 0.0];
-                        }
+                        self.refresh_transforms(&inst, linked);
                     }
                 }
                 "SkinMaterialHandler" => self.skin_awake(limb()),

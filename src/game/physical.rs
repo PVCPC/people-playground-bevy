@@ -868,10 +868,10 @@ impl Game {
     /// SendMessage("Decal", new DecalInstruction(type, position, colour, size)) to a physical object:
     /// PhysicalBehaviour.Decal adds a DecalControllerBehaviour for a new descriptor and calls it, then every
     /// DecalControllerBehaviour on the object receives the message too (the new one finds its decal: IsNearOtherDecal).
-    pub fn physical_decal(&mut self, p: usize, ty: &'static super::misc::DecalDescriptor, position: [f32; 2], size: f32, colour: [f32; 4]) {
+    pub fn physical_decal(&mut self, p: usize, ty: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
         let size = mathf::max(0.05, size);
         let ph = &mut self.physicals[p];
-        if ph.DisplayBloodDecals && self.prefs.Decals && ph.decal_controllers.iter().all(|c| !std::ptr::eq(c.descriptor, ty)) {
+        if ph.DisplayBloodDecals && self.prefs.Decals && ph.decal_controllers.iter().all(|c| c.descriptor != ty) {
             ph.decal_controllers.push(super::misc::DecalController { descriptor: ty, decals: Vec::new() });
             let c = self.physicals[p].decal_controllers.len() - 1;
             self.decal_controller_decal(p, c, ty, position, size, colour);
@@ -882,13 +882,14 @@ impl Game {
     }
 
     /// DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
-    fn decal_controller_decal(&mut self, p: usize, c: usize, ty: &'static super::misc::DecalDescriptor, position: [f32; 2], size: f32, colour: [f32; 4]) {
-        if !self.prefs.Decals || !std::ptr::eq(self.physicals[p].decal_controllers[c].descriptor, ty) {
+    fn decal_controller_decal(&mut self, p: usize, c: usize, ty: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
+        if !self.prefs.Decals || self.physicals[p].decal_controllers[c].descriptor != ty {
             return;
         }
         let local = self.inverse_transform_point(p, [position[0], position[1], 0.0]);
         let local = [local[0], local[1]];
         // IsNearOtherDecal
+        let ty = self.decal_descriptors[ty].clone();
         let radius = ty.IgnoreRadius * ty.IgnoreRadius;
         let at = self.transform_point3(p, [local[0], local[1], 0.0]);
         let near = self.physicals[p].decal_controllers[c].decals.iter().any(|decal| {
@@ -900,9 +901,9 @@ impl Game {
             return;
         }
         let size = size * self.random.range(1.0, 1.2);
-        // Sprites.PickRandom(); Color (white) times the instruction's multiplier.
+        // Sprites.PickRandom(); Color times the instruction's multiplier.
         let sprite = self.pick_random(ty.Sprites).unwrap();
-        let mut colour = colour;
+        let mut colour = [ty.Color[0] * colour[0], ty.Color[1] * colour[1], ty.Color[2] * colour[2], ty.Color[3] * colour[3]];
         if self.prefs.GorelessMode {
             colour = super::circulation::change_red_to_orange(colour);
         }

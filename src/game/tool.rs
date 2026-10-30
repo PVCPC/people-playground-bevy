@@ -191,6 +191,9 @@ impl Game {
     /// The overlap queries' shared filter: sensors skipped (QueriesHitTriggers off), the layer mask, the depth
     /// range on the Transform's z, each collider once, then a stable sort by z.
     fn overlap_query(&self, fixtures: Vec<crate::b2::world::FixtureId>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, &crate::b2::math::Transform) -> bool) -> Vec<usize> {
+        if !self.unsynced.is_empty() {
+            unimplemented!("Physics2D auto SyncTransforms before a query");
+        }
         let mut hits: Vec<(usize, i32)> = Vec::new();
         for f in fixtures {
             let fx = self.world.fixture(f);

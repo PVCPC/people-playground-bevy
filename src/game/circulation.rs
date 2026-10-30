@@ -662,6 +662,7 @@ impl Game {
                 Size: 0.1,
                 DestroyWhenNoParticles: true,
                 TriggerOnCollide: false,
+                Decal: "Sparse_blood".into(),
                 particles: Default::default(),
                 parent_position: [0.0; 3],
                 rotation: [0.0, 0.0, 0.0, 1.0],
