@@ -46,7 +46,7 @@ script! {
 }
 
 /// BloodContainer's subclasses.
-const BLOOD_CONTAINERS: &[&str] = &[
+pub(super) const BLOOD_CONTAINERS: &[&str] = &[
     "BloodTankBehaviour", "CentrifugeBehaviour", "CirculationBehaviour", "FlaskBehaviour", "GasTankBehaviour", "InspectorLiquidContainer",
     "LiquidCanisterBehaviour", "LiquidDuplicatorBehaviour", "LiquidFilterBehaviour", "LiquidOutletBehaviour", "LiquidPumpBehaviour",
     "LiquidentifierBehaviour", "ReactorConduitBehaviour", "SyringeBehaviour", "ValveBehaviour",
@@ -137,6 +137,8 @@ impl Game {
             Owner::Circulation(l)
         } else if let Some(t) = self.flasks.iter().position(|x| x.Phys == Some(q)) {
             Owner::Flask(t)
+        } else if let Some(t) = self.syringes.iter().position(|x| x.Phys == q) {
+            Owner::Syringe(t)
         } else {
             let other = self.with_component_instance(self.physicals[q].id, |_, inst, o| {
                 inst.prefab.objects[o].components.iter().find_map(|(_, c)| match c {

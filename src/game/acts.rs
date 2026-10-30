@@ -76,6 +76,10 @@ pub enum CollisionScript {
     ActOnCollide(usize),
     Sticky(usize),
     Bulb(usize),
+    Soap(usize),
+    PowerHammer(usize),
+    /// BalloonBehaviour: OnCollisionStay2D only.
+    Balloon(usize),
     Translated(super::translated::TBehaviour),
 }
 
@@ -87,6 +91,9 @@ impl Game {
             CollisionScript::ActOnCollide(a) => self.act_on_collide_enter(a, c),
             CollisionScript::Sticky(s) => self.sticky_grenade_collision_enter(s, c),
             CollisionScript::Bulb(b) => self.bulb_on_collision_enter(b, c),
+            CollisionScript::Soap(s) => self.soap_on_collision_enter(s, c),
+            CollisionScript::PowerHammer(h) => self.power_hammer_on_collision_enter(h, c),
+            CollisionScript::Balloon(_) => {}
             CollisionScript::Translated(t) => self.tr_on_collision_enter2d(t, c),
         }
     }
@@ -94,6 +101,8 @@ impl Game {
     pub(super) fn collision_stay_script(&mut self, s: CollisionScript, c: &ScriptCollision) {
         match s {
             CollisionScript::Destroyable(x) => self.destroyable_on_collision(x, c),
+            CollisionScript::Soap(s) => self.soap_on_collision_stay(s, c),
+            CollisionScript::Balloon(b) => self.balloon_on_collision_stay(b, c),
             CollisionScript::Translated(t) => self.tr_on_collision_stay2d(t, c),
             _ => {}
         }

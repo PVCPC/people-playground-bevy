@@ -234,7 +234,7 @@ impl Game {
         let point = [closest.x, closest.y];
         let stabbing = Stabbing { stabber: p, victim, normal: [contact.normal.x, contact.normal.y], point };
         self.send_stabbed(stabbing);
-        self.send_lodged(p);
+        self.send_lodged(p, stabbing);
         let local = self.inverse_transform_point(victim, [point[0], point[1], 0.0]);
         self.penetration_arena[pen].CurrentConnectedAnchor = [local[0], local[1]];
         self.do_stab(p, victim, axis, pen);
@@ -356,7 +356,7 @@ impl Game {
 
     /// PhysicalBehaviour.DestroyStabJoint
     pub fn destroy_stab_joint(&mut self, pen: usize) {
-        self.send_dislodged(self.penetration_arena[pen].Stabber);
+        self.send_dislodged(pen);
         if self.penetration_victim_alive(pen) {
             let (stabber, victim) = (self.penetration_arena[pen].Stabber, self.penetration_arena[pen].Victim.unwrap());
             let point = self.penetration_point(pen);
@@ -502,16 +502,24 @@ impl Game {
 
     /// gameObject.SendMessage("Lodged", stabbing): ExcaliburBehaviour, OldSyringeBehaviour and SyringeBehaviour are the
     /// only receivers; an item without one (Knife, Sword) does nothing.
-    fn send_lodged(&self, p: usize) {
+    fn send_lodged(&mut self, p: usize, stabbing: Stabbing) {
         if self.physicals[p].active && !self.physicals[p].lodge_receiver.is_empty() {
+            let r = &self.physicals[p].lodge_receiver;
+            if !r.starts_with("Old") && super::syringe::is_syringe(r) {
+                let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
+                self.syringe_lodged(s, stabbing.victim);
+                return;
+            }
             unimplemented!("{}.Lodged", self.physicals[p].lodge_receiver);
         }
     }
 
     /// gameObject.SendMessage("Dislodged", penetration): SyringeBehaviour is the only receiver.
-    fn send_dislodged(&self, p: usize) {
+    fn send_dislodged(&mut self, pen: usize) {
+        let p = self.penetration_arena[pen].Stabber;
         if self.physicals[p].active && { let r = &self.physicals[p].lodge_receiver; r.contains("Syringe") && !r.starts_with("Old") } {
-            unimplemented!("{}.Dislodged", self.physicals[p].lodge_receiver);
+            let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
+            self.syringe_dislodged(s, pen);
         }
     }
 
@@ -524,6 +532,10 @@ impl Game {
         // PhysicalBehaviour.Stabbed: the stab sound's random pick; the playback is audio.
         if let Some(n) = self.properties[self.physicals[s.victim].Properties].StabSound.filter(|&n| n != 0) {
             self.pick_random(n);
+        }
+        // BalloonBehaviour.Stabbed: Pop.
+        if let Some(b) = self.balloons.iter().position(|x| x.physical == Some(s.victim)) {
+            self.balloon_pop(b);
         }
         if let Some(m) = self.machinery.iter().position(|m| m.PhysicalBehaviour == s.victim) {
             self.machinery_stabbed(m, s.stabber);

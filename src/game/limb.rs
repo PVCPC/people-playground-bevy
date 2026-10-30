@@ -88,6 +88,8 @@ script! {
         BloodLiquidType: String = "BLOOD".into(),
         /// The BloodDecal DecalDescriptor's name.
         BloodDecal: String = "Dense_blood".into(),
+        /// LimbBehaviour.Color (the sprite's colour, white from Awake); only the Ultra strength serum reads it.
+        Color: [f32; 4] = [1.0, 1.0, 1.0, 1.0],
         enabled: bool = true,
         /// The GoreStringBehaviour component: present, enabled and its `Joint` (a SpringJoint2D).
         goreString: bool = true,

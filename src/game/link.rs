@@ -78,6 +78,15 @@ pub struct Linked {
     pub pistons: HashMap<usize, usize>,
     pub flamethrowers: HashMap<usize, usize>,
     pub rockets: HashMap<usize, usize>,
+    pub airfoils: HashMap<usize, usize>,
+    pub stunners: HashMap<usize, usize>,
+    pub soaps: HashMap<usize, usize>,
+    pub power_hammers: HashMap<usize, usize>,
+    pub balloons: HashMap<usize, usize>,
+    pub syringes: HashMap<usize, usize>,
+    pub jet_engines: HashMap<usize, usize>,
+    pub signal_converters: HashMap<usize, usize>,
+    pub syringe_explosions: HashMap<usize, usize>,
     pub point_liquids: HashMap<usize, usize>,
     pub act_on_collides: HashMap<usize, usize>,
     pub spawners: HashMap<usize, usize>,
@@ -308,6 +317,8 @@ pub enum EventCall {
     SetUseEventEnabled(i32, bool),
     /// Behaviour.set_enabled(false) on a DamagableMachineryBehaviour.
     DisableMachinery(i32),
+    /// JetEngineBehaviour.ForceShutoff by its component id.
+    JetForceShutoff(i32),
     WakeUp(i32),
     AddTorque(i32, f32),
 }
@@ -353,6 +364,7 @@ fn try_event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance,
                 ("InstantiateObjectBehaviour", "Instantiate") => Some(EventCall::Instantiate(inst.objects[o].components[c])),
                 ("PhysicalBehaviour", "HaltNextPropagation") => Some(EventCall::HaltNextPropagation(inst.objects[o].components[c])),
                 ("DamagableMachineryBehaviour", "set_enabled") if on == Some(false) => Some(EventCall::DisableMachinery(inst.objects[o].components[c])),
+                ("JetEngineBehaviour", "ForceShutoff") => Some(EventCall::JetForceShutoff(inst.objects[o].components[c])),
                 ("UseEventTrigger", "set_enabled") if on.is_some() => Some(EventCall::SetUseEventEnabled(inst.objects[o].components[c], on.unwrap())),
                 ("DeleteAfterTime", "set_enabled") if on == Some(true) => Some(EventCall::EnableDeleteAfter(inst.objects[o].components[c])),
                 ("RandomForceAtStart", "set_enabled") if on == Some(true) => {
@@ -469,7 +481,13 @@ pub(super) fn check_rewritten(class: &str) {
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
         | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
-        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" | "LaunchedRocketBehaviour" => {}
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" | "LaunchedRocketBehaviour"
+        // Airfoil's Awake, Start and FixedUpdate are rewritten (airfoil.rs; its context menu buttons are UI). Stunner's Update is (stunner.rs).
+        | "AirfoilBehaviour" | "StunnerBehaviour" | "SoapBehaviour" | "PowerHammerBehaviour" | "BalloonBehaviour" => {}
+        // jet_engine.rs: Awake caches components and clears the plasma colour (rendering).
+        "JetEngineBehaviour" => {}
+        // syringe.rs: Awake and OnWillRenderObject are rendering, Start's AddButtons is UI.
+        c if super::syringe::is_syringe(c) || c == "SyringeExplosionBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
         // SmoothLineControllerBehaviour only sets LineRenderer positions and width.
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
@@ -1135,6 +1153,7 @@ impl Game {
         let (mut act_on_collides, mut point_to_velocities, mut cars, mut tyres, mut flasks, mut truck_doors) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut glowtubes, mut leds, mut detectors, mut sticky_grenades) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let mut liquid_containers = HashMap::new();
+        let (mut syringes, mut syringe_explosions) = (HashMap::new(), HashMap::new());
         let mut point_liquids = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "LiquidContainerController") {
@@ -1292,6 +1311,31 @@ impl Game {
                 flasks.insert(o, self.flasks.len());
                 self.flasks.push(x);
             }
+            if let Some((class, (c, _, v))) = super::syringe::CLASSES.iter().find_map(|k| script(prefab, o, k).map(|x| (*k, x))) {
+                let mut x = super::syringe::Syringe::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                if !presentation_event(prefab, file, field(v, "OnDistributionChange")?) {
+                    unimplemented!("BloodContainer.OnDistributionChange: a persistent call beyond audio and particles");
+                }
+                x.Phys = *l.arenas.physical.get(&o).ok_or("SyringeBehaviour without a PhysicalBehaviour")?;
+                x.liquid = super::syringe::liquid_id(class).map(super::circulation::liquid);
+                x.pink = class == "PinkSyringe";
+                // SendMessage("Lodged"/"Dislodged") from a stab (stab.rs) finds the receiver by this class.
+                self.physicals[x.Phys].lodge_receiver = class.to_string();
+                if x.pink {
+                    super::Field::set(&mut x.Fingerprint, field(v, "Fingerprint")?)?;
+                }
+                syringes.insert(o, self.syringes.len());
+                self.syringes.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "SyringeExplosionBehaviour") {
+                let mut x = super::syringe::SyringeExplosion::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                syringe_explosions.insert(o, self.syringe_explosions.len());
+                self.syringe_explosions.push(x);
+            }
             if let Some((_, _, v)) = script(prefab, o, "PointLiquidTransferBehaviour") {
                 let mut x = super::flask::PointLiquidTransfer::default();
                 load_values(x.fields(), v)?;
@@ -1354,8 +1398,22 @@ impl Game {
             load_values(m.fields(), v)?;
             m.PhysicalBehaviour = *l.arenas.physical.get(&o).ok_or("DamagableMachineryBehaviour without a PhysicalBehaviour")?;
             // SparkPrefab, else Resources.Load("Prefabs/BrokenElectronicsSpark").
-            m.SparkPrefab = l.object(field(v, "SparkPrefab")?)?.is_some() || db.resource("Prefabs/BrokenElectronicsSpark", 1)?.is_some();
-            m.ExplosionPrefab = !field(v, "ExplosionPrefab")?.pptr().ok_or("ExplosionPrefab")?.is_null();
+            let spark = field(v, "SparkPrefab")?.pptr().ok_or("SparkPrefab")?;
+            if spark.is_null() {
+                m.SparkPrefab = db.resource("Prefabs/BrokenElectronicsSpark", 1)?.is_some();
+            } else {
+                if spark.file == 0 {
+                    unimplemented!("DamagableMachineryBehaviour.SparkPrefab: a scene object inside the prefab");
+                }
+                m.SparkPrefab = true;
+                m.SparkPrefabSource = Some(db.resolve(file, spark).ok_or("DamagableMachineryBehaviour.SparkPrefab outside the data")?);
+            }
+            let explosion_prefab = field(v, "ExplosionPrefab")?.pptr().ok_or("ExplosionPrefab")?;
+            m.ExplosionPrefab = !explosion_prefab.is_null();
+            if m.ExplosionPrefab {
+                m.ExplosionPrefabSource = Some(db.resolve(file, explosion_prefab).ok_or("DamagableMachineryBehaviour.ExplosionPrefab outside the data")?);
+            }
+            m.Explosion = explosion_parameters(field(v, "Explosion")?)?;
             for b in array(v, "BehavioursToToggle")? {
                 if let Some(t) = b.pptr().filter(|p| !p.is_null()) {
                     let (to, tc) = prefab.index[&ObjRef { file, path_id: t.path_id }];
@@ -1379,6 +1437,11 @@ impl Game {
             machinery.insert(o, self.machinery.len());
             self.machinery.push(m);
         }
+        let mut airfoils = HashMap::new();
+        let mut stunners = HashMap::new();
+        let mut soaps = HashMap::new();
+        let mut power_hammers = HashMap::new();
+        let mut balloons = HashMap::new();
         let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers, mut rockets) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
@@ -1535,6 +1598,107 @@ impl Game {
                 x.Explosion = Some(explosion_parameters(field(v, "Explosion")?)?);
                 rockets.insert(o, self.rockets.len());
                 self.rockets.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "AirfoilBehaviour") {
+                let mut x = super::airfoil::Airfoil::default();
+                x.id = inst.objects[o].components[c];
+                x.PhysicalBehaviour = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("AirfoilBehaviour.PhysicalBehaviour is null")?;
+                // SpriteRenderer: the renderer on the same object, which the physical's sprite is (SetWingType swaps it).
+                let file = prefab.objects[o].game_object.file;
+                let sr = field(v, "SpriteRenderer")?.pptr().filter(|p| !p.is_null()).ok_or("AirfoilBehaviour.SpriteRenderer is null")?;
+                let (so, sc) = prefab.index[&ObjRef { file, path_id: sr.path_id }];
+                if so != o {
+                    unimplemented!("AirfoilBehaviour.SpriteRenderer on another object");
+                }
+                let r = match &prefab.objects[o].components[sc].1 {
+                    Component::SpriteRenderer(r) => r,
+                    _ => return Err("AirfoilBehaviour.SpriteRenderer is not a SpriteRenderer".into()),
+                };
+                for w in array(v, "WingTypes")? {
+                    let sprite = match field(w, "Sprite")?.pptr().ok_or("AirfoilBehaviour.WingType.Sprite")? {
+                        p if p.is_null() => None,
+                        p => {
+                            let s = db.resolve(file, p).unwrap_or_else(|| unimplemented!("AirfoilBehaviour.WingType: a Sprite outside the data"));
+                            Some((s, renderer_bounds(&Sprite::read(db.data(s))?, r)))
+                        }
+                    };
+                    x.WingTypes.push(super::airfoil::WingType {
+                        Name: string(w, "Name")?,
+                        Sprite: sprite,
+                        Lifts: field(w, "Lifts")?.bool().ok_or("AirfoilBehaviour.WingType.Lifts")?,
+                        LiftMultiplier: float(w, "LiftMultiplier")?,
+                        DragMultiplier: float(w, "DragMultiplier")?,
+                    });
+                }
+                // A serialised CurrentWingType that lifts or drags would act in FixedUpdate before Start replaces it.
+                let current = field(v, "CurrentWingType")?;
+                if field(current, "Lifts")?.bool() != Some(false) || float(current, "DragMultiplier")? != 0.0 {
+                    unimplemented!("AirfoilBehaviour: a serialised CurrentWingType that lifts or drags");
+                }
+                x.CurrentWingTypeName = string(v, "CurrentWingTypeName")?;
+                airfoils.insert(o, self.airfoils.len());
+                self.airfoils.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "StunnerBehaviour") {
+                let mut x = super::stunner::Stunner::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.mask = field(field(v, "mask")?, "m_Bits")?.i64().ok_or("StunnerBehaviour.mask.m_Bits")? as u32;
+                let file = prefab.objects[o].game_object.file;
+                let impact = field(v, "ImpactEffect")?.pptr().ok_or("StunnerBehaviour.ImpactEffect")?;
+                if impact.is_null() {
+                    unimplemented!("StunnerBehaviour: Instantiate(null ImpactEffect) (ArgumentException)");
+                }
+                x.ImpactEffect = Some(db.resolve(file, impact).ok_or("StunnerBehaviour.ImpactEffect outside the data")?);
+                stunners.insert(o, self.stunners.len());
+                self.stunners.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "SoapBehaviour") {
+                let mut x = super::soap::Soap::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.physical = l.arenas.physical.get(&o).copied();
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                soaps.insert(o, self.soaps.len());
+                self.soaps.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "PowerHammerBehaviour") {
+                let mut x = super::power_hammer::PowerHammer::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.physical = l.arenas.physical.get(&o).copied();
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                // powerImpactCollider: a Collider2D of the prefab (possibly on another object), its instance id.
+                let file = prefab.objects[o].game_object.file;
+                x.powerImpactCollider = match field(v, "powerImpactCollider")?.pptr().filter(|p| !p.is_null()) {
+                    None => None,
+                    Some(p) => {
+                        let (co, cc) = prefab.index[&ObjRef { file, path_id: p.path_id }];
+                        Some(inst.objects[co].components[cc])
+                    }
+                };
+                x.PhysicalBehaviour = l.in_arena(field(v, "physicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("PowerHammerBehaviour.physicalBehaviour is null")?;
+                x.ImpactClipCount = array(v, "ImpactClips")?.len();
+                let effect = field(v, "HammerEffectPrefab")?.pptr().ok_or("HammerEffectPrefab")?;
+                x.HammerEffectPrefab = if effect.is_null() { None } else { Some(db.resolve(file, effect).ok_or("PowerHammerBehaviour.HammerEffectPrefab outside the data")?) };
+                x.LayersToConsider = field(field(v, "LayersToConsider")?, "m_Bits")?.i64().ok_or("LayersToConsider.m_Bits")? as u32;
+                power_hammers.insert(o, self.power_hammers.len());
+                self.power_hammers.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "BalloonBehaviour") {
+                let mut x = super::balloon::Balloon::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.PhysicalBehaviour = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("BalloonBehaviour.PhysicalBehaviour is null")?;
+                x.physical = l.arenas.physical.get(&o).copied();
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                let effect = l.object(field(v, "PoppedEffect")?)?.ok_or("BalloonBehaviour.PoppedEffect is null")?;
+                x.PoppedEffect = inst.objects[effect].components[0];
+                balloons.insert(o, self.balloons.len());
+                self.balloons.push(x);
             }
         }
         let mut fire_maps = HashMap::new();
@@ -1849,7 +2013,46 @@ impl Game {
                 self.tr_link(b, name, val);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        // The classes that read the translated behaviours: JetEngineBehaviour toggles its GuideTemperatureBehaviour.
+        let mut jet_engines = HashMap::new();
+        let mut signal_converters = HashMap::new();
+        for o in 0..n {
+            if let Some((c, _, v)) = script(prefab, o, "JetEngineBehaviour") {
+                let mut x = super::jet_engine::JetEngine::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.PhysicalBehaviour = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("JetEngineBehaviour.PhysicalBehaviour is null")?;
+                let m = l.object(field(v, "DamagableMachinery")?)?.ok_or("JetEngineBehaviour.DamagableMachinery is null")?;
+                x.DamagableMachinery = *machinery.get(&m).ok_or("JetEngineBehaviour: no DamagableMachineryBehaviour on its object")?;
+                let effector = |name: &str| -> Result<(usize, usize), String> {
+                    let pp = field(v, name)?.pptr().ok_or_else(|| name.to_string())?;
+                    prefab.index.get(&ObjRef { file, path_id: pp.path_id }).copied().filter(|_| !pp.is_null() && pp.file == 0).ok_or_else(|| format!("JetEngineBehaviour.{name} outside the prefab or null"))
+                };
+                let (io, ic) = effector("IntakeEffector")?;
+                let (eo, ec) = effector("ExhaustEffector")?;
+                for (name, k) in [("IntakeEffector", (io, ic)), ("ExhaustEffector", (eo, ec))] {
+                    if !matches!(prefab.objects[k.0].components[k.1].1, Component::PointEffector2D(_)) {
+                        return Err(format!("JetEngineBehaviour.{name} is not a PointEffector2D"));
+                    }
+                }
+                x.IntakeEffector = inst.objects[io].components[ic];
+                x.ExhaustEffector = inst.objects[eo].components[ec];
+                // exhaustEffectorCollider = ExhaustEffector.GetComponent<Collider2D>(): the first one.
+                let collider = prefab.objects[eo].components.iter().position(|(_, k)| matches!(k, Component::Collider2D(_))).ok_or("JetEngineBehaviour: the ExhaustEffector has no Collider2D")?;
+                x.exhaustEffectorCollider = inst.fixtures.get(&(eo, collider)).cloned().unwrap_or_default();
+                x.guideTemperatureBehaviour = translated.iter().find(|((to, tc), _)| *to == o && matches!(&prefab.objects[*to].components[*tc].1, Component::Script { class, .. } if class == "GuideTemperatureBehaviour")).map(|(_, &b)| b);
+                jet_engines.insert(o, self.jet_engines.len());
+                self.jet_engines.push(x);
+            }
+            if let Some((_, _, v)) = script(prefab, o, "SignalConverterBehaviour") {
+                let mut x = super::signal_converter::SignalConverter::default();
+                load_values(x.fields(), v)?;
+                x.wired = script(prefab, o, "UseWireBehaviour").is_some();
+                signal_converters.insert(o, self.signal_converters.len());
+                self.signal_converters.push(x);
+            }
+        }
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, syringes, jet_engines, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -1944,6 +2147,8 @@ impl Game {
                 let m = self.machinery.iter().position(|m| m.id == id).expect("a DamagableMachineryBehaviour in the arena");
                 self.behaviours.remove(Behaviour::Machinery(m));
             }
+            EventCall::JetForceShutoff(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::JetForceShutoff(id) => self.jet_engine_force_shutoff(id),
             EventCall::SetUseEventEnabled(id, _) if self.destroyed_components.contains(&id) => {}
             EventCall::SetUseEventEnabled(id, on) => self.use_events.get_mut(&id).expect("a UseEventTrigger in the arena").enabled = on,
         }
@@ -2250,6 +2455,7 @@ impl Game {
                 }
                 "GearBehaviour" => self.gear_awake(inst.objects[o].components[c]),
                 "LaunchedRocketBehaviour" => self.rocket_awake(linked.rockets[&o]),
+                "AirfoilBehaviour" => self.airfoil_awake(linked.airfoils[&o]),
                 "DestroyWhenAllChildrenDestroyed" => {
                     let Component::Script { fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
                     let file = prefab.objects[o].game_object.file;
@@ -2374,6 +2580,12 @@ impl Game {
                 "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
                 "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
                 "LaunchedRocketBehaviour" => Some(Behaviour::Rocket(linked.rockets[&o])),
+                "AirfoilBehaviour" => Some(Behaviour::Airfoil(linked.airfoils[&o])),
+                "StunnerBehaviour" => Some(Behaviour::Stunner(linked.stunners[&o])),
+                "BalloonBehaviour" => Some(Behaviour::Balloon(linked.balloons[&o])),
+                "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
+                "SignalConverterBehaviour" => Some(Behaviour::SignalConverter(linked.signal_converters[&o])),
+                c if super::syringe::is_syringe(c) => Some(Behaviour::Syringe(linked.syringes[&o])),
                 "PointLiquidTransferBehaviour" => Some(Behaviour::PointLiquid(linked.point_liquids[&o])),
                 name if super::translated::CLASSES.contains(&name) => Some(Behaviour::Translated(linked.translated[&(o, c)])),
                 _ => None,
@@ -2518,6 +2730,8 @@ impl Game {
                     PendingStart::FirearmAttachmentPoint
                 }
                 "GasTankBehaviour" | "FlaskBehaviour" => PendingStart::Flask(linked.flasks[&o]),
+                c if super::syringe::is_syringe(c) => PendingStart::Syringe(linked.syringes[&o]),
+                "SyringeExplosionBehaviour" => PendingStart::SyringeExplosion(linked.syringe_explosions[&o]),
                 "LiquidContainerController" => PendingStart::LiquidContainer(linked.liquid_containers[&o]),
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
@@ -2542,6 +2756,7 @@ impl Game {
                 "ExistInDetailView" => PendingStart::ExistInDetailView(inst.objects[o].components[c]),
                 "IgnoreParentSize" => PendingStart::IgnoreParentSize(inst.objects[o].components[c]),
                 "RandomSpriteBehaviour" => PendingStart::RandomSprite(linked.random_sprites[&o]),
+                "AirfoilBehaviour" => PendingStart::Airfoil(linked.airfoils[&o]),
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {

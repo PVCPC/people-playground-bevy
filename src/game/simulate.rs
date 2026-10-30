@@ -592,6 +592,15 @@ impl Game {
             if let Some(b) = g.bulbs.iter().position(|b| b.Phys == p && b.after_physical == after) {
                 v.push((g.bulbs[b].index, S::Bulb(b)));
             }
+            if let Some(s) = g.soaps.iter().position(|x| x.physical == Some(p) && x.after_physical == after) {
+                v.push((g.soaps[s].index, S::Soap(s)));
+            }
+            if let Some(h) = g.power_hammers.iter().position(|x| x.physical == Some(p) && x.after_physical == after) {
+                v.push((g.power_hammers[h].index, S::PowerHammer(h)));
+            }
+            if let Some(b) = g.balloons.iter().position(|x| x.physical == Some(p) && x.after_physical == after) {
+                v.push((g.balloons[b].index, S::Balloon(b)));
+            }
             v.extend(g.tr.collision_scripts.iter().filter(|s| s.physical == p && s.after_physical == after).map(|s| (s.index, S::Translated(s.b))));
             v.sort_by_key(|&(i, _)| i);
             v

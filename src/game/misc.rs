@@ -494,6 +494,12 @@ pub enum PendingStart {
     FirearmAttachmentPoint,
     IgnoreParentSize(i32),
     RandomSprite(usize),
+    /// AirfoilBehaviour.Start: SetWingType(GetWingType(CurrentWingTypeName)).
+    Airfoil(usize),
+    /// SyringeBehaviour.Start (any subclass): the `Game::syringes` index.
+    Syringe(usize),
+    /// SyringeExplosionBehaviour.Start: the `Game::syringe_explosions` index.
+    SyringeExplosion(usize),
     /// BoundingBoxBehaviour with its serialized box.
     BoundingBox(super::Bounds),
     MapConfig(super::map::MapConfigStart),
@@ -974,6 +980,9 @@ impl Game {
                 }
                 PendingStart::IgnoreParentSize(id) => self.ignore_parent_size_start(id),
                 PendingStart::RandomSprite(r) => self.random_sprite_set_to_index(r),
+                PendingStart::Airfoil(a) => self.airfoil_start(a),
+                PendingStart::Syringe(s) => self.syringe_start(s),
+                PendingStart::SyringeExplosion(e) => self.syringe_explosion_start(e),
                 PendingStart::Limb(l) => self.limb_start(l),
                 PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),
                 PendingStart::Grip(g) => self.grip_start(g),

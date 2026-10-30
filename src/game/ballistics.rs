@@ -700,6 +700,14 @@ impl Game {
                 }
                 ("PhysicalBehaviour", false) => self.physical_shot(p, normal, point, damage),
                 ("PhysicalBehaviour", true) => self.physical_exit_shot(p, normal, point, damage),
+                ("BalloonBehaviour", false) => {
+                    let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
+                    self.balloon_shot(b);
+                }
+                ("BalloonBehaviour", true) => {
+                    let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
+                    self.balloon_exit_shot(b);
+                }
                 ("DestroyableBehaviour", _) => {
                     let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");
                     self.destroyable_shot(x, normal, damage);
@@ -733,6 +741,10 @@ impl Game {
                 ("BulbBehaviour", _) => {
                     let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
                     self.bulb_shot(b);
+                }
+                (c, _) if super::syringe::is_syringe(c) => {
+                    let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
+                    if exit { self.break_syringe(s) } else { self.syringe_shot(s) }
                 }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
@@ -770,9 +782,17 @@ impl Game {
                     let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
                     self.glowtube_break(g);
                 }
+                "BalloonBehaviour" => {
+                    let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
+                    self.balloon_pop(b);
+                }
                 "BulbBehaviour" => {
                     let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
                     self.bulb_break(b);
+                }
+                c if super::syringe::is_syringe(c) => {
+                    let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
+                    self.break_syringe(s);
                 }
                 c => unimplemented!("{c}.Break"),
             }

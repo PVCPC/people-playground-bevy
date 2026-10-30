@@ -133,7 +133,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&cid) {
-                        Some(&(_, b @ Behaviour::RayGun(_))) => out.push(Receiver::Behaviour(b)),
+                        Some(&(_, b @ (Behaviour::RayGun(_) | Behaviour::SignalConverter(_)))) => out.push(Receiver::Behaviour(b)),
                         Some(&(_, b @ Behaviour::Translated(t))) if t.has_use_continuous() => out.push(Receiver::Behaviour(b)),
                         _ => unimplemented!("{class}.UseContinuous"),
                     }
@@ -146,6 +146,8 @@ impl Game {
                 // PhysicalBehaviour.UseContinuous: AssertState (true inside the LateUpdate), then the tracker.
                 Receiver::Physical(q) => self.physicals[q].ContinuousActivationTracker[channel].Value += 1,
                 Receiver::Behaviour(Behaviour::RayGun(i)) => self.ray_gun_use_continuous(i),
+                // The drag tool's ActivationPropagation(direct: true, 0, ..).
+                Receiver::Behaviour(Behaviour::SignalConverter(i)) => self.signal_converter_use_continuous(i, true, channel as u16),
                 Receiver::Behaviour(Behaviour::Translated(t)) => self.tr_use_continuous(t, super::translated::rt::Activation { Channel: channel as i32 }),
                 Receiver::Behaviour(_) => unreachable!(),
             }

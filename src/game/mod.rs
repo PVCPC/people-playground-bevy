@@ -18,6 +18,14 @@ pub mod detector;
 pub mod effector;
 pub mod messages;
 pub mod sort;
+pub mod airfoil;
+pub mod stunner;
+pub mod soap;
+pub mod power_hammer;
+pub mod balloon;
+pub mod syringe;
+pub mod jet_engine;
+pub mod signal_converter;
 pub mod flamethrower;
 pub mod rocket;
 pub mod piston;
@@ -1095,6 +1103,12 @@ pub enum Behaviour {
     Piston(usize),
     Flamethrower(usize),
     Rocket(usize),
+    Airfoil(usize),
+    Stunner(usize),
+    Balloon(usize),
+    Syringe(usize),
+    JetEngine(usize),
+    SignalConverter(usize),
     Translated(translated::TBehaviour),
 }
 
@@ -1137,6 +1151,13 @@ impl Behaviour {
             Behaviour::Piston(_) => "PistonBehaviour",
             Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
             Behaviour::Rocket(_) => "LaunchedRocketBehaviour",
+            Behaviour::Airfoil(_) => "AirfoilBehaviour",
+            Behaviour::Stunner(_) => "StunnerBehaviour",
+            Behaviour::Balloon(_) => "BalloonBehaviour",
+            Behaviour::JetEngine(_) => "JetEngineBehaviour",
+            Behaviour::SignalConverter(_) => "SignalConverterBehaviour",
+            // Every subclass has the lifecycle of SyringeBehaviour.
+            Behaviour::Syringe(_) => "SyringeBehaviour",
             Behaviour::Sticky(_) => "StickyGrenadeBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
@@ -1267,6 +1288,15 @@ pub struct Game {
     pub pistons: Vec<piston::Piston>,
     pub flamethrowers: Vec<flamethrower::Flamethrower>,
     pub rockets: Vec<rocket::LaunchedRocket>,
+    pub airfoils: Vec<airfoil::Airfoil>,
+    pub stunners: Vec<stunner::Stunner>,
+    pub soaps: Vec<soap::Soap>,
+    pub power_hammers: Vec<power_hammer::PowerHammer>,
+    pub balloons: Vec<balloon::Balloon>,
+    pub syringes: Vec<syringe::Syringe>,
+    pub jet_engines: Vec<jet_engine::JetEngine>,
+    pub signal_converters: Vec<signal_converter::SignalConverter>,
+    pub syringe_explosions: Vec<syringe::SyringeExplosion>,
     /// `anchored_joints` slot -> `fixed_joints` entry, for the prefab joints adopted (a script that reads the component,
     /// or HingeJointLimitAutofixBehaviour.Start of a mirrored host): the first adoption owns the component's state.
     pub adopted_slots: HashMap<usize, usize>,

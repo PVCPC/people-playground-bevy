@@ -940,6 +940,12 @@ impl Game {
                 (Phase::Update, B::Flamethrower(i)) => self.flamethrower_update(i),
                 (Phase::Fixed, B::Rocket(i)) => self.rocket_fixed_update(i),
                 (Phase::Update, B::Rocket(i)) => self.rocket_update(i),
+                (Phase::Fixed, B::Airfoil(i)) => self.airfoil_fixed_update(i),
+                (Phase::Update, B::Stunner(i)) => self.stunner_update(i),
+                (Phase::Update, B::Balloon(i)) => self.balloon_update(i),
+                (Phase::Fixed, B::Syringe(i)) => self.syringe_fixed_update(i),
+                (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
+                (Phase::Update, B::Syringe(i)) => self.syringe_update(i),
                 (Phase::Update, B::Piston(i)) => self.piston_update(i),
                 // TemperatureRayGunBehaviour.Update: the line renderer's start.
                 (Phase::Update, B::RayGun(_)) => {}

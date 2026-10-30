@@ -654,6 +654,7 @@ impl Game {
         let Some(p) = self.physical_of_collider(collider) else {
             let bare = &self.bare_colliders[&collider];
             if bare.receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour", "BulbBehaviour"])
+                || bare.scripts.iter().any(|s| super::syringe::is_syringe(s))
                 || bare.scripts.iter().any(|s| super::translated::receives(s, "OnFragmentHit"))
             {
                 unimplemented!("BroadcastMessage OnFragmentHit to the scripts of a collider without a PhysicalBehaviour");
@@ -670,7 +671,7 @@ impl Game {
                 }
                 for k in 0..inst.objects[x].components.len() {
                     if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_))
+                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_) | Behaviour::Syringe(_) | Behaviour::Balloon(_))
                             || matches!(b, Behaviour::Translated(t) if super::translated::receives(t.class(), "OnFragmentHit"))
                         {
                             out.push(b);
@@ -689,6 +690,9 @@ impl Game {
                 // GlowtubeBehaviour.OnFragmentHit
                 Behaviour::Glowtube(g) => self.glowtube_break(g),
                 Behaviour::Bulb(b) => self.bulb_on_fragment_hit(b),
+                Behaviour::Syringe(s) => self.break_syringe(s),
+                // BalloonBehaviour.OnFragmentHit: Pop.
+                Behaviour::Balloon(b) => self.balloon_pop(b),
                 Behaviour::Translated(t) => self.tr_on_fragment_hit(t, force),
                 _ => unreachable!(),
             }

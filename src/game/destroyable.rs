@@ -491,10 +491,13 @@ impl Game {
                 self.fixed_update_waits.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner, step: Step::LimbCrush(l) });
             }
             Step::LimbCrush(l) => self.limb_crush(l),
+            Step::LimbStunNumb(l) => self.limb_stun_numb(l),
             Step::FirearmShoot(f) => self.firearm_shoot(f),
             Step::LaunchRoutine(l) => self.launcher_launch_routine(l),
             Step::SpikeIgnite(i) => self.spike_grenade_resume(i),
             Step::BulbBreak(i) => self.bulb_break(i),
+            Step::SyringeBreak(s) => self.break_syringe(s),
+            Step::BalloonPop(b) => self.balloon_pop(b),
             Step::ShrapnelEndOfFrame(at, n) => {
                 self.coroutine_seq += 1;
                 self.fixed_update_waits.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner: c.owner, step: Step::ShrapnelEmit(at, n) });
@@ -569,6 +572,12 @@ pub enum Step {
     SpikeIgnite(usize),
     /// BulbBehaviour.Shot's WaitAFrame after its WaitForSeconds(0.05): the `Game::bulbs` index.
     BulbBreak(usize),
+    /// BalloonBehaviour.Shot's WaitAFrame after its WaitForSeconds(0.05): the `Game::balloons` index.
+    BalloonPop(usize),
+    /// SyringeBehaviour.Shot's WaitAFrame after its WaitForSeconds(0.05): the `Game::syringes` index.
+    SyringeBreak(usize),
+    /// LimbBehaviour.StunImpact's Utils.DelayCoroutine action after its WaitForSeconds: the `Game::limbs` index.
+    LimbStunNumb(usize),
     /// A translated routine (`coroutine::Routine`) by id, and for a yield null / WaitForSeconds the frame count from
     /// which DelayedCallManager::Update runs it (kWaitForNextFrame: the frame it was started in + 1; else i64::MIN).
     Routine(u64, i64),

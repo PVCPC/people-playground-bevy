@@ -29,6 +29,12 @@ script! {
         /// SparkPrefab (or the Resources fallback) and ExplosionPrefab are set.
         SparkPrefab: bool = false,
         ExplosionPrefab: bool = false,
+        /// The serialized SparkPrefab's source prefab (None: the Resources one).
+        SparkPrefabSource: Option<crate::assets::db::ObjRef> = None,
+        /// ExplosionPrefab's source prefab.
+        ExplosionPrefabSource: Option<crate::assets::db::ObjRef> = None,
+        /// Explosion: the parameters ActOnDamage explodes with (ExplodesOnBreak).
+        Explosion: super::explosion::ExplosionParameters = Default::default(),
         /// The live entries of BehavioursToToggle (class name and component id) and GameObjectsToToggle (the object's
         /// Transform id).
         BehavioursToToggle: Vec<(String, i32)> = Vec::new(),
@@ -82,9 +88,20 @@ impl Game {
         let points = |g: &Game| g.physicals[g.machinery[m].PhysicalBehaviour].LocalColliderGridPoints.as_ref().expect("LocalColliderGridPoints before PhysicalBehaviour.Start").len();
         if mc.Destroyed && points(self) != 0 && mc.t > 1.0 && mc.SparkPrefab && self.random.value() < 4e-5 {
             self.machinery[m].t = 0.0;
+            let p = self.machinery[m].PhysicalBehaviour;
             let n = points(self) as i32;
-            self.random.range_int(0, n);
-            unimplemented!("DamagableMachineryBehaviour.Update: Instantiate(SparkPrefab)");
+            let i = self.random.range_int(0, n) as usize;
+            let vector = self.physicals[p].LocalColliderGridPoints.as_ref().unwrap()[i];
+            // Instantiate(SparkPrefab, base.transform.TransformPoint(vector), Quaternion.identity)
+            let at = self.transform_point3(p, [vector[0], vector[1], 0.0]);
+            match self.machinery[m].SparkPrefabSource {
+                Some(source) => {
+                    self.spawn_prefab(source, at);
+                }
+                None => {
+                    self.spawn_resource("Prefabs/BrokenElectronicsSpark", at);
+                }
+            }
         }
     }
 
@@ -120,11 +137,17 @@ impl Game {
         let mc = &self.machinery[m];
         if !(mc.Health > 0.0) && !mc.Destroyed {
             self.machinery_set_as_broken(m, true);
+            let p = self.machinery[m].PhysicalBehaviour;
+            let position = self.physicals[p].transform.position;
             if self.machinery[m].ExplodesOnBreak {
-                unimplemented!("DamagableMachineryBehaviour: ExplosionCreator.CreateExplosionWithWater");
+                // Explosion.Position = base.transform.position (a struct field: it stays).
+                self.machinery[m].Explosion.Position = position;
+                let (under_water, ex) = (self.physicals[p].IsUnderWater, self.machinery[m].Explosion);
+                self.create_explosion_with_water(under_water, ex);
             }
-            if self.machinery[m].ExplosionPrefab {
-                unimplemented!("DamagableMachineryBehaviour: Instantiate(ExplosionPrefab)");
+            if let Some(source) = self.machinery[m].ExplosionPrefabSource {
+                // Instantiate(ExplosionPrefab, base.transform.position, Quaternion.identity)
+                self.spawn_prefab(source, position);
             }
         }
     }

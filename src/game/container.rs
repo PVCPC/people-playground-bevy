@@ -26,6 +26,8 @@ pub enum Owner {
     Circulation(usize),
     /// FlaskBehaviour or GasTankBehaviour: the `Game::flasks` index.
     Flask(usize),
+    /// SyringeBehaviour or a subclass: the `Game::syringes` index.
+    Syringe(usize),
 }
 
 impl Game {
@@ -33,6 +35,7 @@ impl Game {
         match o {
             Owner::Circulation(l) => &self.circulations[l].base,
             Owner::Flask(f) => &self.flasks[f].base,
+            Owner::Syringe(s) => &self.syringes[s].base,
         }
     }
 
@@ -40,31 +43,33 @@ impl Game {
         match o {
             Owner::Circulation(l) => &mut self.circulations[l].base,
             Owner::Flask(f) => &mut self.flasks[f].base,
+            Owner::Syringe(s) => &mut self.syringes[s].base,
         }
     }
 
-    /// Behaviour.enabled. No flask code disables one.
+    /// Behaviour.enabled. No flask or syringe code disables one.
     fn container_enabled(&self, o: Owner) -> bool {
         match o {
             Owner::Circulation(l) => self.circulations[l].enabled,
-            Owner::Flask(_) => true,
+            Owner::Flask(_) | Owner::Syringe(_) => true,
         }
     }
 
-    /// Limits: CirculationBehaviour's (0, 1), FlaskBehaviour's (0, Capacity), GasTankBehaviour's (0, 20).
+    /// Limits: CirculationBehaviour's (0, 1), FlaskBehaviour's (0, Capacity), GasTankBehaviour's (0, 20), SyringeBehaviour's (0, 1.4).
     pub fn container_limits(&self, o: Owner) -> [f32; 2] {
         match o {
             Owner::Circulation(_) => [0.0, 1.0],
             Owner::Flask(f) => [0.0, self.flasks[f].limit],
+            Owner::Syringe(_) => [0.0, 1.4],
         }
     }
 
-    /// AllowsOverflow: false in FlaskBehaviour and GasTankBehaviour.
+    /// AllowsOverflow: false in FlaskBehaviour, GasTankBehaviour and SyringeBehaviour.
     pub fn allows_overflow(&self, o: Owner) -> bool {
         matches!(o, Owner::Circulation(_))
     }
 
-    fn upper_limit(&self, o: Owner) -> f32 {
+    pub(super) fn upper_limit(&self, o: Owner) -> f32 {
         if !self.allows_overflow(o) { self.container_limits(o)[1] } else { f32::MAX }
     }
 
@@ -211,14 +216,28 @@ impl Game {
         v
     }
 
-    /// BloodContainer.Update. Pressure is None and AllowPressureTransfer true in every subclass rewritten.
+    /// Pressure: a syringe's PressureMode (Push 0, Pull 1), None (2) in every other subclass rewritten.
+    fn container_pressure(&self, o: Owner) -> i32 {
+        match o {
+            Owner::Syringe(s) => self.syringes[s].PressureMode,
+            _ => 2,
+        }
+    }
+
+    /// BloodContainer.Update. AllowPressureTransfer is true in every subclass rewritten.
     pub fn blood_container_update(&mut self, o: Owner) {
         let dt = self.time.deltaTime;
         let scaled = self.scaled_liquid_amount(o);
+        let pressure = self.container_pressure(o);
         let c = self.bc_mut(o);
         c.timer += dt;
         // CalculatePressureFromContents
         c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, scaled, mathf::lerp_factor_dt(0.6, dt));
+        match pressure {
+            0 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, 4096.0, mathf::lerp_factor_dt(0.95, dt)),
+            1 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, -4096.0, mathf::lerp_factor_dt(0.95, dt)),
+            _ => {}
+        }
         if c.timer > 1.0 {
             c.timer = 0.0;
             self.delete_empty_liquid_entries(o);
@@ -259,7 +278,7 @@ impl Game {
         self.liquid_on_exit_container(liquid, o);
     }
 
-    // ---- Liquid's virtual members: the translated liquids', and GorseBlood's (AcidRoutine is a coroutine) ----
+    // ---- Liquid's virtual members: the translated liquids', GorseBlood's and syringe.rs's ----
 
     fn translated(liquid: usize) -> bool {
         super::translated::LIQUID_CLASSES.contains(&LIQUIDS[liquid].1)
@@ -274,6 +293,7 @@ impl Game {
         match LIQUIDS[liquid].1 {
             _ if Self::translated(liquid) => self.tr_liquid_on_enter_container(liquid, o),
             "GorseBlood" => {}
+            c if super::syringe::is_syringe_liquid(c) => self.syringe_liquid_on_enter_container(liquid, o),
             _ => Self::liquid_unwritten(liquid, "OnEnterContainer"),
         }
     }
@@ -283,16 +303,18 @@ impl Game {
         match LIQUIDS[liquid].1 {
             _ if Self::translated(liquid) => self.tr_liquid_on_exit_container(liquid, o),
             "GorseBlood" => {}
+            c if super::syringe::is_syringe_liquid(c) => self.syringe_liquid_on_exit_container(liquid, o),
             _ => Self::liquid_unwritten(liquid, "OnExitContainer"),
         }
     }
 
     /// Liquid.OnEnterLimb
-    fn liquid_on_enter_limb(&mut self, liquid: usize, l: usize) {
+    pub(super) fn liquid_on_enter_limb(&mut self, liquid: usize, l: usize) {
         match LIQUIDS[liquid].1 {
             _ if Self::translated(liquid) => self.tr_liquid_on_enter_limb(liquid, l),
             "GorseBlood" if self.limbs[l].SpeciesIdentity == "Gorse" => {}
-            "GorseBlood" => unimplemented!("GorseBlood.AcidRoutine (a coroutine on the limb's CirculationBehaviour)"),
+            "GorseBlood" => self.acid_routine(liquid, l),
+            c if super::syringe::is_syringe_liquid(c) => self.syringe_liquid_on_enter_limb(liquid, l),
             _ => Self::liquid_unwritten(liquid, "OnEnterLimb"),
         }
     }
@@ -303,6 +325,7 @@ impl Game {
             _ if Self::translated(liquid) => self.tr_liquid_on_update(liquid, o),
             // Blood.OnUpdate, inherited.
             "GorseBlood" => self.blood_on_update(liquid, o),
+            c if super::syringe::is_syringe_liquid(c) => self.syringe_liquid_on_update(liquid, o),
             _ => Self::liquid_unwritten(liquid, "OnUpdate"),
         }
     }
