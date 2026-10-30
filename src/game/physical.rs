@@ -101,7 +101,7 @@ script! {
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
-        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default() },
+        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None },
         transform: Pose = Pose::default(),
         /// The Transform's parent (index into Game.transform_nodes).
         parent: Option<usize> = None,
@@ -820,7 +820,82 @@ impl Game {
         if ph.isStatic || !ph.Disintegratable || !ph.Deletable {
             return;
         }
-        // Collider/renderer disable, Rigidbody2D.simulated = false and SetActive(false) need the b2 removal paths.
-        unimplemented!("PhysicalBehaviour.Disintegrate: collider and body removal is not rewritten yet");
+        if !ph.penetrations.is_empty() || !ph.victimPenetrations.is_empty() {
+            unimplemented!("PhysicalBehaviour.Disintegrate: stab penetrations (DoStab is not rewritten yet)");
+        }
+        // OnDisintegration: the limb's handler, then the person's DisintegrationCounterBehaviour (the other
+        // subscriber, LimbStatusBehaviour, only hides the status UI).
+        if let Some(l) = self.limbs.iter().position(|limb| limb.PhysicalBehaviour == p) {
+            self.limb_on_disintegration(l);
+            self.person_on_child_disintegrated(self.limbs[l].Person);
+        }
+        // GetComponentsInChildren<Collider2D>().enabled = false: the object's own collider. Renderers are presentation.
+        self.collider_disable(p);
+        // Rigidbody2D.simulated = false (Rigidbody2D::SetSimulated -> b2Body::SetActive(false)). Limbs have no
+        // BloodTankBehaviour.
+        let body = self.physicals[p].rigidbody.body;
+        self.world.deactivate_body(body);
+        self.deactivate(p);
+        self.physicals[p].isDisintegrated = true;
+        // InvokeOnItemRemoved: the modding event only.
+    }
+
+    /// Collider2D::SetEnabled(false) (180c15670): Collider2D::Cleanup (180c0d940) with ColliderCleanupOperation 2
+    /// destroys the shapes last first, resets the body's mass and, with Physics2D.callbacksOnDisable off, drops
+    /// the collider's contact records without callbacks.
+    fn collider_disable(&mut self, p: usize) {
+        let (body, collider) = (self.physicals[p].rigidbody.body, self.physicals[p].collider);
+        let shapes: Vec<_> = self.world.body(body).fixtures.iter().copied().filter(|&f| self.world.fixture(f).collider.id == collider).collect();
+        for &f in shapes.iter().rev() {
+            self.world.destroy_fixture(body, f);
+        }
+        if !shapes.is_empty() {
+            self.world.reset_mass_data(body);
+        }
+        self.world.contacts2d.destroy_contacts(collider);
+    }
+
+    /// GameObject.SetActive(false) on a physical object, component by component.
+    fn deactivate(&mut self, p: usize) {
+        // Collider2D::Deactivate (180c0fc00): its Physics2D.IgnoreCollision pairs go; the cleanup finds no shapes.
+        let collider = self.physicals[p].collider;
+        let w = &mut self.world;
+        w.ignored.retain(|&(a, b)| w.fixtures[a].as_ref().is_some_and(|f| f.collider.id != collider) && w.fixtures[b].as_ref().is_some_and(|f| f.collider.id != collider));
+        w.contacts2d.destroy_contacts(collider);
+        self.rigidbody_cleanup(p);
+        self.physicals[p].active = false;
+        // PhysicalBehaviour.OnDisable: an empty Collision2D exit to each collider still in the stay buffer
+        // (SendMessage skips inactive objects; collision messages reach disabled behaviours).
+        for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {
+            if pair.Active && self.physicals[pair.Coll].active {
+                self.physical_on_collision_exit(pair.Coll, &ScriptCollision::default());
+            }
+        }
+        // The HingeJoint2D/SpringJoint2D Deactivate cleanups find their b2 joints already gone.
+    }
+
+    /// Rigidbody2D::Cleanup (180c1dd20) with DeactivateOperation 0: no attached colliders are left, every joint on
+    /// the body (body list from the head) loses its b2 joint, then the body goes and the scene's movement list is
+    /// rebuilt after the next step.
+    fn rigidbody_cleanup(&mut self, p: usize) {
+        let body = self.physicals[p].rigidbody.body;
+        for (_, j) in self.world.body(body).joints.clone().into_iter().rev() {
+            // Joint2D::Cleanup (180c03500). HingeJoint2D::Cleanup (180bfc5e0) keeps the angles for a re-create
+            // that a disintegrated limb never gets.
+            if let Some(h) = self.hinges.iter().position(|h| h.joint == Some(j)) {
+                self.hinges[h].joint = None;
+            } else if let Some(l) = self.limbs.iter().position(|l| l.gore.joint == Some(j)) {
+                self.limbs[l].gore.joint = None;
+            } else {
+                unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge or gore string");
+            }
+            self.world.destroy_joint(j);
+        }
+        let mass = self.world.body(body).rigidbody;
+        self.world.destroy_body(body);
+        let rb = &mut self.physicals[p].rigidbody;
+        rb.detached = Some(mass);
+        rb.movement.listed = false;
+        self.rigidbody_hierarchy_changed = true;
     }
 }

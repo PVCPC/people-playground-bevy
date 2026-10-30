@@ -307,6 +307,7 @@ impl Game {
                         collisionDetectionMode: rb.req("cdm")?.parse().unwrap(),
                         interpolation: rb.req("interpolation")?.parse().unwrap(),
                         movement: s.of("b2Body").nth(l).and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
+                        detached: None,
                     };
                     // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
                     let changed = s.of("b2Body").nth(l).and_then(|r| r.get("hierarchyChanged"));
@@ -323,7 +324,7 @@ impl Game {
                         Some((_, &b)) => b,
                         None => g.world.create_body(&BodyDef::default()),
                     };
-                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default() };
+                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None };
                 }
             }
             g.physicals.push(p);
@@ -627,8 +628,12 @@ impl Game {
         for p in 0..self.people.len() {
             self.person_fixed_update(p);
         }
-        // Each limb's GripBehaviour runs right after its CirculationBehaviour (recorded call order).
+        // Each limb's GripBehaviour runs right after its CirculationBehaviour (recorded call order). Unity's own
+        // messages skip a deactivated (disintegrated) limb; the managers above only check enabled.
         for l in 0..self.limbs.len() {
+            if !self.limb_active(l) {
+                continue;
+            }
             self.circulation_fixed_update(l);
             if let Some(g) = self.limbs[l].GripBehaviour {
                 self.grip_fixed_update(g);
@@ -638,7 +643,9 @@ impl Game {
             self.splat_fixed_update(s);
         }
         for l in 0..self.limbs.len() {
-            self.gforce_fixed_update(l);
+            if self.limb_active(l) {
+                self.gforce_fixed_update(l);
+            }
         }
     }
 
@@ -665,6 +672,9 @@ impl Game {
         }
         // Per limb: SkinMaterialHandler, BloodContainer, GripBehaviour, GoreStringBehaviour (no joints: returns).
         for l in 0..self.limbs.len() {
+            if !self.limb_active(l) {
+                continue;
+            }
             self.skin_update(l);
             self.blood_container_update(l);
             if let Some(g) = self.limbs[l].GripBehaviour {
@@ -672,8 +682,11 @@ impl Game {
             }
             self.gore_string_update(l);
         }
+        // Bleeding particles are children of their limb.
         for b in 0..self.bleeding.len() {
-            self.bleeding_update(b);
+            if self.limb_active(self.bleeding[b].CirculationBehaviour) {
+                self.bleeding_update(b);
+            }
         }
         self.node_controller_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
@@ -689,7 +702,9 @@ impl Game {
             self.person_late_update(p);
         }
         for l in 0..self.limbs.len() {
-            self.skin_late_update(l);
+            if self.limb_active(l) {
+                self.skin_late_update(l);
+            }
         }
         // Global.LateUpdate
         if self.time.frameCount % 2 == 0 {
@@ -697,6 +712,9 @@ impl Game {
         }
         // SkinMaterialHandler.OnWillRenderObject (every limb is on screen in the recordings); bloodColor is render state.
         for l in 0..self.limbs.len() {
+            if !self.limb_active(l) {
+                continue;
+            }
             let blood = super::circulation::liquid_color(super::circulation::liquid(&self.limbs[l].BloodLiquidType));
             self.get_computed_color(l, blood);
         }

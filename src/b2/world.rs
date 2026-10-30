@@ -612,6 +612,41 @@ impl World {
         }
     }
 
+    /// b2Body::DestroyFixture (180bb9570) without the mass reset: the fixture's contacts (body list from the
+    /// head), its proxies when the body is active, then the fixture.
+    pub fn destroy_fixture(&mut self, body_id: BodyId, f: FixtureId) {
+        self.body_mut(body_id).fixtures.retain(|&x| x != f);
+        for (_, c) in self.body(body_id).contacts.clone().into_iter().rev() {
+            let contact = self.contact(c);
+            if contact.fixture_a == f || contact.fixture_b == f {
+                self.destroy_contact(c);
+            }
+        }
+        if self.body(body_id).flags & BODY_ACTIVE != 0 {
+            for &(_, proxy) in &self.fixtures[f].as_ref().unwrap().proxies {
+                self.broad_phase.destroy_proxy(proxy);
+            }
+        }
+        let collider = self.fixtures[f].take().unwrap().collider;
+        *self.contacts2d.collider_shapes.get_mut(&collider.id).unwrap() -= 1;
+    }
+
+    /// b2Body::SetActive(false) (180bba1c0): the fixtures' proxies and every contact go, fixture list from the head.
+    pub fn deactivate_body(&mut self, id: BodyId) {
+        if self.body(id).flags & BODY_ACTIVE == 0 {
+            return;
+        }
+        self.body_mut(id).flags &= !BODY_ACTIVE;
+        for f in self.body(id).fixtures.clone().into_iter().rev() {
+            for (_, proxy) in std::mem::take(&mut self.fixtures[f].as_mut().unwrap().proxies) {
+                self.broad_phase.destroy_proxy(proxy);
+            }
+        }
+        for (_, c) in self.body(id).contacts.clone().into_iter().rev() {
+            self.destroy_contact(c);
+        }
+    }
+
     /// b2World::DestroyJoint (180bb9680).
     pub fn destroy_joint(&mut self, id: JointId) {
         let j = self.joints[id].take().unwrap();
@@ -1609,6 +1644,37 @@ mod tests {
         assert!((b.xf.p.y - 1.0).abs() < 0.05, "rest height {}", b.xf.p.y);
         assert!(b.xf.p.x.abs() < 1e-3 && b.sweep.a.abs() < 1e-3);
         assert_eq!(b.flags & BODY_AWAKE, 0, "should sleep");
+    }
+
+    /// Disintegrate's removal: the collider's shape and records go, then the body leaves the world.
+    #[test]
+    fn disabled_collider_and_destroyed_body_leave_the_world() {
+        let mut world = World::default();
+        let ground = world.create_body(&BodyDef::default());
+        let collider = |id| ColliderRef { id, game_object: id };
+        world.create_fixture(ground, &FixtureDef { collider: collider(1), ..box_fixture(Vec2::new(20.0, 1.0)) }, true);
+        let def = BodyDef { kind: BodyType::Dynamic, position: Vec2::new(0.0, 2.5), ..BodyDef::default() };
+        let crate_ = world.create_body(&def);
+        let f = world.create_fixture(crate_, &FixtureDef { collider: collider(2), ..box_fixture(Vec2::new(1.0, 1.0)) }, true);
+        for _ in 0..30 {
+            world.step(1.0 / 60.0, 16, 16);
+        }
+        assert_eq!(world.contact_list.len(), 1);
+        for other in [2, 3] {
+            let r = crate::b2::contacts2d::Collision2D { collider_a: collider(1), collider_b: collider(other), ..Default::default() };
+            world.contacts2d.restore(r);
+        }
+        world.destroy_fixture(crate_, f);
+        world.reset_mass_data(crate_);
+        world.contacts2d.destroy_contacts(2);
+        assert!(world.contact_list.is_empty());
+        assert_eq!(world.contacts2d.collisions.len(), 1);
+        assert!(world.contacts2d.index.contains_key(&(1, 3)) && !world.contacts2d.index.contains_key(&(1, 2)));
+        assert_eq!(world.contacts2d.collider_shapes[&2], 0);
+        world.deactivate_body(crate_);
+        world.destroy_body(crate_);
+        world.step(1.0 / 60.0, 16, 16);
+        assert!(world.bodies[crate_].is_none() && world.bodies[ground].is_some());
     }
 
     #[test]

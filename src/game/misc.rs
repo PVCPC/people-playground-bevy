@@ -187,6 +187,18 @@ script! {
 }
 
 impl Game {
+    /// ConnectedNodeBehaviour.DisconnectFromEverything: each neighbour forgets its first link back (SetToNull).
+    pub fn node_disconnect_from_everything(&mut self, n: usize) {
+        for i in 0..self.nodes[n].Connections.len() {
+            if let Some(other) = self.nodes[n].Connections[i] {
+                if let Some(at) = self.nodes[other].Connections.iter().position(|&c| c == Some(n)) {
+                    self.nodes[other].Connections[at] = None;
+                }
+            }
+        }
+        self.nodes[n].Connections.fill(None);
+    }
+
     /// ConnectedNodeBehaviour.IsConnectedTo
     pub fn node_is_connected_to(&self, a: usize, b: usize) -> bool {
         self.nodes[a].Connections.contains(&Some(b))

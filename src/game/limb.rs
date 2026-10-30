@@ -155,6 +155,11 @@ impl Game {
         ph.rigidbody.mass(&self.world) / ph.TrueInitialMass
     }
 
+    /// The limb's GameObject.activeInHierarchy (a disintegrated limb is deactivated).
+    pub fn limb_active(&self, l: usize) -> bool {
+        self.physicals[self.limbs[l].PhysicalBehaviour].active
+    }
+
     /// LimbBehaviour.IsParalysed
     pub fn limb_is_paralysed(&self, l: usize) -> bool {
         let limb = &self.limbs[l];
@@ -1187,6 +1192,34 @@ impl Game {
         self.limbs[l].gore.lineData = Some(data);
     }
 
+    /// LimbBehaviour.PhysicalBehaviour_OnDisintegration
+    pub fn limb_on_disintegration(&mut self, l: usize) {
+        if self.limb_is_considered_alive(l) && !self.limb_is_paralysed(l) {
+            self.add_pain(self.limbs[l].Person, 25.0);
+        }
+        let position = self.physicals[self.limbs[l].PhysicalBehaviour].transform.position;
+        self.skin_add_damage_point(l, super::misc::damage_type::DISMEMBERMENT, [position[0], position[1]], 25.0);
+        self.circulation_disintegrate(l);
+        for i in 0..self.limbs[l].ConnectedLimbs.len() {
+            let other = self.limbs[l].ConnectedLimbs[i];
+            if self.node_is_connected_to(l, other) && self.limbs[other].HasJoint {
+                let h = self.limbs[other].Joint.unwrap();
+                if self.hinges[h].connected == l {
+                    self.set_hinge_break_force(h, 0.0);
+                }
+            }
+        }
+        if self.limbs[l].goreString {
+            self.gore_string_destroy_joint(l);
+        }
+        self.node_disconnect_from_everything(l);
+        if self.limbs[l].HasJoint {
+            let h = self.limbs[l].Joint.unwrap();
+            self.set_hinge_break_force(h, 0.0);
+            self.set_hinge_break_torque(h, 0.0);
+        }
+    }
+
     /// GoreStringBehaviour.DestroyJoint
     pub fn gore_string_destroy_joint(&mut self, l: usize) {
         self.limbs[l].gore.HadJointWhenSerialised = false;
@@ -1216,7 +1249,10 @@ impl Game {
             return;
         }
         let Some(other) = self.limbs[l].gore.Other else { return };
-        // Other.gameObject.activeInHierarchy: limbs are never deactivated.
+        if !self.limb_active(other) {
+            self.gore_string_destroy_joint(l);
+            return;
+        }
         let g = &self.limbs[l].gore;
         let break_force = g.breakForce;
         let flag = !break_force.is_infinite();
@@ -1243,7 +1279,8 @@ impl Game {
         let mut due: Vec<(f64, bool, usize)> = Vec::new();
         for l in 0..self.limbs.len() {
             let g = &self.limbs[l].gore;
-            if let Some(t) = g.break_at.filter(|&t| dynamic && t <= now) {
+            // A deactivated limb's coroutines stopped with it.
+            if let Some(t) = g.break_at.filter(|&t| dynamic && t <= now && self.limb_active(l)) {
                 due.push((t, false, l));
             }
             if let Some(t) = g.destroy_at.filter(|&t| t <= now) {

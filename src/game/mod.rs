@@ -404,6 +404,8 @@ pub struct Rigidbody {
     pub collisionDetectionMode: i32,
     pub interpolation: i32,
     pub movement: MovementState,
+    /// Set once Rigidbody2D::Cleanup has destroyed the b2 body (m_Body null): the component's own mass fields.
+    pub detached: Option<crate::b2::world::RigidbodyMass>,
 }
 
 /// RigidbodyMovementState2D (Rigidbody2D+0x98): the body pose before and after the last physics step, and the
@@ -426,12 +428,15 @@ impl Rigidbody {
     }
 
     pub fn velocity(&self, w: &World) -> [f32; 2] {
+        if self.detached.is_some() || self.bodyType == 2 {
+            return [0.0, 0.0];
+        }
         let b = w.body(self.body);
-        if self.bodyType == 2 { [0.0, 0.0] } else { [b.linear_velocity.x, b.linear_velocity.y] }
+        [b.linear_velocity.x, b.linear_velocity.y]
     }
     /// Rigidbody2D::SetVelocity
     pub fn set_velocity(&self, w: &mut World, v: [f32; 2]) {
-        if self.bodyType == 2 {
+        if self.bodyType == 2 || self.detached.is_some() {
             return;
         }
         let b = w.body_mut(self.body);
@@ -445,11 +450,11 @@ impl Rigidbody {
     }
     /// Rigidbody2D::GetAngularVelocity, degrees per second.
     pub fn angular_velocity(&self, w: &World) -> f32 {
-        if self.bodyType == 2 { 0.0 } else { w.body(self.body).angular_velocity * mathf::RAD2DEG }
+        if self.detached.is_some() || self.bodyType == 2 { 0.0 } else { w.body(self.body).angular_velocity * mathf::RAD2DEG }
     }
     /// Rigidbody2D::SetAngularVelocity
     pub fn set_angular_velocity(&self, w: &mut World, degrees: f32) {
-        if self.bodyType == 2 {
+        if self.bodyType == 2 || self.detached.is_some() {
             return;
         }
         let b = w.body_mut(self.body);
@@ -464,7 +469,7 @@ impl Rigidbody {
     }
     /// Rigidbody2D::AddTorque, ForceMode2D.Force
     pub fn add_torque(&self, w: &mut World, torque: f32) {
-        if self.bodyType != 0 {
+        if self.detached.is_some() || self.bodyType != 0 {
             return;
         }
         let b = w.body_mut(self.body);
@@ -477,11 +482,14 @@ impl Rigidbody {
         }
     }
     pub fn mass(&self, w: &World) -> f32 {
-        w.body(self.body).rigidbody.mass
+        self.detached.unwrap_or_else(|| w.body(self.body).rigidbody).mass
     }
     /// Rigidbody2D.AddForce(force, ForceMode2D.Impulse): b2Body::ApplyLinearImpulse at the world centre, waking the body.
     // ponytail: assumed from Box2D; the native Rigidbody2D::AddForce is not disassembled yet.
     pub fn add_force_impulse(&self, w: &mut World, impulse: [f32; 2]) {
+        if self.detached.is_some() {
+            return;
+        }
         let b = w.body_mut(self.body);
         if b.kind != BodyType::Dynamic {
             return;
@@ -497,6 +505,9 @@ impl Rigidbody {
     /// Rigidbody2D::SetCollisionDetectionMode (CollisionDetectionMode2D: 0 discrete, 1 continuous)
     pub fn set_collision_detection_mode(&mut self, w: &mut World, mode: i32) {
         self.collisionDetectionMode = mode;
+        if self.detached.is_some() {
+            return;
+        }
         let b = w.body_mut(self.body);
         if mode == 1 {
             b.flags |= BODY_BULLET;

@@ -144,6 +144,20 @@ impl Contacts2D {
         self.collisions.pop();
     }
 
+    /// PhysicsContacts2D::DestroyContacts (180c0fd00): every record with the collider goes without a callback,
+    /// the last record moving into each freed slot.
+    pub fn destroy_contacts(&mut self, collider: i32) {
+        let mut i = 0;
+        while i < self.collisions.len() {
+            let r = self.records[self.collisions[i]].as_ref().unwrap();
+            if r.collider_a.id == collider || r.collider_b.id == collider {
+                self.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// A record restored from a game dump, appended in array order.
     pub fn restore(&mut self, r: Collision2D) -> CollisionId {
         let key = (r.collider_a.id, r.collider_b.id);

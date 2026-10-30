@@ -421,6 +421,24 @@ impl Game {
 
     // ---- CirculationBehaviour ----
 
+    /// CirculationBehaviour.Disintegrate
+    pub fn circulation_disintegrate(&mut self, l: usize) {
+        self.limbs[l].BreakingThreshold = 0.0;
+        self.circulations[l].BleedingRate += 20.0;
+        for i in 0..self.circulations[l].PushesTo.len() {
+            let other = self.circulations[l].PushesTo[i];
+            if self.node_is_connected_to(l, other) && !self.physicals[self.limbs[other].PhysicalBehaviour].isDisintegrated {
+                self.circulations[other].BleedingRate += 20.0;
+            }
+        }
+        if let Some(source) = self.circulations[l].Source {
+            if self.node_is_connected_to(l, source) {
+                self.circulations[source].BleedingRate += 20.0;
+            }
+        }
+        self.circulations[l].IsDisconnected = true;
+    }
+
     /// CirculationBehaviour.FixedUpdate
     pub fn circulation_fixed_update(&mut self, l: usize) {
         self.circulations[l].cachedHeartRate = None;

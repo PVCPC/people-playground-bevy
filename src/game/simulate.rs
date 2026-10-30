@@ -69,7 +69,7 @@ impl Game {
         // After a Rigidbody2D joined or changed, the list is rebuilt from every non-static body.
         if self.rigidbody_hierarchy_changed {
             for p in &mut self.physicals {
-                p.rigidbody.movement.listed = p.rigidbody.bodyType != 2;
+                p.rigidbody.movement.listed = p.rigidbody.bodyType != 2 && p.rigidbody.detached.is_none();
             }
             self.rigidbody_hierarchy_changed = false;
         }
@@ -85,8 +85,11 @@ impl Game {
     /// by the body angle (keeping any x/y tilt).
     fn write_back_transforms(&mut self) {
         for p in 0..self.physicals.len() {
+            // A disintegrated object's Rigidbody2D left the scene's list with its body.
+            if self.physicals[p].rigidbody.detached.is_some() {
+                continue;
+            }
             let b = self.world.body(self.physicals[p].rigidbody.body);
-            // ponytail: Rigidbody2D.simulated is always on (no rewritten script turns it off).
             if b.user.is_none() || b.flags & BODY_AWAKE == 0 {
                 continue;
             }
@@ -253,7 +256,7 @@ impl Game {
                 }
                 if let Some(rb) = rigidbody {
                     let w = &self.world;
-                    if let Some(p) = self.physicals.iter().position(|ph| w.body(ph.rigidbody.body).user.is_some_and(|u| u.id == rb.id)) {
+                    if let Some(p) = self.physicals.iter().position(|ph| ph.rigidbody.detached.is_none() && w.body(ph.rigidbody.body).user.is_some_and(|u| u.id == rb.id)) {
                         self.send_collision_message(p, r.message, &c);
                     }
                 }

@@ -133,6 +133,8 @@ script! {
         /// transform.localScale (root object).
         localScale: [f32; 3] = [1.0, 1.0, 1.0],
         BoneBreakClips: usize = 0,
+        /// DisintegrationCounterBehaviour.DisintegrationCount (the root object's).
+        DisintegrationCount: i32 = 0,
         DismembermentClips: usize = 0,
     }
 }
@@ -148,6 +150,14 @@ impl Game {
         match self.people[person].Head {
             Some(head) => self.limb_is_considered_alive(head),
             None => false,
+        }
+    }
+
+    /// DisintegrationCounterBehaviour.OnChildDisintegrated: its children are the person's limbs, none destroyed.
+    pub fn person_on_child_disintegrated(&mut self, person: usize) {
+        self.people[person].DisintegrationCount += 1;
+        if self.people[person].DisintegrationCount >= self.people[person].Limbs.len() as i32 {
+            unimplemented!("DisintegrationCounterBehaviour: Object.Destroy of the whole person");
         }
     }
 
