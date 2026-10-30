@@ -2,7 +2,9 @@
 //! joint breaking and the contact callbacks.
 use super::*;
 use crate::b2::contacts2d::{Message, Report, ScriptCollision};
-use crate::b2::world::JointKind;
+use crate::b2::math::Vec2;
+use crate::b2::weld::{check_bodies, clamp_break, BodyFrame, Connected, FixedJoint2d};
+use crate::b2::world::{BodyId, JointId, JointKind};
 use crate::unity::{acosf, atan2f, cosf, sinf, transform};
 
 /// Quaternionf operator* (1800b7f20), in its single-precision operation order.
@@ -202,6 +204,7 @@ impl Game {
                 BreakJoint::Hinge(h) => (self.hinges[h].breakForce, self.hinges[h].breakTorque, self.hinges[h].joint),
                 // SpringJoint2D keeps Joint2D::Reset's infinite breakTorque.
                 BreakJoint::Spring(l) => (self.limbs[l].gore.breakForce, f32::INFINITY, self.limbs[l].gore.joint),
+                BreakJoint::Fixed(f) => (self.fixed_joints[f].state.break_force, self.fixed_joints[f].state.break_torque, self.fixed_joints[f].joint),
             };
             // Joint2D::GetReactionForce/Torque: zero without a b2 joint or under 0.0001s. b2RevoluteJoint gives
             // inv_dt times the point impulse and inv_dt times the limit impulse as torque; b2DistanceJoint gives
@@ -210,6 +213,10 @@ impl Game {
             let ([fx, fy], t) = match joint.filter(|_| 0.0001 <= dt).map(|id| &self.world.joints[id].as_ref().unwrap().kind) {
                 None => ([0.0, 0.0], 0.0),
                 Some(JointKind::Revolute(r)) => ([r.impulse[0] * inv_dt, r.impulse[1] * inv_dt], r.impulse[2] * inv_dt),
+                Some(JointKind::Weld(w)) => {
+                    let f = w.reaction_force(inv_dt);
+                    ([f.x, f.y], w.reaction_torque(inv_dt))
+                }
                 Some(JointKind::Distance(d)) => {
                     let f = d.reaction_force(inv_dt);
                     ([f.x, f.y], 0.0)
@@ -231,6 +238,12 @@ impl Game {
                         self.gore_string_on_joint_break(l);
                         // DestroyObjectHighLevel, ahead of the script's own delayed Destroy.
                         self.remove_spring_joint(l);
+                    }
+                    BreakJoint::Fixed(f) => {
+                        // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares
+                        // `penetration.Joint` (a SliderJoint2D) with it, and no other rewritten script sits on a piece.
+                        // DestroyObjectHighLevel then removes the component.
+                        self.fixed_joint_destroy(f);
                     }
                 }
                 self.joint_break_limits.retain(|&k| k != j);
@@ -292,8 +305,196 @@ impl Game {
     }
 }
 
+/// UnityEngine.FixedJoint2D over its b2 weld joint, with the Joint2D/AnchoredJoint2D fields native Create reads.
+#[derive(Clone, Debug)]
+pub struct FixedJoint {
+    pub state: FixedJoint2d,
+    /// m_Joint (+0x58)
+    pub joint: Option<JointId>,
+    /// The physical whose Rigidbody2D is body A, and the connectedBody's (None: the scene's ground body).
+    pub attached: usize,
+    pub connected: Option<usize>,
+    /// GameObject.activeInHierarchy and Behaviour.enabled: Create only runs when both hold.
+    pub active: bool,
+    pub enabled: bool,
+    /// The component has been destroyed.
+    pub destroyed: bool,
+}
+
+/// What FixedJoint2D::Create reads from its two ends.
+#[derive(Clone, Copy, Debug)]
+struct Ends {
+    body_a: BodyId,
+    body_b: Option<BodyId>,
+    scale_a: Vec2,
+    scale_b: Vec2,
+}
+
+impl Game {
+    fn body_frame(&self, id: BodyId) -> BodyFrame {
+        let b = self.world.body(id);
+        BodyFrame { position: b.xf.p, q: b.xf.q, angle: b.sweep.a }
+    }
+
+    fn fixed_ends(&self, f: usize) -> Ends {
+        let j = &self.fixed_joints[f];
+        let scale = |p: usize| {
+            let s = self.lossy_scale(p);
+            Vec2::new(s[0], s[1])
+        };
+        Ends {
+            body_a: self.physicals[j.attached].rigidbody.body,
+            body_b: j.connected.map(|c| self.physicals[c].rigidbody.body),
+            scale_a: scale(j.attached),
+            scale_b: j.connected.map_or(Vec2::new(1.0, 1.0), scale),
+        }
+    }
+
+    /// AddComponent<FixedJoint2D>(): Reset's defaults, then AddToManager (180c02580) creates the joint (to the
+    /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
+    pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
+        let f = self.fixed_joints.len();
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joint_create_if_active(f);
+        f
+    }
+
+    fn fixed_joint_create_if_active(&mut self, f: usize) {
+        let j = &self.fixed_joints[f];
+        if j.active && j.enabled {
+            let ends = self.fixed_ends(f);
+            self.fixed_joint_create(f, ends);
+        }
+    }
+
+    /// FixedJoint2D::Create (180c04160) with Joint2D::FinalizeCreateJoint (180c048c0). The refusals (no body, the
+    /// same body at both ends, bodies of different worlds) log and leave `joint` unset; the connected anchor
+    /// Create auto-configured before them stays stored.
+    fn fixed_joint_create(&mut self, f: usize, ends: Ends) {
+        if !self.fixed_joints[f].active {
+            return;
+        }
+        let frame_a = self.body_frame(ends.body_a);
+        let connected = match ends.body_b {
+            None => Connected::World,
+            Some(b) => Connected::Body { frame: self.body_frame(b), lossy_scale: ends.scale_b },
+        };
+        let def = self.fixed_joints[f].state.create_def(ends.scale_a, &frame_a, &connected);
+        // FinalizeCreateJoint: body B is the connected body, or the scene's ground body. The one scene has one
+        // world, so the different-worlds refusal cannot arise.
+        let body_b = ends.body_b.unwrap_or_else(|| self.world.ground_body());
+        if check_bodies(Some((ends.body_a, 0u8)), (body_b, 0u8)).is_err() {
+            return;
+        }
+        let collide = self.fixed_joints[f].state.enable_collision;
+        let id = self.world.create_joint(def, ends.body_a, body_b, collide);
+        self.world.wake_joined(ends.body_a);
+        self.world.wake_joined(body_b);
+        let j = &mut self.fixed_joints[f];
+        j.joint = Some(id);
+        let (force, torque) = (j.state.break_force, j.state.break_torque);
+        self.add_break_limits_update(BreakJoint::Fixed(f), force, torque);
+        self.fixed_joints[f].state.finish_create();
+    }
+
+    /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
+    /// FlushSimulationChanges after it does nothing while playing).
+    fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
+        let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_ref().unwrap().weld().def.reference_angle);
+        self.fixed_joints[f].state.cleanup(destroyed, live);
+        if let Some(id) = self.fixed_joints[f].joint.take() {
+            self.world.destroy_joint(id);
+        }
+    }
+
+    /// Joint2D::ReCreate (180c05570): Cleanup, then Create when the GameObject is active and the component enabled.
+    /// The break-limit entry stays; Create's AddBreakLimitsUpdate moves it to the back.
+    fn fixed_joint_recreate(&mut self, f: usize) {
+        self.fixed_joint_cleanup(f, false);
+        self.fixed_joint_create_if_active(f);
+    }
+
+    /// AnchoredJoint2D::SetAnchor (180bf85b0): recreated only while a b2 joint exists.
+    pub fn fixed_joint_set_anchor(&mut self, f: usize, anchor: [f32; 2]) {
+        self.fixed_joints[f].state.anchor = Vec2::new(anchor[0], anchor[1]);
+        if self.fixed_joints[f].joint.is_some() {
+            self.fixed_joint_recreate(f);
+        }
+    }
+
+    /// AnchoredJoint2D::SetConnectedAnchor (180bf8630)
+    pub fn fixed_joint_set_connected_anchor(&mut self, f: usize, anchor: [f32; 2]) {
+        self.fixed_joints[f].state.connected_anchor = Vec2::new(anchor[0], anchor[1]);
+        if self.fixed_joints[f].joint.is_some() {
+            self.fixed_joint_recreate(f);
+        }
+    }
+
+    /// AnchoredJoint2D::SetAutoConfigureConnectedAnchor (180bf85d0)
+    pub fn fixed_joint_set_auto_configure(&mut self, f: usize, v: bool) {
+        self.fixed_joints[f].state.auto_configure_connected_anchor = v;
+        if self.fixed_joints[f].joint.is_some() {
+            self.fixed_joint_recreate(f);
+        }
+    }
+
+    /// Joint2D::SetConnectedBody (180c05a20): the new body is stored, then Cleanup(destroyed = true) forgets the
+    /// stored reference angle and Create runs again whether or not a b2 joint existed. (A body of another scene
+    /// is refused with a log; the rewrite has one scene. PhysicsManager2D::AutoSyncTransforms runs in between.)
+    pub fn fixed_joint_set_connected_body(&mut self, f: usize, connected: Option<usize>) {
+        self.fixed_joints[f].connected = connected;
+        self.fixed_joint_cleanup(f, true);
+        self.fixed_joint_create_if_active(f);
+    }
+
+    /// Joint2D::SetEnableCollision (180c05d80): stored, then Cleanup(false) and Create.
+    pub fn fixed_joint_set_enable_collision(&mut self, f: usize, v: bool) {
+        self.fixed_joints[f].state.enable_collision = v;
+        self.fixed_joint_recreate(f);
+    }
+
+    /// FixedJoint2D::SetFrequency / SetDampingRatio: clamped and written into the live b2 joint without recreating it.
+    pub fn fixed_joint_set_frequency(&mut self, f: usize, v: f32) {
+        let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
+        self.fixed_joints[f].state.set_frequency(v, live);
+    }
+
+    pub fn fixed_joint_set_damping_ratio(&mut self, f: usize, v: f32) {
+        let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
+        self.fixed_joints[f].state.set_damping_ratio(v, live);
+    }
+
+    /// Joint2D::SetBreakForce (180c05980) / SetBreakTorque (180c059d0): the clamped value is stored, then
+    /// AddBreakLimitsUpdate (180c02540) moves the joint to the back of the list, or off it when both limits are
+    /// infinite.
+    pub fn fixed_joint_set_break_force(&mut self, f: usize, v: f32) {
+        self.fixed_joints[f].state.break_force = clamp_break(v);
+        self.fixed_joint_update_break_limits(f);
+    }
+
+    pub fn fixed_joint_set_break_torque(&mut self, f: usize, v: f32) {
+        self.fixed_joints[f].state.break_torque = clamp_break(v);
+        self.fixed_joint_update_break_limits(f);
+    }
+
+    fn fixed_joint_update_break_limits(&mut self, f: usize) {
+        let (force, torque) = (self.fixed_joints[f].state.break_force, self.fixed_joints[f].state.break_torque);
+        self.add_break_limits_update(BreakJoint::Fixed(f), force, torque);
+    }
+
+    /// The component's destruction (Joint2D::Deactivate with a destroy operation): Cleanup(true), and the
+    /// break-limit entry leaves the scene's list (Joint2D::ThreadedCleanup).
+    pub fn fixed_joint_destroy(&mut self, f: usize) {
+        self.fixed_joint_cleanup(f, true);
+        self.joint_break_limits.retain(|&k| k != BreakJoint::Fixed(f));
+        self.fixed_joints[f].destroyed = true;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn slerp_ends_and_middle() {
         let (a, b) = ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.5f32.sin(), 0.5f32.cos()]);
@@ -312,5 +513,118 @@ mod tests {
     fn qmul_identity() {
         let q = [0.1, -0.2, 0.3, 0.9];
         assert_eq!(super::qmul([0.0, 0.0, 0.0, 1.0], q), q);
+    }
+
+    fn fixture() -> Game {
+        use crate::b2::world::{BodyDef, BodyType};
+        let mut g = Game::default();
+        for (x, angle) in [(0.0, 0.0), (2.0, 0.5)] {
+            let body = g.world.create_body(&BodyDef { kind: BodyType::Dynamic, position: Vec2::new(x, 1.0), angle, ..Default::default() });
+            let mut p = Physical::default();
+            p.rigidbody.body = body;
+            p.transform.localScale = [1.0, 1.0, 1.0];
+            p.transform.rotation = [0.0, 0.0, 0.0, 1.0];
+            g.physicals.push(p);
+        }
+        g
+    }
+
+    fn weld(g: &Game, f: usize) -> (crate::b2::weld::WeldDef, usize, usize) {
+        let j = g.world.joints[g.fixed_joints[f].joint.unwrap()].as_ref().unwrap();
+        (j.weld().def, j.body_a, j.body_b)
+    }
+
+    #[test]
+    fn add_component_welds_to_ground_then_connected_body_recreates() {
+        let mut g = fixture();
+        let f = g.add_fixed_joint_component(0);
+        let (def, a, b) = weld(&g, f);
+        assert_eq!((a, b), (g.physicals[0].rigidbody.body, g.world.ground_body()));
+        assert_eq!(def.reference_angle, 0.0 - 0.0);
+        g.fixed_joint_set_connected_body(f, Some(1));
+        let (def, _, b) = weld(&g, f);
+        assert_eq!(b, g.physicals[1].rigidbody.body);
+        // The reference angle is connected minus attached; the forgotten one is derived again.
+        assert_eq!(def.reference_angle, 0.5);
+        assert_eq!(g.world.joints.iter().flatten().count(), 1);
+        assert!(g.fixed_joints[f].state.anchor_configured);
+    }
+
+    #[test]
+    fn recreate_keeps_live_reference_angle_and_reconfigures_anchor() {
+        let mut g = fixture();
+        let f = g.add_fixed_joint_component(0);
+        g.fixed_joint_set_connected_body(f, Some(1));
+        g.world.body_mut(g.physicals[1].rigidbody.body).sweep.a = 2.0;
+        g.fixed_joint_set_anchor(f, [0.5, 0.0]);
+        let (def, _, _) = weld(&g, f);
+        assert_eq!(def.reference_angle, 0.5, "the live joint's reference angle survives ReCreate");
+        assert_eq!(def.local_anchor_a, Vec2::new(0.5, 0.0));
+        // Auto-configure ran again: the connected anchor is the world point in body B's frame.
+        assert_eq!(g.fixed_joints[f].state.connected_anchor, def.local_anchor_b);
+        // Re-selecting the connected body forgets it.
+        g.fixed_joint_set_connected_body(f, Some(1));
+        assert_eq!(weld(&g, f).0.reference_angle, 2.0 - 0.0);
+    }
+
+    #[test]
+    fn same_body_is_refused_without_a_joint() {
+        let mut g = fixture();
+        let f = g.add_fixed_joint_component(0);
+        g.fixed_joint_set_connected_body(f, Some(0));
+        assert!(g.fixed_joints[f].joint.is_none());
+        assert_eq!(g.world.joints.iter().flatten().count(), 0);
+        assert!(!g.fixed_joints[f].state.anchor_configured);
+        // Anchor setters leave it alone while there is no b2 joint.
+        g.fixed_joint_set_anchor(f, [1.0, 0.0]);
+        assert!(g.fixed_joints[f].joint.is_none());
+        // An inactive object creates nothing either.
+        g.fixed_joints[f].active = false;
+        g.fixed_joint_set_connected_body(f, Some(1));
+        assert!(g.fixed_joints[f].joint.is_none());
+    }
+
+    #[test]
+    fn break_limit_list_and_break() {
+        let mut g = fixture();
+        let a = g.add_fixed_joint_component(0);
+        let b = g.add_fixed_joint_component(1);
+        assert!(g.joint_break_limits.is_empty(), "both limits infinite");
+        g.fixed_joint_set_break_force(a, 10.0);
+        g.fixed_joint_set_break_force(b, 10.0);
+        assert_eq!(g.joint_break_limits, vec![BreakJoint::Fixed(a), BreakJoint::Fixed(b)]);
+        // ReCreate moves the entry to the back.
+        g.fixed_joint_set_auto_configure(a, true);
+        assert_eq!(g.joint_break_limits, vec![BreakJoint::Fixed(b), BreakJoint::Fixed(a)]);
+        // Infinite again: off the list.
+        g.fixed_joint_set_break_force(b, f32::INFINITY);
+        assert_eq!(g.joint_break_limits, vec![BreakJoint::Fixed(a)]);
+        // A reaction over the limit breaks it: b2 joint and list entry go.
+        let id = g.fixed_joints[a].joint.unwrap();
+        g.world.joints[id].as_mut().unwrap().weld_mut().impulse = [1.0, 0.0, 0.0];
+        g.update_joints(1.0 / 50.0);
+        assert!(g.fixed_joints[a].joint.is_none() && g.fixed_joints[a].destroyed);
+        assert!(g.joint_break_limits.is_empty());
+        assert!(g.fixed_joints[b].joint.is_some());
+        // Under the limit it stays.
+        g.fixed_joint_set_break_torque(b, 5.0);
+        let id = g.fixed_joints[b].joint.unwrap();
+        g.world.joints[id].as_mut().unwrap().weld_mut().impulse = [0.0, 0.0, 0.05];
+        g.update_joints(1.0 / 50.0);
+        assert!(g.fixed_joints[b].joint.is_some());
+    }
+
+    #[test]
+    fn frequency_writes_through_and_cleanup_wakes() {
+        let mut g = fixture();
+        let f = g.add_fixed_joint_component(0);
+        g.fixed_joint_set_frequency(f, 8.0);
+        g.fixed_joint_set_damping_ratio(f, 3.0);
+        let (def, _, _) = weld(&g, f);
+        assert_eq!((def.frequency_hz, def.damping_ratio), (8.0, 1.0));
+        // The recreated joint is built from the component's values.
+        g.fixed_joint_set_enable_collision(f, true);
+        assert_eq!(weld(&g, f).0.frequency_hz, 8.0);
+        assert!(g.world.joints[g.fixed_joints[f].joint.unwrap()].as_ref().unwrap().collide_connected);
     }
 }

@@ -657,11 +657,12 @@ impl Hinge {
     }
 }
 
-/// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, or a limb's gore-string SpringJoint2D.
+/// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, a limb's gore-string SpringJoint2D, or a FixedJoint2D.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BreakJoint {
     Hinge(usize),
     Spring(usize),
+    Fixed(usize),
 }
 
 /// A Transform as the scripts read it: world position and rotation, local scale, and the hierarchy's stored
@@ -731,6 +732,8 @@ pub struct Game {
     pub positionIterations: i32,
     /// PhysicsScene2D.m_JointBreakLimits: hinges with a finite break force or torque, in list order.
     pub joint_break_limits: Vec<BreakJoint>,
+    /// FixedJoint2D components (the shattered pieces' welds), by creation order.
+    pub fixed_joints: Vec<simulate::FixedJoint>,
     /// Rigidbody-less Transforms that parent physical objects.
     pub transform_nodes: Vec<crate::unity::transform::Node>,
     /// PhysicsScene2D m_LastSimulationTime / m_LastSimulationDelta.

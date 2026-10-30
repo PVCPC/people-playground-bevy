@@ -448,7 +448,8 @@ impl Game {
 
     /// BleedingParticleBehaviour.Update
     pub fn bleeding_update(&mut self, b: usize) {
-        if self.bleeding[b].destroyed {
+        // A child of its limb: no Update once the limb is deactivated (disintegrated).
+        if self.bleeding[b].destroyed || !self.limb_active(self.bleeding[b].CirculationBehaviour) {
             return;
         }
         let bp = &self.bleeding[b];
@@ -697,6 +698,10 @@ impl Game {
         }
         // A pooled BloodPuff's emitter: no FixedUpdate while it or the puff is inactive.
         if self.blood_puffs.iter().any(|b| b.splat == s && !(b.active && b.emitter_active)) {
+            return;
+        }
+        // A bleeding particle's splat is inactive with its limb.
+        if self.splats[s].attached.is_some_and(|(p, _, _)| !self.physicals[p].active) {
             return;
         }
         self.splats[s].particles.remove_where(|p| p.Life <= 0.0);

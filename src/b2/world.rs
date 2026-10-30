@@ -8,6 +8,7 @@ use super::contacts2d::{CollisionId, Contacts2D};
 use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::distance_joint::{DistanceDef, DistanceJoint};
+use super::weld::{WeldDef, WeldJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
 use super::shape::{Circle, MassData, Polygon, POLYGON_RADIUS};
 use super::solver::*;
@@ -391,11 +392,12 @@ pub struct Contact {
 
 pub type JointId = usize;
 
-/// The b2Joint types the game creates: HingeJoint2D and SpringJoint2D.
+/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D and FixedJoint2D.
 #[derive(Clone, Debug)]
 pub enum JointKind {
     Revolute(RevoluteJoint),
     Distance(DistanceJoint),
+    Weld(WeldJoint),
 }
 
 impl From<RevoluteDef> for JointKind {
@@ -407,6 +409,12 @@ impl From<RevoluteDef> for JointKind {
 impl From<DistanceDef> for JointKind {
     fn from(def: DistanceDef) -> Self {
         Self::Distance(DistanceJoint::new(def))
+    }
+}
+
+impl From<WeldDef> for JointKind {
+    fn from(def: WeldDef) -> Self {
+        Self::Weld(WeldJoint::new(def))
     }
 }
 
@@ -423,21 +431,35 @@ impl Joint {
     pub fn revolute(&self) -> &RevoluteJoint {
         match &self.kind {
             JointKind::Revolute(r) => r,
-            JointKind::Distance(_) => panic!("not a hinge"),
+            JointKind::Distance(_) | JointKind::Weld(_) => panic!("not a hinge"),
         }
     }
 
     pub fn revolute_mut(&mut self) -> &mut RevoluteJoint {
         match &mut self.kind {
             JointKind::Revolute(r) => r,
-            JointKind::Distance(_) => panic!("not a hinge"),
+            JointKind::Distance(_) | JointKind::Weld(_) => panic!("not a hinge"),
         }
     }
 
     pub fn distance(&self) -> &DistanceJoint {
         match &self.kind {
             JointKind::Distance(d) => d,
-            JointKind::Revolute(_) => panic!("not a spring"),
+            JointKind::Revolute(_) | JointKind::Weld(_) => panic!("not a spring"),
+        }
+    }
+
+    pub fn weld(&self) -> &WeldJoint {
+        match &self.kind {
+            JointKind::Weld(w) => w,
+            _ => panic!("not a fixed joint"),
+        }
+    }
+
+    pub fn weld_mut(&mut self) -> &mut WeldJoint {
+        match &mut self.kind {
+            JointKind::Weld(w) => w,
+            _ => panic!("not a fixed joint"),
         }
     }
 
@@ -445,6 +467,7 @@ impl Joint {
         match &self.kind {
             JointKind::Revolute(r) => (r.a, r.b),
             JointKind::Distance(d) => (d.a, d.b),
+            JointKind::Weld(w) => (w.a, w.b),
         }
     }
 
@@ -452,6 +475,7 @@ impl Joint {
         match &mut self.kind {
             JointKind::Revolute(r) => (&mut r.a, &mut r.b),
             JointKind::Distance(d) => (&mut d.a, &mut d.b),
+            JointKind::Weld(w) => (&mut w.a, &mut w.b),
         }
     }
 }
@@ -485,6 +509,8 @@ pub struct World {
     pub ignored: std::collections::HashSet<(FixtureId, FixtureId)>,
     /// The contact listener's PhysicsContacts2D.
     pub contacts2d: Contacts2D,
+    /// PhysicsScene2D's fixtureless static ground body (what a joint without connectedBody attaches to), made on first use.
+    ground: Option<BodyId>,
 }
 
 impl Default for World {
@@ -519,13 +545,16 @@ impl World {
             inv_dt0: 0.0,
             ignored: Default::default(),
             contacts2d: Contacts2D::default(),
+            ground: None,
         }
     }
 
+    #[track_caller]
     pub fn body(&self, id: BodyId) -> &Body {
         self.bodies[id].as_ref().unwrap()
     }
 
+    #[track_caller]
     pub fn body_mut(&mut self, id: BodyId) -> &mut Body {
         self.bodies[id].as_mut().unwrap()
     }
@@ -650,6 +679,17 @@ impl World {
 
     pub fn revolute_mut(&mut self, id: JointId) -> &mut super::revolute::RevoluteJoint {
         self.joints[id].as_mut().unwrap().revolute_mut()
+    }
+
+    /// The scene's ground body. Unity creates it with the scene; it never has fixtures, so making it on first use only
+    /// changes its id.
+    pub fn ground_body(&mut self) -> BodyId {
+        if let Some(id) = self.ground {
+            return id;
+        }
+        let id = self.create_body(&BodyDef::default());
+        self.ground = Some(id);
+        id
     }
 
     /// The wake b2World::DestroyJoint gives each end.
@@ -1286,6 +1326,7 @@ impl World {
             match &mut self.joints[jid].as_mut().unwrap().kind {
                 JointKind::Revolute(r) => r.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Distance(d) => d.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+                JointKind::Weld(w) => w.init_velocity_constraints(a, b, step, &positions, &mut velocities),
             }
         }
         for _ in 0..step.velocity_iterations {
@@ -1293,6 +1334,7 @@ impl World {
                 match &mut self.joints[jid].as_mut().unwrap().kind {
                     JointKind::Revolute(r) => r.solve_velocity_constraints(&mut velocities),
                     JointKind::Distance(d) => d.solve_velocity_constraints(&mut velocities),
+                    JointKind::Weld(w) => w.solve_velocity_constraints(&mut velocities),
                 }
             }
             solver.solve_velocity_constraints(&mut velocities);
@@ -1328,6 +1370,7 @@ impl World {
                 joints_solved &= match &self.joints[jid].as_ref().unwrap().kind {
                     JointKind::Revolute(r) => r.solve_position_constraints(&mut positions),
                     JointKind::Distance(d) => d.solve_position_constraints(&mut positions),
+                    JointKind::Weld(w) => w.solve_position_constraints(&mut positions),
                 };
             }
             if contacts_solved && joints_solved {

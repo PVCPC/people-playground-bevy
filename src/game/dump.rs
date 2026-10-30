@@ -1059,7 +1059,18 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         }
     }
     // Hinge motors, limits and break values.
-    for (h, r) in g.hinges.iter().zip(s.of("HingeJoint2D")) {
+    // Rigidbody2D, b2Body and HingeJoint2D records leave out inactive objects (a crushed limb); the scripts stay.
+    let limb_named = |name: &str| g.limbs.iter().position(|l| g.physicals[l.PhysicalBehaviour].name == name);
+    let live_hinges = g.limbs.iter().filter(|l| g.physicals[l.PhysicalBehaviour].active).filter_map(|l| l.Joint).filter(|&h| !g.hinges[h].destroyed).count();
+    if live_hinges != s.of("HingeJoint2D").count() {
+        out.push(format!("HingeJoint2D count: game {} ours {live_hinges}", s.of("HingeJoint2D").count()));
+    }
+    for r in s.of("HingeJoint2D") {
+        let Some(h) = limb_named(&r.name).and_then(|l| g.limbs[l].Joint) else {
+            out.push(format!("Hinge {}: ours missing", r.name));
+            continue;
+        };
+        let h = &g.hinges[h];
         let motor = format!("{},{},{}", h.useMotor as i32, h.motor[0].show(), h.motor[1].show());
         let limits = format!("{},{},{}", h.useLimits as i32, h.limits[0].show(), h.limits[1].show());
         for (k, ours) in [("motor", motor), ("limits", limits), ("breakForce", h.breakForce.show()), ("breakTorque", h.breakTorque.show())] {
@@ -1070,8 +1081,12 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         }
     }
     // Body velocities and forces the scripts write.
-    for (i, r) in s.of("b2Body").enumerate() {
-        let b = g.world.body(g.physicals[g.limbs[i].PhysicalBehaviour].rigidbody.body);
+    for r in s.of("b2Body") {
+        let Some(p) = g.limbs.iter().map(|l| l.PhysicalBehaviour).find(|&p| g.physicals[p].name == r.name && !g.physicals[p].destroyed) else {
+            out.push(format!("b2Body {}: ours destroyed", r.name));
+            continue;
+        };
+        let b = g.world.body(g.physicals[p].rigidbody.body);
         let w = words(r.req("body").unwrap());
         let ours = [b.flags as u32, b.linear_velocity.x.to_bits(), b.linear_velocity.y.to_bits(), b.angular_velocity.to_bits(), b.force.x.to_bits(), b.force.y.to_bits(), b.torque.to_bits()];
         let theirs = [w[1] & 0xffff, w[16], w[17], w[18], w[19], w[20], w[21]];
@@ -1081,7 +1096,7 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         if let Some(m) = r.get("move") {
             let w = words(m);
             let theirs = [&[(w[0] != u32::MAX) as u32], &w[4..25], &[w[31] & 0xff]].concat();
-            let ours = movement_words(&g.physicals[g.limbs[i].PhysicalBehaviour].rigidbody.movement);
+            let ours = movement_words(&g.physicals[p].rigidbody.movement);
             if ours != theirs {
                 out.push(format!("RigidbodyMovementState2D {}: game {theirs:08x?} ours {ours:08x?}", r.name));
             }
@@ -1248,7 +1263,8 @@ fn movement_words(m: &MovementState) -> Vec<u32> {
 fn compare_transforms(g: &Game, chained: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let chain = chained.of("TransformChain").any(|r| r.get("parent").is_some());
-    for (l, rb) in to.of("Rigidbody2D").enumerate().filter(|_| chain) {
+    for rb in to.of("Rigidbody2D").filter(|_| chain) {
+        let l = g.limbs.iter().position(|l| g.physicals[l.PhysicalBehaviour].name == rb.name).ok_or(format!("no limb {}", rb.name))?;
         let t = &g.physicals[g.limbs[l].PhysicalBehaviour].transform;
         let (pos, rot): ([f32; 3], [f32; 4]) = (floats(rb.req("tpos")?), floats(rb.req("trot")?));
         let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();

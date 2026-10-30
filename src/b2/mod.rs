@@ -12,4 +12,5 @@ pub mod revolute;
 pub mod shape;
 pub mod solver;
 pub mod toi;
+pub mod weld;
 pub mod world;

@@ -764,6 +764,7 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_island_solve(executable, true)?;
     compare_revolute(executable)?;
     compare_distance_joint(executable)?;
+    compare_weld(executable)?;
     compare_perlin(executable)?;
     compare_curve(executable)
 }
@@ -1431,4 +1432,130 @@ fn compare_distance_joint(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     report("DISTANCE JOINT", bad, replies.len(), first)
+}
+
+const WELD_INIT: u32 = 0xbc34b0;
+const WELD_SOLVE_VELOCITY: u32 = 0xbc6590;
+const WELD_SOLVE_POSITION: u32 = 0xbc4e00;
+
+/// b2WeldJoint (0x120 bytes).
+fn weld_bytes(j: &super::weld::WeldJoint) -> Vec<u8> {
+    let mut b = vec![0; 0x120];
+    put(&mut b, 0x70, j.a.index as u32);
+    put(&mut b, 0x74, j.b.index as u32);
+    put_vec(&mut b, 0x78, j.a.axis);
+    put_vec(&mut b, 0x80, j.b.axis);
+    put(&mut b, 0x98, j.def.frequency_hz.to_bits());
+    put(&mut b, 0x9c, j.def.damping_ratio.to_bits());
+    put(&mut b, 0xa0, j.bias.to_bits());
+    put_vec(&mut b, 0xa4, j.def.local_anchor_a);
+    put_vec(&mut b, 0xac, j.def.local_anchor_b);
+    put(&mut b, 0xb4, j.def.reference_angle.to_bits());
+    put(&mut b, 0xb8, j.gamma.to_bits());
+    for (k, x) in j.impulse.iter().enumerate() {
+        put(&mut b, 0xbc + 4 * k, x.to_bits());
+    }
+    put_vec(&mut b, 0xc8, j.r_a);
+    put_vec(&mut b, 0xd0, j.r_b);
+    put_vec(&mut b, 0xd8, j.a.local_center);
+    put_vec(&mut b, 0xe0, j.b.local_center);
+    for (k, x) in [j.a.inv_mass, j.b.inv_mass, j.a.inv_i, j.b.inv_i].iter().enumerate() {
+        put(&mut b, 0xe8 + 4 * k, x.to_bits());
+    }
+    for (k, x) in j.mass.iter().enumerate() {
+        put(&mut b, 0xf8 + 4 * k, x.to_bits());
+    }
+    b
+}
+
+/// Random welds (rigid and soft; static, fixed-rotation and axis-locked sides) stepped through init, velocity and
+/// position solves; each native call starts from the rewrite's state.
+fn compare_weld(executable: &std::path::Path) -> Result<(), String> {
+    use super::revolute::JointBody;
+    use super::weld::*;
+    let mut random = Random(0x5eed_000b);
+    let mut calls = Vec::new();
+    let mut expected: Vec<(&str, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    let axes = [Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)];
+    for case in 0..1024 {
+        let body = |random: &mut Random, index: usize, side: usize| {
+            let fixed = (case + side) % 11 == 0;
+            JointBody {
+                index,
+                local_center: random.vec(0.3),
+                inv_mass: if fixed { 0.0 } else { random.range(0.2, 4.0) },
+                // Zero inertia on both sides exercises the K.ez.z == 0 (2x2) paths.
+                inv_i: if fixed || random.next() % 9 == 0 { 0.0 } else { random.range(0.5, 40.0) },
+                axis: axes[random.next() as usize % axes.len()],
+            }
+        };
+        let (ia, ib) = if random.next() % 2 == 0 { (0, 1) } else { (2, 0) };
+        let (a, b) = (body(&mut random, ia, 0), body(&mut random, ib, 1));
+        let positions: Vec<Position> = (0..3).map(|_| Position { c: random.vec(1.0), a: random.range(-3.0, 3.0) }).collect();
+        let mut positions = positions;
+        let def = WeldDef {
+            local_anchor_a: random.vec(0.5),
+            local_anchor_b: random.vec(0.5),
+            reference_angle: random.range(-3.0, 3.0),
+            frequency_hz: [0.0, 0.0, random.range(0.0, 20.0), 8.0][random.next() as usize % 4],
+            damping_ratio: [0.0, random.range(0.0, 1.0)][random.next() as usize % 2],
+        };
+        if case % 7 == 0 {
+            // Nearly satisfied, so the final slop comparisons and tiny errors are exercised.
+            let (qa, qb) = (super::math::Rot::new(positions[ia].a), super::math::Rot::new(positions[ib].a));
+            let wa = qa.apply(def.local_anchor_a - a.local_center);
+            let rb = qb.apply(def.local_anchor_b - b.local_center);
+            let jitter = random.range(-0.004, 0.004);
+            positions[ib].c = Vec2::new(positions[ia].c.x + wa.x - rb.x + jitter, positions[ia].c.y + wa.y - rb.y);
+            positions[ib].a = positions[ia].a + def.reference_angle + random.range(-0.05, 0.05);
+        }
+        let mut joint = WeldJoint::new(def);
+        joint.impulse = [random.range(-1.0, 1.0), random.range(-1.0, 1.0), random.range(-1.0, 1.0)];
+        let mut velocities: Vec<Velocity> = (0..3).map(|_| Velocity { v: random.vec(5.0), w: random.range(-8.0, 8.0) }).collect();
+        let dt = [1.0 / 60.0, 0.02][random.next() as usize % 2];
+        let step = TimeStep { dt, inv_dt: 1.0 / dt, dt_ratio: random.range(0.5, 1.5), velocity_iterations: 8, position_iterations: 8, warm_starting: random.next() % 4 != 0 };
+        let record = |op, joint: &WeldJoint, positions: &[Position], velocities: &[Velocity]| {
+            let (p, v) = island_bytes(positions, velocities);
+            (op, weld_bytes(joint), p, v)
+        };
+        joint.a = a;
+        joint.b = b;
+        calls.push(joint_call(WELD_INIT, weld_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+        joint.init_velocity_constraints(a, b, &step, &positions, &mut velocities);
+        expected.push(record("init", &joint, &positions, &velocities));
+        for _ in 0..3 {
+            calls.push(joint_call(WELD_SOLVE_VELOCITY, weld_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            joint.solve_velocity_constraints(&mut velocities);
+            expected.push(record("velocity", &joint, &positions, &velocities));
+        }
+        for _ in 0..3 {
+            calls.push(joint_call(WELD_SOLVE_POSITION, weld_bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            let solved = joint.solve_position_constraints(&mut positions);
+            let mut r = record("position", &joint, &positions, &velocities);
+            r.1.push(solved as u8);
+            expected.push(r);
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: island_globals(), calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let (op, joint, p, v) = &expected[i];
+        let mut native_joint = unhex(&reply.buffers[0]);
+        native_joint[0x60..0x70].fill(0);
+        if *op == "position" {
+            native_joint.push((reply.ret & 0xff != 0) as u8);
+        }
+        let native = [native_joint, unhex(&reply.buffers[2]), unhex(&reply.buffers[3])];
+        for (k, (n, r)) in native.iter().zip([joint, p, v]).enumerate() {
+            if n != r {
+                bad += 1;
+                let at = n.iter().zip(r).position(|(x, y)| x != y).unwrap_or(n.len().min(r.len()));
+                let o = at & !3;
+                first.get_or_insert_with(|| format!("call {i} {op}: buffer {k} byte {at:#x} native={:#x} rust={:#x}", get(n, o.min(n.len() - 4)), get(r, o.min(r.len() - 4))));
+                break;
+            }
+        }
+    }
+    report("WELD JOINT", bad, replies.len(), first)
 }
