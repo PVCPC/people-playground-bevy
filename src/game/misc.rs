@@ -149,6 +149,57 @@ script! {
     }
 }
 
+/// HashSet<T> (System.Core) in slot order: enumeration walks the slots, Remove pushes its slot onto the free list,
+/// Add takes the latest freed slot, and removing the last element resets both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotSet<T> {
+    pub slots: Vec<Option<T>>,
+    /// The free list; the next Add takes the last.
+    pub free: Vec<usize>,
+}
+
+impl<T> Default for SlotSet<T> {
+    fn default() -> Self {
+        Self { slots: Vec::new(), free: Vec::new() }
+    }
+}
+
+impl<T> SlotSet<T> {
+    pub fn add(&mut self, v: T) {
+        match self.free.pop() {
+            Some(i) => self.slots[i] = Some(v),
+            None => self.slots.push(Some(v)),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(Option::is_none)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().flatten()
+    }
+
+    /// HashSet.RemoveWhere: Remove for each match in slot order.
+    pub fn remove_where(&mut self, f: impl Fn(&T) -> bool) {
+        for i in 0..self.slots.len() {
+            if self.slots[i].as_ref().is_some_and(&f) {
+                self.slots[i] = None;
+                if self.is_empty() {
+                    self.clear();
+                    return;
+                }
+                self.free.push(i);
+            }
+        }
+    }
+}
+
 /// FancyBloodSplatController.Particle
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SplatParticle {
@@ -176,14 +227,37 @@ script! {
         TriggerOnCollide: bool = false,
     }
     links {
-        particles: Vec<SplatParticle> = Vec::new(),
-        /// initialParent world position and the controller's own rotation.
+        particles: SlotSet<SplatParticle> = SlotSet::default(),
+        /// initialParent world position and the controller's own rotation (read live when attached).
         parent_position: [f32; 3] = [0.0, 0.0, 0.0],
         rotation: [f32; 4] = [0.0, 0.0, 0.0, 1.0],
+        /// A bleeding particle's splat: the limb's physical object, the bleeding particle's local Transform and
+        /// the controller's local rotation under it. None for a BloodExplosion's (unparented at Start).
+        attached: Option<(usize, crate::unity::transform::Trs, [f32; 4])> = None,
         /// False between Instantiate and the delayed Start (loaded scenes are already started).
         started: bool = true,
         destroyed: bool = false,
+        CollisionLayers: u32 = 0,
+        /// The person whose hierarchy initialParent is in; None for a BloodExplosion, a root of its own.
+        parent_person: Option<usize> = None,
     }
+}
+
+/// One DecalControllerBehaviour decal: its local position (localDecalPositions), size, sprite and colour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Decal {
+    pub position: [f32; 2],
+    pub size: f32,
+    pub sprite: usize,
+    pub colour: [f32; 4],
+}
+
+/// A behaviour whose Start is still due.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PendingStart {
+    Splat(usize),
+    /// ExplosionSoundBehviour on a BloodExplosion (three Near clips, StartWhenAwake, no distant sound).
+    BloodExplosionSound,
 }
 
 impl Game {
@@ -333,10 +407,15 @@ impl Game {
         let scaled = mathf::map_range(0.0, 1.0, 0.0, 1.0, c.TotalLiquidAmount);
         let pushing_ok = bp.PushingTo.map_or(true, |p| self.circulations[p].IsDisconnected);
         if pushing_ok && num > 0.05 && scaled > 0.05 && self.physicals[self.limbs[l].PhysicalBehaviour].Temperature > 0.0 {
-            // GetComputedColor / goreless recolouring and the shape/drag modules are visual only.
+            let fallback = self.original_blood_color(l);
+            let mut color = self.get_computed_color(l, fallback);
+            if self.prefs.GorelessMode {
+                color = super::circulation::change_red_to_orange(color);
+            }
             // ponytail: WaterBehaviour.IsPointUnderWater; water is not rewritten yet, so never under water.
             let flag = false;
             let dt = self.time.deltaTime;
+            let c = &self.circulations[l];
             let (flow, mult, total) = (c.BloodFlow, c.BloodLossRateMultiplier, c.TotalLiquidAmount);
             let bp = &mut self.bleeding[b];
             bp.fakeHeartClock = (d(bp.fakeHeartClock) + d(dt) * flow * bp.PulseSpeed).f();
@@ -349,6 +428,7 @@ impl Game {
             if let Some(s) = bp.BloodSplatController {
                 let speed = bp.startSpeedMultiplier;
                 let splat = &mut self.splats[s];
+                splat.DecalColourMultiplier = color;
                 splat.EjectionForce = [0.25 * speed, 0.35 * speed];
                 splat.SpawningChance = if flag { 0.0 } else { total * 0.5 };
             }
@@ -382,9 +462,17 @@ impl Game {
     /// at FixedUpdate.ScriptRunDelayedFixedFrameRate (before each step's FixedUpdates) and
     /// Update.ScriptRunDelayedDynamicFrameRate (before Update), whichever comes first after the Instantiate.
     pub fn run_pending_starts(&mut self) {
-        for s in 0..self.splats.len() {
-            if !self.splats[s].started && !self.splats[s].destroyed {
-                self.splat_start(s);
+        for start in std::mem::take(&mut self.pending_starts) {
+            match start {
+                PendingStart::Splat(s) => {
+                    if !self.splats[s].started && !self.splats[s].destroyed {
+                        self.splat_start(s);
+                    }
+                }
+                // Play(Delay): audioSource.clip = Near.PickRandom(); DistantSound is None.
+                PendingStart::BloodExplosionSound => {
+                    self.pick_random(3);
+                }
             }
         }
     }
@@ -412,7 +500,7 @@ impl Game {
         if !self.splats[s].started {
             return;
         }
-        self.splats[s].particles.retain(|p| !(p.Life <= 0.0));
+        self.splats[s].particles.remove_where(|p| p.Life <= 0.0);
         if self.splats[s].Continuous {
             if self.random.value() <= self.splats[s].SpawningChance {
                 self.create_splat_particle(s, 0);
@@ -423,13 +511,27 @@ impl Game {
         }
         let fdt = self.time.fixedDeltaTime;
         let g = self.world.gravity;
-        for p in &mut self.splats[s].particles {
+        let sp = &self.splats[s];
+        let (mask, size, colour, root) = (sp.CollisionLayers, sp.Size, sp.DecalColourMultiplier, sp.parent_person);
+        for i in 0..self.splats[s].particles.slots.len() {
+            let Some(p) = &mut self.splats[s].particles.slots[i] else { continue };
             p.PositionX += p.VelocityX;
             p.PositionY += p.VelocityY;
             p.VelocityX = (d(p.VelocityX) + d(g.x) * fdt / 10.0f32).f();
             p.VelocityY = (d(p.VelocityY) + d(g.y) * fdt / 10.0f32).f();
             p.Life -= fdt;
-            // ponytail: Physics2D.OverlapPoint + "Decal" message; decals are visual and not rewritten yet.
+            let position = [p.PositionX, p.PositionY];
+            // initialParent outlives the splat: a bleeding particle destroys its splat with it, and a
+            // BloodExplosion's DeleteAfterTime (5 s) comes after its drops (2 s at most) are gone.
+            let Some(hit) = self.overlap_point_first(position, mask) else { continue };
+            let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| l.PhysicalBehaviour == hit && l.Person == person));
+            if colour[3] > 0.05 && !same_root {
+                self.physical_decal(hit, position, size, colour);
+                self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
+                if self.splats[s].TriggerOnCollide {
+                    unimplemented!("FancyBloodSplatController.OnCollide");
+                }
+            }
         }
     }
 
@@ -439,15 +541,43 @@ impl Game {
             let v = self.splats[s].LifetimeInSeconds;
             self.random.range(v[0], v[1])
         };
+        self.update_splat_pose(s);
         let position = self.splats[s].parent_position;
         let force = self.splat_ejection_force(s, index);
-        self.splats[s].particles.push(SplatParticle {
+        self.splats[s].particles.add(SplatParticle {
             VelocityX: 0.15 * force[0],
             VelocityY: 0.15 * force[1],
             PositionX: position[0],
             PositionY: position[1],
             Life: life,
         });
+    }
+
+    /// initialParent.position of a splat that moves with its limb.
+    fn update_splat_pose(&mut self, s: usize) {
+        let Some((p, bleeding, _)) = self.splats[s].attached else { return };
+        let mut v = bleeding.t;
+        for node in self.local_chain(p).iter().rev() {
+            v = crate::unity::transform::global_position(node, v);
+        }
+        self.splats[s].parent_position = [v[0], v[1], v[2]];
+    }
+
+    /// The splat's transform.TransformDirection(v).
+    fn splat_transform_direction(&self, s: usize, v: [f32; 2]) -> [f32; 3] {
+        use crate::unity::transform::rotate_direction;
+        let sp = &self.splats[s];
+        let mut v = [v[0], v[1], 0.0, 0.0];
+        match sp.attached {
+            None => v = rotate_direction(sp.rotation, None, v),
+            Some((p, bleeding, local_rotation)) => {
+                v = rotate_direction(bleeding.q, Some(bleeding.s), rotate_direction(local_rotation, None, v));
+                for node in self.local_chain(p).iter().rev() {
+                    v = rotate_direction(node.q, Some(node.s), v);
+                }
+            }
+        }
+        [v[0], v[1], v[2]]
     }
 
     fn splat_ejection_force(&mut self, s: usize, index: i32) -> [f32; 2] {
@@ -460,7 +590,7 @@ impl Game {
                 let f = (d((360 / num) as f32) * index as f32 * (std::f32::consts::PI / 180.0)).f();
                 [(f as f64).cos() as f32, (f as f64).sin() as f32, 0.0]
             }
-            _ => mathf::rotate(sp.rotation, [sp.Direction[0], sp.Direction[1], 0.0]),
+            _ => self.splat_transform_direction(s, sp.Direction),
         };
         let r = mathf::rotate(q, dir);
         let e = self.splats[s].EjectionForce;
@@ -471,7 +601,8 @@ impl Game {
     /// Quaternion.Lerp(identity, Quaternion.Euler(0, 0, Random.value * 360), AngleRandomisation / 360)
     fn randomised_angle(&mut self, s: usize) -> [f32; 4] {
         let z = self.random.value() * 360.0 * mathf::DEG2RAD * 0.5;
-        let target = [0.0, 0.0, (z as f64).sin() as f32, (z as f64).cos() as f32];
+        // EulerToQuaternion (18073d0c0) calls the CRT's single-precision sinf/cosf.
+        let target = [0.0, 0.0, z.sin(), z.cos()];
         let t = mathf::clamp01(self.splats[s].AngleRandomisation / 360.0);
         // QuaternionTpl Lerp: dot(identity, target) = target.w; negative flips the target.
         let sign = if target[3] < 0.0 { -1.0 } else { 1.0 };

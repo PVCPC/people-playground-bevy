@@ -323,6 +323,7 @@ pub struct Prefs {
     pub CrushForceMultiplier: f32,
     pub ProceduralFragments: bool,
     pub FancyEffects: bool,
+    pub Decals: bool,
     pub ToolSelectionMode: i32,
     pub GridSnap: f32,
 }
@@ -346,6 +347,7 @@ impl Default for Prefs {
             CrushForceMultiplier: 1.0,
             ProceduralFragments: false,
             FancyEffects: true,
+            Decals: true,
             ToolSelectionMode: tool::SELECTION_AREA,
             GridSnap: 0.25,
         }
@@ -701,6 +703,8 @@ pub struct Game {
     pub people: Vec<Person>,
     pub bleeding: Vec<BleedingParticle>,
     pub splats: Vec<FancyBloodSplat>,
+    /// Behaviours instantiated since the last delayed-Start pass, in Awake order.
+    pub pending_starts: Vec<misc::PendingStart>,
     pub hinges: Vec<Hinge>,
     /// The map's scripts that draw UnityEngine.Random (scene order).
     pub ambient_audio: Vec<PlayAudioAtRandom>,

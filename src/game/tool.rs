@@ -161,6 +161,12 @@ impl Game {
         hits
     }
 
+    /// Physics2D.OverlapPoint(point, mask): the lowest-z collider at the point.
+    pub fn overlap_point_first(&self, point: [f32; 2], mask: u32) -> Option<usize> {
+        let p = V::new(point[0], point[1]);
+        self.overlap_query(self.world.query_point(p), mask, f32::NEG_INFINITY, f32::INFINITY, |shape, xf| test_point(shape, xf, p)).first().copied()
+    }
+
     /// Physics2D.OverlapAreaAll(a, b, mask): OverlapAreaAllToBox_Internal's OverlapBoxAll at the midpoint, size
     /// |a − b|, angle 0, depths unbounded. OverlapBoxQuery2D: SetAsBox(max(size/2, 1e-4)) with b2_polygonRadius,
     /// its AABB at the identity, and TestShapeOverlap (b2TestOverlap) per fixture.
@@ -213,8 +219,9 @@ impl Game {
         hits.into_iter().map(|(ph, _)| ph).collect()
     }
 
+
     /// The physical's Transform ancestors, root first, then its own local TRS.
-    fn local_chain(&self, p: usize) -> Vec<crate::unity::transform::Trs> {
+    pub(super) fn local_chain(&self, p: usize) -> Vec<crate::unity::transform::Trs> {
         use crate::unity::transform::{inverse, Trs};
         let mut chain = Vec::new();
         let mut n = self.physicals[p].parent;
@@ -244,6 +251,15 @@ impl Game {
         let mut v = [point[0], point[1], point[2], 0.0];
         for node in &self.local_chain(p) {
             v = crate::unity::transform::inverse(node, v, [0.0, 0.0, 0.0, 1.0]).0;
+        }
+        [v[0], v[1], v[2]]
+    }
+
+    /// Transform.TransformPoint (1807f6830): CalculateGlobalPosition's step through the object, then each parent.
+    pub fn transform_point3(&self, p: usize, point: [f32; 3]) -> [f32; 3] {
+        let mut v = [point[0], point[1], point[2], 0.0];
+        for node in self.local_chain(p).iter().rev() {
+            v = crate::unity::transform::global_position(node, v);
         }
         [v[0], v[1], v[2]]
     }

@@ -265,7 +265,7 @@ impl Game {
     /// LimbBehaviour.Wince
     pub fn limb_wince(&mut self, l: usize, intensity: f32) {
         if self.limbs[l].HasJoint && self.limb_is_considered_alive(l) && !(self.limbs[l].Health < 0.1) {
-            let value = 60.0 * intensity * (mathf::perlin(self.time.time * 8.0, self.limbs[l].randomOffset) * 2.0 - 1.0);
+            let value = (d(60.0f32) * intensity * (d(mathf::perlin(self.time.time * 8.0, self.limbs[l].randomOffset)) * 2.0 - 1.0)).f();
             self.influence_motor_speed(l, mathf::clamp(value, -450.0, 450.0), 0.5);
         }
     }
@@ -981,6 +981,14 @@ impl Game {
         }
     }
 
+    /// LimbBehaviour.ShatterProcedurally(ShatterFlags.All): Random.value is drawn first.
+    fn limb_shatter_procedurally(&mut self, l: usize) {
+        let v = self.random.value();
+        if !(self.limbs[l].ShatteredObjectChance < v) && self.prefs.ProceduralFragments {
+            unimplemented!("LimbBehaviour.ShatterProcedurally: ShatteredObjectGenerator.Generate (procedural fragments)");
+        }
+    }
+
     /// LimbBehaviour.Crush
     pub fn limb_crush(&mut self, l: usize) {
         let p = self.limbs[l].PhysicalBehaviour;
@@ -995,9 +1003,54 @@ impl Game {
             self.add_pain(person, 25.0);
         }
         if !self.prefs.GorelessMode {
-            // The BloodExplosion prefab holds a FancyBloodSplatController whose Start draws random numbers,
-            // then SetColor(GetComputedColor) and ShatterProcedurally.
-            unimplemented!("LimbBehaviour.Crush: BloodExplosionPrefab, SetColor and ShatterProcedurally");
+            // Instantiate(BloodExplosionPrefab, transform.position, identity). Awake in hierarchy order: the
+            // root's ExplosionSoundBehviour (audio source registration), then the ActivateIfFancyEffects of
+            // Debris 2, extraDecals and chunks each draw `Chance(1) > Random.value` before reading FancyEffects.
+            // The particle systems draw from their own generators, not UnityEngine.Random.
+            let position = self.physicals[p].transform.position;
+            let _debris2 = 1.0 > self.random.value() && self.prefs.FancyEffects;
+            let extra_decals = 1.0 > self.random.value() && self.prefs.FancyEffects;
+            let _chunks = 1.0 > self.random.value() && self.prefs.FancyEffects;
+            self.pending_starts.push(super::misc::PendingStart::BloodExplosionSound);
+            // extraDecals: a circle of 25..32 drops from the explosion (its parent at Start).
+            let splat = extra_decals.then(|| {
+                self.splats.push(super::misc::FancyBloodSplat {
+                    UnparentAtStart: true,
+                    DirectionMode: 2,
+                    Continuous: false,
+                    Direction: [0.0, 1.0],
+                    SpawningChance: 0.1,
+                    AmountRange: [25.0, 32.0],
+                    AngleRandomisation: 11.25,
+                    LifetimeInSeconds: [1.0, 2.0],
+                    EjectionForce: [0.0, 5.0],
+                    DecalColourMultiplier: [f32::from_bits(0x3f169697), 0.0, 0.0, 1.0],
+                    Size: 0.3,
+                    DestroyWhenNoParticles: true,
+                    TriggerOnCollide: false,
+                    particles: Default::default(),
+                    parent_position: position,
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    started: false,
+                    destroyed: false,
+                    CollisionLayers: 10752,
+                    attached: None,
+                    parent_person: None,
+                });
+                let s = self.splats.len() - 1;
+                self.pending_starts.push(super::misc::PendingStart::Splat(s));
+                s
+            });
+            // DeleteAfterTime (5 s) only removes the explosion's own objects.
+            if !self.limbs[l].IsAndroid {
+                // BloodExplosionBehaviour.SetColor: the particles' start colour and the splat's decal colour.
+                let fallback = self.original_blood_color(l);
+                let color = self.get_computed_color(l, fallback);
+                if let Some(s) = splat {
+                    self.splats[s].DecalColourMultiplier = color;
+                }
+            }
+            self.limb_shatter_procedurally(l);
         }
         if !self.physicals[p].isDisintegrated {
             self.physical_disintegrate(p);

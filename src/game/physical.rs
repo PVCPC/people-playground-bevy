@@ -51,6 +51,7 @@ script! {
         SimulateTemperature: bool = true,
         AmbientTemperatureTransfer: bool = true,
         OnFire: bool = false,
+        DisplayBloodDecals: bool = true,
         BurnProgress: f32 = 0.0,
         isSliding: bool = false,
         EnergyWireResistance: f32 = 1.0,
@@ -117,7 +118,9 @@ script! {
         enabled: bool = true,
         /// Set when the oracle loads a component it has no data for.
         has_fire_map: bool = false,
-        decal_controllers: usize = 0,
+        /// The DecalControllerBehaviour PhysicalBehaviour.Decal adds for Sparse blood, the only descriptor any
+        /// splat sends (none until the first decal).
+        decals: Option<Vec<super::misc::Decal>> = None,
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).
@@ -301,7 +304,7 @@ impl Game {
             ph.Temperature = mathf::clamp(-273.15, ph.Temperature, 5_000_000.0);
         }
         self.on_collision_stay_without_sleep(p);
-        if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && self.physicals[p].decal_controllers > 0 {
+        if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && self.physicals[p].decals.is_some() {
             // ponytail: underwater decal fading is visual only; decals are not rewritten yet.
         }
         // ponytail: penetrations stay empty until stabbing is rewritten.
@@ -490,6 +493,43 @@ impl Game {
                 self.physicals[v].charge = c;
             }
         }
+    }
+
+    /// PhysicalBehaviour.Decal with a Sparse blood instruction, then the DecalControllerBehaviour it added (a
+    /// later receiver of the same message finds the decal already there: IsNearOtherDecal).
+    pub fn physical_decal(&mut self, p: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
+        if self.physicals[p].decals.is_none() {
+            if !(self.physicals[p].DisplayBloodDecals && self.prefs.Decals) {
+                return;
+            }
+            self.physicals[p].decals = Some(Vec::new());
+        }
+        // DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
+        if !self.prefs.Decals {
+            return;
+        }
+        let local = self.inverse_transform_point(p, [position[0], position[1], 0.0]);
+        let local = [local[0], local[1]];
+        // IsNearOtherDecal: IgnoreRadius 0.2.
+        let radius = 0.2f32 * 0.2;
+        let at = self.transform_point3(p, [local[0], local[1], 0.0]);
+        let near = self.physicals[p].decals.as_ref().unwrap().iter().any(|decal| {
+            let o = self.transform_point3(p, [decal.position[0], decal.position[1], 0.0]);
+            let v = [at[0] - o[0], at[1] - o[1], at[2] - o[2]];
+            (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).f() < radius
+        });
+        if near {
+            return;
+        }
+        let size = size * self.random.range(1.0, 1.2);
+        // Sprites.PickRandom() of its 32; Color white times the instruction's multiplier.
+        let sprite = self.pick_random(32).unwrap();
+        let mut colour = colour;
+        if self.prefs.GorelessMode {
+            colour = super::circulation::change_red_to_orange(colour);
+        }
+        // WillDrip: Sparse blood has no drips.
+        self.physicals[p].decals.as_mut().unwrap().push(super::misc::Decal { position: local, size, sprite, colour });
     }
 
     /// Transform.TransformPoint for a 2D point of a physical object's transform.
@@ -865,6 +905,11 @@ impl Game {
         w.contacts2d.destroy_contacts(collider);
         self.rigidbody_cleanup(p);
         self.physicals[p].active = false;
+        // GForceMeasureBehaviour.OnDisable on a limb.
+        if let Some(l) = self.limbs.iter().position(|limb| limb.PhysicalBehaviour == p) {
+            let g = &mut self.gforces[l];
+            (g.acceleration, g.sustainedAcceleration, g.velocity, g.velocityLastFrame) = ([0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2]);
+        }
         // PhysicalBehaviour.OnDisable: an empty Collision2D exit to each collider still in the stay buffer
         // (SendMessage skips inactive objects; collision messages reach disabled behaviours).
         for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {

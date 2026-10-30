@@ -82,6 +82,16 @@ pub fn liquid_color(l: usize) -> [f32; 4] {
 }
 
 /// Color.RGBToHSV
+/// Utils.ChangeRedToOrange
+pub fn change_red_to_orange(v: [f32; 4]) -> [f32; 4] {
+    let h = rgb_to_hsv(v)[0];
+    if (h - 0.0).abs() < 0.03 || (h - 1.0).abs() < 0.03 {
+        [0.87, 0.6, 0.18, 1.0]
+    } else {
+        v
+    }
+}
+
 pub fn rgb_to_hsv(c: [f32; 4]) -> [f32; 3] {
     let (offset, dominant, one, two) = if c[2] > c[1] && c[2] > c[0] {
         (4.0, c[2], c[0], c[1])
@@ -366,11 +376,7 @@ impl Game {
             v[i] = mathf::clamp(v[i], 0.0, 10.0);
         }
         if self.prefs.GorelessMode {
-            // Utils.ChangeRedToOrange
-            let h = rgb_to_hsv(v)[0];
-            if (h - 0.0).abs() < 0.03 || (h - 1.0).abs() < 0.03 {
-                v = [0.87, 0.6, 0.18, 1.0];
-            }
+            v = change_red_to_orange(v);
         }
         c.cachedComputedColour = v;
         c.isComputedColourCached = true;
@@ -615,12 +621,16 @@ impl Game {
                     Size: 0.1,
                     DestroyWhenNoParticles: true,
                     TriggerOnCollide: false,
-                    particles: Vec::new(),
+                    particles: Default::default(),
                     parent_position: position,
                     rotation,
                     started: false,
                     destroyed: false,
+                    CollisionLayers: 10752,
+                    attached: None,
+                    parent_person: Some(self.limbs[l].Person),
                 });
+                self.pending_starts.push(super::misc::PendingStart::Splat(self.splats.len() - 1));
                 Some(self.splats.len() - 1)
             } else {
                 None

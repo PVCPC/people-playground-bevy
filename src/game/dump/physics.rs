@@ -572,6 +572,18 @@ pub fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> 
     for k in ours_list.iter().filter(|k| !game_list.contains(k)) {
         out.push(format!("b2Contact {k}: extra"));
     }
+    // The proxies' AABBs and fat tree AABBs (history-dependent: they decide which pairs the broad-phase finds).
+    for rec in s.of("b2Fixture") {
+        let Some(&f) = r.fixtures.get(&rec.name) else { continue };
+        let theirs: Vec<Vec<u32>> = names(rec.req("proxies")?).iter().map(|p| words(p.split_once(',').map_or("", |x| x.1))).collect();
+        let ours: Vec<Vec<u32>> = w.fixtures[f].as_ref().unwrap().proxies.iter().map(|(a, id)| {
+            let fat = w.broad_phase.tree.fat_aabb(*id);
+            [a.lower.x, a.lower.y, a.upper.x, a.upper.y, fat.lower.x, fat.lower.y, fat.upper.x, fat.upper.y].map(f32::to_bits).to_vec()
+        }).collect();
+        if theirs != ours {
+            out.push(format!("b2Fixture {}.proxies: game {theirs:08x?} ours {ours:08x?}", rec.name));
+        }
+    }
     if out.is_empty() && ours_list != game_list {
         out.push(format!("b2World.contacts: game {} ours {}", game_list.join(";"), ours_list.join(";")));
     }

@@ -103,7 +103,10 @@ impl Shape {
                     if v.y <= lower.y { lower.y = v.y }
                     if upper.y <= v.y { upper.y = v.y }
                 }
-                let r = polygon.radius;
+                // Unity's ComputeAABB(includeRadius = true) adds GetEffectiveRadius (180bb3f20): the radius less
+                // b2_polygonRadius when it is larger.
+                let skin = f32::from_bits(0x3c23d70a);
+                let r = if skin >= polygon.radius { polygon.radius } else { polygon.radius - skin };
                 Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(upper.x + r, upper.y + r) }
             }
         }
@@ -358,7 +361,7 @@ pub struct Fixture {
     pub is_sensor: bool,
     pub filter: Filter,
     /// (aabb, proxy id) per shape child; circles and polygons have one.
-    proxies: Vec<(Aabb, i32)>,
+    pub(crate) proxies: Vec<(Aabb, i32)>,
     pub mass_data: MassData,
     pub collider: ColliderRef,
 }

@@ -80,6 +80,8 @@ impl Game {
         // FixedUpdate.ScriptRunDelayedFixedFrameRate, which also resumes the recorder's FE snapshot.
         // ponytail: the destroys run before that snapshot; order them by time when a recording has gore strings.
         self.gore_string_delayed_calls(false);
+        // The delayed Start of behaviours instantiated during this FixedUpdate (registered after those calls).
+        self.run_pending_starts();
     }
 
     /// Each awake Rigidbody2D's body pose to its Transform: the position's x/y, and the rotation's z turn replaced

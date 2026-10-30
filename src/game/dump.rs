@@ -365,6 +365,16 @@ impl Game {
                         None => g.world.create_body(&BodyDef::default()),
                     };
                     p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None };
+                    // From dump16 on the record carries the object's Transform.
+                    if let Some(pos) = r.get("tpos") {
+                        p.parent = r.get("parent").and_then(|t| node_of(&g, t));
+                        p.transform = Pose {
+                            position: floats(pos),
+                            rotation: floats(r.req("trot")?),
+                            localScale: floats(r.req("scale")?),
+                            local: Some((floats(r.req("tlpos")?), floats(r.req("tlrot")?))),
+                        };
+                    }
                 }
             }
             g.physicals.push(p);
@@ -547,9 +557,31 @@ impl Game {
         for r in s.of("FancyBloodSplatController") {
             let mut sp = FancyBloodSplat::default();
             load_fields(sp.fields(), r)?;
-            if list(r.req("particles")?).len() != 0 {
-                return Err("splat particles are not loaded yet".into());
+            // From dump16 on: the HashSet's slots, each "VelocityX,VelocityY,PositionX,PositionY,Life" or "-" (free),
+            // then "free=" and its free list; before, the particles' type names.
+            let text = r.req("particles")?;
+            match text.split_once("free=") {
+                Some((slots, free)) => {
+                    for item in list(slots) {
+                        sp.particles.slots.push((item != "-").then(|| {
+                            let [VelocityX, VelocityY, PositionX, PositionY, Life] = floats::<5>(item);
+                            super::misc::SplatParticle { VelocityX, VelocityY, PositionX, PositionY, Life }
+                        }));
+                    }
+                    sp.particles.free = free.split(',').filter(|i| !i.is_empty()).rev().map(|i| i.parse().unwrap()).collect();
+                }
+                None if list(text).is_empty() => {}
+                None => return Err("splat particles without their slots".into()),
             }
+            if !r.req("Decal")?.starts_with("@Sparse_blood#") || !r.req("initialParent")?.starts_with("@BleedingParticle") {
+                return Err(format!("splat {}: only bleeding particles' Sparse blood splats are loaded", r.id));
+            }
+            // The local rotation under the bleeding particle until the bleeding particle attaches it.
+            if let Some(q) = r.get("tlrot") {
+                sp.rotation = floats(q);
+            }
+            let mask = r.req("CollisionLayers")?;
+            sp.CollisionLayers = mask.trim_start_matches("LayerMask(m_Mask=").trim_end_matches(')').parse().map_err(|_| format!("bad mask {mask}"))?;
             g.splats.push(sp);
         }
         for r in s.of("BleedingParticleBehaviour") {
@@ -558,6 +590,21 @@ impl Game {
             b.CirculationBehaviour = circ_ids[&reference(r.req("CirculationBehaviour")?).unwrap()];
             b.PushingTo = reference(r.req("PushingTo")?).map(|id| circ_ids[&id]);
             b.BloodSplatController = reference(r.req("BloodSplatController")?).map(|id| splat_ids[&id]);
+            if let Some(s) = b.BloodSplatController {
+                let limb = &g.limbs[b.CirculationBehaviour];
+                g.splats[s].parent_person = Some(limb.Person);
+                // From dump16 on: the bleeding particle's Transform under its limb.
+                if let Some(t) = r.get("tlpos") {
+                    let parent = r.req("tparent")?;
+                    if !parent.starts_with(&format!("{}#", g.physicals[limb.PhysicalBehaviour].name)) {
+                        return Err(format!("bleeding particle {} under {parent}", r.id));
+                    }
+                    let [x, y, z]: [f32; 3] = floats(t);
+                    let [sx, sy, sz]: [f32; 3] = floats(r.req("tscale")?);
+                    let trs = crate::unity::transform::Trs { t: [x, y, z, 0.0], q: floats(r.req("tlrot")?), s: [sx, sy, sz, 0.0] };
+                    g.splats[s].attached = Some((limb.PhysicalBehaviour, trs, g.splats[s].rotation));
+                }
+            }
             b.DripSounds = match r.req("DripSounds")? {
                 "null" => None,
                 t => Some(list(t).len()),
@@ -646,7 +693,8 @@ impl Game {
             } else {
                 continue;
             };
-            if let Some(&id) = self.objects.get(name) {
+            // Snapshot records name objects with spaces as underscores.
+            if let Some(&id) = self.objects.get(&name.replace(' ', "_")) {
                 self.layers.insert(id, layer.parse().unwrap());
             }
         }
@@ -660,6 +708,15 @@ impl Game {
         if let Some((_, d)) = s.snap.iter().find(|(k, _)| k == "drag") {
             let b: Vec<bool> = d.split(',').map(|x| x == "1").collect();
             self.input.controls.insert("drag".into(), super::tool::Control { down: b[0], held: b[1], up: b[2] });
+        }
+    }
+
+    /// The renderer state scripts read: each bleeding particle's ParticleSystemRenderer.isVisible (dump16 on).
+    pub fn load_render_state(&mut self, s: &Snapshot) {
+        for (b, r) in self.bleeding.iter_mut().zip(s.of("BleedingParticleBehaviour")) {
+            if let Some(v) = r.get("visible") {
+                b.visible = v == "1";
+            }
         }
     }
 
@@ -895,6 +952,7 @@ fn rig_poses(rig: &HumanRig, limbs: &[Limb]) -> Result<Vec<RagdollPose>, String>
 /// Compares every dumped field of the rewritten scripts with a snapshot; returns the mismatches.
 pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     let mut out = Vec::new();
+    let mut particles = Vec::new();
     let mut check = |what: String, fields: Vec<(&'static str, &mut dyn Field)>, r: &Record| {
         for (name, field) in fields {
             let ours = field.show();
@@ -928,6 +986,18 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     }
     for (x, r) in g.splats.iter_mut().zip(s.of("FancyBloodSplatController")) {
         check(format!("Splat {}", r.id), x.fields(), r);
+        let theirs = r.get("particles").unwrap_or("");
+        if theirs.contains("free=") {
+            let slots = x.particles.slots.iter().map(|p| match p {
+                Some(p) => [p.VelocityX, p.VelocityY, p.PositionX, p.PositionY, p.Life].map(|f| format!("{:08x}", f.to_bits())).join(","),
+                None => "-".into(),
+            });
+            let free = x.particles.free.iter().rev().map(|i| i.to_string());
+            let ours = format!("[{}]free={}", slots.collect::<Vec<_>>().join(";"), free.collect::<Vec<_>>().join(","));
+            if theirs != ours {
+                particles.push(format!("Splat {}.particles: game {theirs} ours {ours}", r.id));
+            }
+        }
     }
     for (x, r) in g.bleeding.iter_mut().zip(s.of("BleedingParticleBehaviour")) {
         check(format!("Bleeding {}", r.id), x.fields(), r);
@@ -985,6 +1055,7 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     if g.random.state != [w[0], w[1], w[2], w[3]] {
         out.push(format!("random: game {w:08x?} ours {:08x?}", g.random.state));
     }
+    out.extend(particles);
     out
 }
 
@@ -1138,8 +1209,20 @@ fn compare_transforms(g: &Game, chained: &Snapshot, to: &Snapshot) -> Result<Vec
 
 /// The physics pass's results at FE: the b2 world, the Collision2D records and each awake body's Transform.
 fn compare_physics(g: &mut Game, from: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
-    // A second restore of the same snapshot builds the same ids, so its name maps fit the game's world.
+    // A second restore of the snapshot names its bodies and fixtures; ours are found by the same Rigidbody2D
+    // (ground: none), their fixtures in list order (ids drift once something was destroyed).
     let mut r = physics::restore(from, V::new(0.0, -9.81))?;
+    let ours: HashMap<Option<i32>, crate::b2::world::BodyId> = g.world.body_list.iter().map(|&b| (g.world.body(b).user.map(|u| u.id), b)).collect();
+    let fixture_name: HashMap<_, _> = r.fixtures.iter().map(|(n, &f)| (f, n.clone())).collect();
+    let (mut bodies, mut fixtures) = (HashMap::new(), HashMap::new());
+    for (name, &b) in &r.bodies {
+        let Some(&o) = ours.get(&r.world.body(b).user.map(|u| u.id)) else { continue };
+        bodies.insert(name.clone(), o);
+        for (f, of) in r.world.body(b).fixtures.iter().zip(&g.world.body(o).fixtures) {
+            fixtures.insert(fixture_name[f].clone(), *of);
+        }
+    }
+    (r.bodies, r.fixtures) = (bodies, fixtures);
     r.world = std::mem::replace(&mut g.world, World::new(V::ZERO));
     let mut out = physics::compare_world(&r, to)?;
     out.extend(physics::compare_contacts2d(&r, to)?);
@@ -1169,10 +1252,16 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
         g.load_time(&prev);
         g.random = random;
         g.load_input(&cur);
+        g.load_render_state(&prev);
         let mut diffs = Vec::new();
         match (prev.pt.as_str(), cur.pt.as_str()) {
             ("FS", "FM") => g.fixed_update_scripts(),
             ("FM", "FE") => {
+                // The recorder's scripted LimbBehaviour.Crush (PPG_CRUSH) before the physics step.
+                if let Some((_, limb)) = prev.snap.iter().find(|(k, _)| k == "crush") {
+                    let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
+                    g.limb_crush(l);
+                }
                 g.simulate_physics();
                 diffs = compare_physics(&mut g, &prev, &cur)?;
             }
