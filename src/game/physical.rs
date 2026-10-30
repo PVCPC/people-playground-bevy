@@ -131,6 +131,9 @@ script! {
         hash_code: i32 = 0,
         /// The objects Awake and Start created, by instance id.
         ids: StartIds = StartIds::default(),
+        /// ReflectsLasers and AbsorbsLasers (the dump format has neither).
+        ReflectsLasers: bool = false,
+        AbsorbsLasers: bool = true,
         /// An AudioSourceTimeScaleBehaviour sits on this object (the spawner sets it for prefab-carried ones).
         audio_time_scale: bool = false,
         /// rigidbody.sharedMaterial is not null in the prefab.
@@ -1008,22 +1011,9 @@ impl Game {
         // The rotation, the scale and OnImpactCreated (only a BloodImpactBehaviour on the clone has a receiver) are
         // presentation for these.
         let source = source.expect("CreateImpactEffect: a recording names the ShotImpact but holds no game data");
-        let mut db = self.assets.take().expect("CreateImpactEffect without the game's data");
-        let pool = self.splash_pool_for(&mut db, source);
-        self.assets = Some(db);
-        let pool = pool.unwrap_or_else(|e| panic!("PhysicalProperties.ShotImpact: {e}"));
+        let pool = self.effect_pool(source, "PhysicalProperties.ShotImpact");
         if self.splash_pools[pool].poolable {
-            for ob in &self.splash_pools[pool].prefab.objects {
-                for (_, c) in &ob.components {
-                    if let crate::assets::db::Component::Script { class, .. } = c {
-                        if !matches!(class.as_str(), "ExplosionSoundBehviour" | "PoolableParticleSystemHelper" | "PoolableSizeHelper" | "ActivateIfFancyEffects" | "Optout") {
-                            unimplemented!("PhysicalBehaviour.CreateImpactEffect: a pooled ShotImpact with a {class}");
-                        }
-                    }
-                }
-            }
-            // PoolGenerator.RequestPrefab(ShotImpact, position)
-            self.splash_request(pool);
+            self.request_pooled_effect(source, "PhysicalBehaviour.CreateImpactEffect");
         } else {
             // Object.Instantiate(ShotImpact, position, identity)
             let colliding = self.splash_pools[pool].prefab.objects.iter().any(|ob| ob.components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Collider2D(_) | crate::assets::db::Component::Rigidbody2D(_))));
@@ -1032,6 +1022,33 @@ impl Game {
             }
             self.spawn_prefab(source, [position[0], position[1], 0.0]);
         }
+    }
+
+    /// The splash pool of an effect prefab, read from the data the first time.
+    fn effect_pool(&mut self, source: crate::assets::db::ObjRef, what: &str) -> usize {
+        let mut db = self.assets.take().unwrap_or_else(|| panic!("{what} without the game's data"));
+        let pool = self.splash_pool_for(&mut db, source);
+        self.assets = Some(db);
+        pool.unwrap_or_else(|e| panic!("{what}: {e}"))
+    }
+
+    /// PoolGenerator.RequestPrefab(effect, position) of a particle effect: the position and rotation only place
+    /// particles. `what` names the caller.
+    pub(super) fn request_pooled_effect(&mut self, source: crate::assets::db::ObjRef, what: &str) {
+        let pool = self.effect_pool(source, what);
+        if !self.splash_pools[pool].poolable {
+            unimplemented!("{what}: a pooled effect not tagged Poolable (its particle lifetime)");
+        }
+        for ob in &self.splash_pools[pool].prefab.objects {
+            for (_, c) in &ob.components {
+                if let crate::assets::db::Component::Script { class, .. } = c {
+                    if !matches!(class.as_str(), "ExplosionSoundBehviour" | "PoolableParticleSystemHelper" | "PoolableSizeHelper" | "ActivateIfFancyEffects" | "Optout") {
+                        unimplemented!("{what}: a pooled effect with a {class}");
+                    }
+                }
+            }
+        }
+        self.splash_request(pool);
     }
 
     /// Transform.TransformPoint for a 2D point of a physical object's transform.

@@ -61,7 +61,7 @@ pub struct FrozenInIce {
 }
 
 /// TagManager's custom tag "Poolable" (tags[8]).
-const POOLABLE_TAG: u16 = 20008;
+pub(super) const POOLABLE_TAG: u16 = 20008;
 
 /// A Splash clone of an ObjectPoolBehaviour: gameObject.activeSelf and the root ParticleSystem's time.
 #[derive(Clone, Debug)]
@@ -73,6 +73,9 @@ pub struct SplashItem {
     pub particle_time: f64,
     /// Destroyed by ObjectPoolBehaviour.Clear.
     pub destroyed: bool,
+    /// GetComponentsInChildren<ParticleSystem>().Count of the clone (after its ActivateIfFancyEffects): each gets a
+    /// Random.Range in DoSplash.
+    pub particle_systems: usize,
 }
 
 /// The ObjectPoolBehaviour PoolGenerator makes for a Splash prefab (once it is first requested), and what the prefab
@@ -87,12 +90,13 @@ pub struct SplashPool {
     /// ExplosionSoundBehviour.Play's `Near.PickRandom()` draw: Near.Length, when the behaviour is enabled and has an
     /// AudioSource.
     pub sound: Option<usize>,
-    /// GetComponentsInChildren<ParticleSystem>().Count: each gets a Random.Range in DoSplash.
-    pub particle_systems: usize,
+    /// The ParticleSystems on each prefab object.
+    pub particle_systems: Vec<usize>,
     /// The root ParticleSystem's lengthInSec (a poolable prefab's).
     pub duration: f64,
-    /// The ActivateIfFancyEffects on active objects: each Awake of a clone draws Random.value.
-    pub fancy: usize,
+    /// The ActivateIfFancyEffects on active objects, in Awake order, with their Chance: each Awake of a clone whose
+    /// ancestors stayed active draws Random.value and deactivates the object unless `Chance > value && FancyEffects`.
+    pub fancy: Vec<(usize, f32)>,
     /// PoolGenerator.Ensure ran.
     pub ensured: bool,
     pub pool: ObjectPool,
@@ -124,23 +128,27 @@ impl Game {
             }
             _ => None,
         });
-        let particle_systems = prefab.objects.iter().enumerate().filter(|(o, _)| self.prefab_object_active(&prefab, *o)).map(|(_, ob)| ob.components.iter().filter(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))).count()).sum();
-        let mut fancy = 0;
+        let particle_systems = prefab.objects.iter().map(|ob| ob.components.iter().filter(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))).count()).collect();
+        let mut fancy = Vec::new();
         for (o, ob) in prefab.objects.iter().enumerate() {
-            let aife = ob.components.iter().any(|(_, c)| matches!(c, Component::Script { class, .. } if class == "ActivateIfFancyEffects"));
-            if aife && self.prefab_object_active(&prefab, o) {
-                // SetActive(false) on an object with children would skip their Awakes.
-                if !ob.children.is_empty() {
-                    unimplemented!("{}: ActivateIfFancyEffects on an object with children", ob.name);
-                }
-                fancy += 1;
+            if ob.parent.is_some_and(|p| p > o) {
+                unimplemented!("{}: a prefab object before its parent (Awake order)", ob.name);
+            }
+            let aife = ob.components.iter().find_map(|(_, c)| match c {
+                Component::Script { class, fields, .. } if class == "ActivateIfFancyEffects" => Some(fields.get("Chance").and_then(Value::f32).unwrap_or(1.0)),
+                _ => None,
+            });
+            if let Some(chance) = aife.filter(|_| self.prefab_object_active(&prefab, o)) {
+                fancy.push((o, chance));
             }
         }
         let poolable = root.tag == POOLABLE_TAG;
+        // PoolableParticleSystemHelper.Awake sets the stop action to Callback.
+        let helper = root.components.iter().any(|(_, c)| matches!(c, Component::Script { class, .. } if class == "PoolableParticleSystemHelper"));
         let duration = match root.components.iter().find(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))) {
             Some(&(r, _)) if poolable => {
                 let ps = crate::assets::components::ParticleSystemHead::read(db.data(r)).map_err(|e| format!("ParticleSystem: {e}"))?;
-                if ps.stop_action != 3 || ps.looping || ps.simulation_speed != 1.0 {
+                if (ps.stop_action != 3 && !helper) || ps.looping || ps.simulation_speed != 1.0 {
                     unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback", root.name);
                 }
                 ps.length_in_sec as f64
@@ -207,12 +215,21 @@ impl Game {
         // Instantiate(Prefab, position, identity); the position and rotation only place the particles and the sound.
         let (prefab, ids, sound) = (pool.prefab.clone(), pool.original_ids.clone(), pool.sound);
         self.instantiate_native(&prefab, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
-        // Awake: each active ActivateIfFancyEffects' `Chance(1) > Random.value` before it reads FancyEffects.
-        for _ in 0..self.splash_pools[s].fancy {
-            self.random.value();
+        // Awake: each ActivateIfFancyEffects still active in the hierarchy draws `Chance > Random.value` before it
+        // reads FancyEffects; a parent comes before its children.
+        let mut off = vec![false; prefab.objects.len()];
+        let mut particle_systems = 0;
+        for o in 0..prefab.objects.len() {
+            off[o] = prefab.objects[o].parent.is_some_and(|p| off[p]);
+            if let Some(&(_, chance)) = self.splash_pools[s].fancy.iter().find(|f| f.0 == o).filter(|_| !off[o]) {
+                off[o] = !(chance > self.random.value() && self.prefs.FancyEffects);
+            }
+            if !off[o] && self.prefab_object_active(&prefab, o) {
+                particle_systems += self.splash_pools[s].particle_systems[o];
+            }
         }
         let pool = &mut self.splash_pools[s];
-        pool.items.push(SplashItem { active: true, particle_time: 0.0, destroyed: false });
+        pool.items.push(SplashItem { active: true, particle_time: 0.0, destroyed: false, particle_systems });
         let i = pool.items.len() - 1;
         pool.pool.created.push(i);
         // Start of the clone's ExplosionSoundBehviour (Play).
@@ -232,10 +249,8 @@ impl Game {
         }
         // Trigger.bounds starts with the AutoSyncTransforms.
         self.sync_pending();
-        if self.splash_request(s).is_none() {
-            return;
-        }
-        for _ in 0..self.splash_pools[s].particle_systems {
+        let Some(i) = self.splash_request(s) else { return };
+        for _ in 0..self.splash_pools[s].items[i].particle_systems {
             self.random.range(1.0, 1.4);
         }
     }
@@ -372,7 +387,7 @@ impl Game {
                 let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
                 let id = inst.objects[d].components[k];
                 // Behaviour::AddToManager with the OnEnable.
-                if let (Some(&(order, b)), true) = (self.behaviour_of.get(&id), *enabled) {
+                if let (Some(&(order, b)), true) = (self.behaviour_of.get(&id), *enabled && !self.script_disabled(id)) {
                     self.behaviours.add(order, b);
                 }
                 match class.as_str() {
@@ -392,6 +407,7 @@ impl Game {
             // Deactivation stops its coroutines.
             self.coroutines.retain(|c| c.owner != id);
             self.end_of_frame.retain(|c| c.owner != id);
+            self.fixed_update_waits.retain(|c| c.owner != id);
             // Behaviour::RemoveFromManager with the OnDisable.
             if let Some(&(_, b)) = self.behaviour_of.get(&id) {
                 self.behaviours.remove(b);
@@ -407,6 +423,18 @@ impl Game {
                 "CarBehaviour" => {
                     let car = self.cars.iter().position(|c| c.id == id).expect("a CarBehaviour in the arena");
                     self.car_on_disable(car, inst);
+                }
+                "LEDBulbBehaviour" => {
+                    let i = self.leds.iter().position(|c| c.id == id).expect("a LEDBulbBehaviour in the arena");
+                    if self.leds[i].enabled {
+                        self.led_on_disable(i);
+                    }
+                }
+                "DetectorBehaviour" => {
+                    let i = self.detectors.iter().position(|c| c.id == id).expect("a DetectorBehaviour in the arena");
+                    if self.detectors[i].enabled {
+                        self.detector_on_disable(i);
+                    }
                 }
                 c if !super::declares(c, "OnDisable") => {}
                 _ => unimplemented!("{class}.OnDisable"),
@@ -601,7 +629,7 @@ impl Game {
     }
 
     /// The person whose AliveBehaviour.AliveByTransform entry is this physical's transform.root.
-    fn person_of_root(&self, p: usize) -> Option<usize> {
+    pub(super) fn person_of_root(&self, p: usize) -> Option<usize> {
         let root = self.root_of(p);
         if !root.0 {
             return None;

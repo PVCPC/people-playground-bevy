@@ -281,6 +281,19 @@ impl Game {
                     g.tracer_pool.MaxPoolSize = v.get("MaxPoolSize").and_then(Value::i64).ok_or("BulletTracerPool.MaxPoolSize")? as usize;
                     g.tracer_pool.InactivityThresholdInSeconds = v.get("InactivityThresholdInSeconds").and_then(Value::f32).ok_or("BulletTracerPool.InactivityThresholdInSeconds")?;
                 }
+                // Awake makes its BallisticsEmitter and sets Instance.
+                "GlobalShrapnelEmitter" if s.runs => {
+                    let cartridge = v.get("Cartridge").and_then(Value::pptr).and_then(|p| db.resolve(s.game_object.file, p)).ok_or("GlobalShrapnelEmitter.Cartridge")?;
+                    let (_, _, cv) = db.mono(cartridge)?.ok_or("GlobalShrapnelEmitter.Cartridge is not a MonoBehaviour")?;
+                    let mask = |name: &str| v.get(name).and_then(|m| m.get("m_Bits")).and_then(Value::i64).map(|b| b as u32).ok_or_else(|| format!("GlobalShrapnelEmitter.{name}"));
+                    let mut e = super::ballistics::Emitter::new(super::ballistics::Cartridge::read(&cv)?, mask("LayersToHit")?, mask("WaterLayer")?);
+                    e.RenderTracersIfTraversal = false;
+                    e.DoTraversal = true;
+                    e.MaxBallisticsIterations = 16;
+                    e.RicochetChanceMultiplier = 4.0;
+                    e.MaxTotalDistance = 30.0;
+                    g.shrapnel = Some(super::ballistics::ShrapnelEmitter { emitter: e });
+                }
                 // Awake only sets Instance; Play draws from these.
                 "DistantSoundBehaviour" => {
                     for (i, name) in ["SmallDistantExplosions", "LargeDistantExplosions", "LargerDistantExplosions", "SmallDistantFirearms", "MediumDistantFirearms", "LargeDistantFirearms"].iter().enumerate() {

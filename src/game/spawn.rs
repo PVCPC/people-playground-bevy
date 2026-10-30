@@ -581,7 +581,7 @@ impl Game {
                 Component::Collider2D(_) => self.collider2d_deactivate(inst, o, c),
                 Component::Rigidbody2D(_) => self.rigidbody2d_deactivate(inst, prefab, o),
                 Component::Script { .. } => scripts.push((o, c)),
-                Component::Joint2D(_) => unimplemented!("Joint2D::Deactivate"),
+                Component::Joint2D(_) => self.joint2d_deactivate(inst, prefab, o, c),
                 // Transform, SpriteRenderer and the unread classes hold no Physics2D state.
                 _ => {}
             }
@@ -608,6 +608,29 @@ impl Game {
         inst.interest[o] &= !CHANGE_COLLIDER;
     }
 
+    /// Joint2D::Deactivate (180c047f0) / the Joint2D::Cleanup(false) Rigidbody2D::Cleanup runs on each joint of its
+    /// body: a live joint keeps its reference angles for the next Create and its b2 joint is destroyed; a joint
+    /// already cleaned up has nothing left.
+    fn joint2d_deactivate(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
+        let Some(&id) = inst.joints.get(&(o, c)) else { return };
+        // A joint that broke has no b2 joint left (Joint2D::Cleanup finds `[this+0x58]` null).
+        if self.world.joints[id].is_none() {
+            inst.joints.remove(&(o, c));
+            return;
+        }
+        let Component::Joint2D(j) = &prefab.objects[o].components[c].1 else { unreachable!() };
+        match j.kind {
+            JointData::Hinge { .. } => {
+                self.hinge_joint2d_cleanup(inst, o, c);
+                // The linked HingeJoint2D script reads its joint null.
+                if let Some(h) = self.hinges.iter().position(|h| h.joint == Some(id)) {
+                    self.hinges[h].joint = None;
+                }
+            }
+            JointData::Fixed { .. } | JointData::Slider { .. } | JointData::Spring { .. } | JointData::Distance { .. } | JointData::Wheel { .. } => self.anchored_joint2d_cleanup(inst, o, c),
+        }
+    }
+
     /// Rigidbody2D::Deactivate (180c1ec40) -> Cleanup (180c1dd20) with DeactivateOperation 0: the body goes
     /// (its colliders were cleaned before it), the Rigidbody2D leaves the scene's lists and its Transform
     /// interest.
@@ -616,10 +639,10 @@ impl Game {
         if inst.descendants(o).iter().any(|d| inst.bodies.contains_key(d)) {
             unimplemented!("Rigidbody2D::Cleanup: CheckForDrivenByParentRigidbody on a child Rigidbody2D");
         }
-        // GetAttachedColliders (180c1f350): the fixtures' colliders sorted by address and deduplicated; on the
-        // inactive GameObject each gets Collider2D::Cleanup with Deactivate's arguments, which its own Deactivate
-        // repeats later on an empty collider.
-        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.first().is_some_and(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        // GetAttachedColliders (180c1f350): the fixtures' colliders (a collider disabled earlier has none left) sorted
+        // by address and deduplicated; on the inactive GameObject each gets Collider2D::Cleanup with Deactivate's
+        // arguments, which its own Deactivate repeats later on an empty collider.
+        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
         match attached[..] {
             [] => {}
             [(co, cc)] => self.collider2d_deactivate(inst, co, cc),
@@ -628,8 +651,17 @@ impl Game {
         if !self.world.body(body).fixtures.is_empty() {
             unimplemented!("{}: Rigidbody2D::Cleanup with another instance's colliders attached", prefab.objects[o].name);
         }
-        if !self.world.body(body).joints.is_empty() {
-            unimplemented!("{}: Rigidbody2D::Cleanup with joints", prefab.objects[o].name);
+        // The body's joint list from its head (the Vec's tail): each Joint2D gets Cleanup(false) (DeactivateOperation 0),
+        // which keeps the reference angles for a re-create and destroys the b2 joint.
+        for (_, id) in self.world.body(body).joints.clone().into_iter().rev() {
+            if let Some(&(jo, jc)) = inst.joints.iter().find(|(_, j)| **j == id).map(|(k, _)| k) {
+                self.joint2d_deactivate(inst, prefab, jo, jc);
+            } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(id)) {
+                // A Fixed/SliderJoint2D HingeJointLimitAutofixBehaviour took over from the instance.
+                self.fixed_joint_cleanup(f, false);
+            } else {
+                unimplemented!("{}: Rigidbody2D::Cleanup with another instance's joint", prefab.objects[o].name);
+            }
         }
         // m_Body becomes null: a PhysicalBehaviour's Rigidbody keeps the component's own mass fields.
         let b = self.world.body(body);
@@ -754,7 +786,7 @@ impl Game {
         let body = rb.body;
         self.rigidbody_hierarchy_changed = true;
         // GetAttachedColliders sorts the Collider2D pointers; with one collider the order cannot differ.
-        let mut colliders: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        let mut colliders: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
         colliders.sort_unstable();
         if colliders.len() > 1 {
             unimplemented!("{}: Rigidbody2D.bodyType with several attached colliders (GetAttachedColliders pointer order)", prefab.objects[o].name);
@@ -894,7 +926,7 @@ impl Game {
         // GetAttachedColliders (180c1f350) sorts the Collider2D pointers. The order cannot show: each refilter only
         // flags contacts, touches proxies (UpdatePairs sorts and dedups the pairs), wakes the body and remixes
         // materials, so any order gives the same world.
-        let mut attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        let mut attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
         attached.sort_unstable();
         for &(o, c) in &attached {
             let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
@@ -1083,7 +1115,6 @@ impl Game {
             match &j.kind {
                 JointData::Hinge { .. } => self.hinge_joint2d_create(inst, prefab, o, c, j),
                 JointData::Fixed { .. } | JointData::Slider { .. } | JointData::Spring { .. } | JointData::Distance { .. } | JointData::Wheel { .. } => self.anchored_joint2d_create(inst, prefab, o, c, j),
-                other => unimplemented!("{}: Joint2D Create for {other:?}", prefab.objects[o].name),
             }
         }
     }

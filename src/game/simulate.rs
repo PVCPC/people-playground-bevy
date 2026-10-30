@@ -110,6 +110,11 @@ impl Game {
         self.gore_string_delayed_calls(false);
         // The delayed Start of behaviours instantiated during this FixedUpdate (registered after those calls).
         self.run_pending_starts();
+        // WaitForFixedUpdate (the fixed step's last stage): the coroutines that reached it run on; one that waits for
+        // it again here waits for the next step.
+        for c in std::mem::take(&mut self.fixed_update_waits) {
+            self.resume_coroutine(c);
+        }
     }
 
     /// PhysicsManager2D::Simulate's write-back over the rigidbody update lists: each awake Rigidbody2D's body pose
@@ -470,6 +475,7 @@ impl Game {
                         if self.fixed_joints[f].slider.is_some() && matches!(self.fixed_joints[f].attached, BodyOwner::Physical(_)) {
                             self.physical_on_joint_break_slider(f);
                         }
+                        self.sticky_grenade_on_joint_break(f);
                         // DestroyObjectHighLevel then removes the component.
                         self.fixed_joint_destroy(f);
                     }
@@ -693,7 +699,7 @@ impl Game {
 
     /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
     /// FlushSimulationChanges after it does nothing while playing).
-    fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
+    pub(super) fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_ref().unwrap().reference_angle());
         self.fixed_joints[f].state.cleanup(destroyed, live);
         if let Some(id) = self.fixed_joints[f].joint.take() {

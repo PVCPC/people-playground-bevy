@@ -29,9 +29,10 @@ script! {
         /// SparkPrefab (or the Resources fallback) and ExplosionPrefab are set.
         SparkPrefab: bool = false,
         ExplosionPrefab: bool = false,
-        /// The live entries of BehavioursToToggle (class names) and GameObjectsToToggle.
-        BehavioursToToggle: Vec<String> = Vec::new(),
-        GameObjectsToToggle: usize = 0,
+        /// The live entries of BehavioursToToggle (class name and component id) and GameObjectsToToggle (the object's
+        /// Transform id).
+        BehavioursToToggle: Vec<(String, i32)> = Vec::new(),
+        GameObjectsToToggle: Vec<i32> = Vec::new(),
         /// OnDamaged's persistent calls reach only audio and particle components.
         OnDamagedPresentation: bool = true,
     }
@@ -121,14 +122,53 @@ impl Game {
         let mc = &mut self.machinery[m];
         mc.Destroyed = true;
         mc.Health = 0.0;
-        if let Some(class) = mc.BehavioursToToggle.first() {
-            unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false");
+        for (class, id) in self.machinery[m].BehavioursToToggle.clone() {
+            // (bool)monoBehaviour: an earlier toggle may have destroyed it.
+            if !self.destroyed_components.contains(&id) {
+                self.behaviour_disable(&class, id);
+            }
         }
-        if mc.GameObjectsToToggle != 0 {
-            unimplemented!("DamagableMachineryBehaviour.SetAsBroken: GameObject.SetActive(false)");
+        for id in self.machinery[m].GameObjectsToToggle.clone() {
+            if !self.destroyed_components.contains(&id) {
+                self.with_component_instance(id, |g, inst, o| g.set_active_scripts(inst, o, false));
+            }
         }
+        let mc = &self.machinery[m];
         if run_events && !mc.OnDamagedPresentation {
             unimplemented!("DamagableMachineryBehaviour.OnDamaged: a persistent call beyond audio and particles");
         }
+    }
+
+    /// Behaviour.enabled = false on component `id`: RemoveFromManager, with the OnDisable of an active GameObject.
+    fn behaviour_disable(&mut self, class: &str, id: i32) {
+        let active = self.with_component_instance(id, |_, inst, o| inst.objects[o].active);
+        match class {
+            "LEDBulbBehaviour" => {
+                let i = self.leds.iter().position(|x| x.id == id).expect("a LEDBulbBehaviour in the arena");
+                if !std::mem::replace(&mut self.leds[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Led(i));
+                if active {
+                    self.led_on_disable(i);
+                }
+            }
+            "DetectorBehaviour" => {
+                let i = self.detectors.iter().position(|x| x.id == id).expect("a DetectorBehaviour in the arena");
+                if !std::mem::replace(&mut self.detectors[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Detector(i));
+                if active {
+                    self.detector_on_disable(i);
+                }
+            }
+            _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
+        }
+    }
+
+    /// Behaviour.enabled was set to false at run time (SetAsBroken), over the prefab's m_Enabled.
+    pub(super) fn script_disabled(&self, id: i32) -> bool {
+        self.leds.iter().any(|x| x.id == id && !x.enabled) || self.detectors.iter().any(|x| x.id == id && !x.enabled)
     }
 }

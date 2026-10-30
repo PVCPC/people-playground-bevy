@@ -105,6 +105,38 @@ pub const SELECTION_MASS: i32 = 1;
 
 const DEG2RAD: f32 = f32::from_bits(0x3c8efa35);
 
+/// The classes with a Use(ActivationPropagation) method, and their subclasses.
+const USE_RECEIVERS: &[&str] = &[
+    "AcidSyringe", "ActivatorElectrodeBehaviour", "AdhesiveCouplerBehaviour", "AdrenalineSyringe",
+    "AerialFaithPlateBehaviour", "AndroidLaserBehaviour", "ArchelixCasterBehaviour", "AtomBombBehaviour",
+    "BatteryAttachmentBehaviour", "BeamCannonBehaviour", "BeamRepeaterBehaviour", "BeamformerBehaviour",
+    "BellBehaviour", "BlasterBehaviour", "BloodTankBehaviour", "BoatMotorBehaviour", "BoneEatingPoisonSyringe",
+    "BulbBehaviour", "CarBehaviour", "CardiopulmonaryBypassMachineBehaviour", "CathodeLightBehaviour",
+    "CentrifugeBehaviour", "ChainsawBehaviour", "CoagulationSyringe", "ConveyorBeltBehaviour", "CounterBehaviour",
+    "DeathSyringe", "DecimatorBehaviour", "DefibrillatorBehaviour", "DetectorBehaviour", "DisplayBehaviour",
+    "DroneBehaviour", "EBikeBehaviour", "EMPBehaviour", "EffectGunBehaviour", "ElectricityTransformerBehaviour",
+    "EmptySyringe", "EnergySwordBehaviour", "ExcaliburBehaviour", "ExplosiveAttachmentBehaviour",
+    "ExplosiveBehaviour", "FanBehaviour", "FirearmAttachmentBehaviour", "FirearmBehaviour", "FireworksBehaviour",
+    "FlareBehaviour", "FlashlightAttachmentBehaviour", "ForcefieldGeneratorBehaviour", "FreezeGunBehaviour",
+    "FreezeSyringe", "GeneratorBehaviour", "GenericScifiWeapon40Behaviour", "GlowtubeBehaviour", "GripBehaviour",
+    "GyrostabiliserBehaviour", "HealthGunBehaviour", "HeartMonitorBehaviour", "HeatingElementBehaviour",
+    "HoverThrusterBehaviour", "HoverboxBehaviour", "HovercarBehaviour", "ImmobilityFieldBehaviour",
+    "IncendiaryAttachmentBehaviour", "IndustrialGyrostabiliserBehaviour", "InfraredThermometer",
+    "IonThrusterBehaviour", "JetEngineBehaviour", "JukeboxBehaviour", "KnockoutSyringe", "LEDBulbBehaviour",
+    "LagboxBehaviour", "LaserBehaviour", "LaserTurretBehaviour", "LifeSyringe", "LiquidDuplicatorBehaviour",
+    "LiquidPressureValveBehaviour", "LiquidPumpBehaviour", "LiquidentifierBehaviour", "MachineGunBehaviour",
+    "MagnetBehaviour", "MendingSyringe", "MetronomeBehaviour", "MinigunBehaviour", "MotorisedHingeBehaviour",
+    "ObstructionEmitterBehaviour", "PainKillerSyringe", "ParticleMachineBehaviour", "PhysicalBehaviour",
+    "PinkSyringe", "PistonBehaviour", "PointerBehaviour", "ProjectileLauncherBehaviour", "PulseDrumBehaviour",
+    "RailgunBehaviour", "RayCannonBehaviour", "RaygunBehaviour", "RocketLauncherBehaviour", "RotorBehaviour",
+    "ScherbewerferBehaviour", "ScopeAttachmentBehaviour", "SeismicChargeBehaviour", "SignalConverterBehaviour",
+    "SingleFloodlightBehaviour", "SirenBehaviour", "SpikeGrenadeBehaviour", "SyringeBehaviour", "TankBarrelBehaviour",
+    "TelevisionBehaviour", "ThermometerBehaviour", "ThrusterbedBehaviour", "TimedGateBehaviour",
+    "TransmitterBehaviour", "TruckDoorBehaviour", "UltraStrengthSyringe", "UniversalBellBehaviour", "UseBubbler",
+    "UseEventTrigger", "UseWireBehaviour", "ValveBehaviour", "WaterBreathingSyringe", "WinchBehaviour",
+    "ZombieSyringe",
+];
+
 fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -380,12 +412,58 @@ impl Game {
             unimplemented!("ToolControllerBehaviour.SetTool: tools other than DragTool");
         }
         // HandleIndirectInteraction
-        if self.input.down("activateDirect") && self.tool.as_ref().unwrap().ActiveSingleSelected.is_none() && self.tool.as_ref().unwrap().hover.is_some() {
-            unimplemented!("activateDirect: Utils.Activations.SendOnce / Use");
+        if self.input.down("activateDirect") && self.tool.as_ref().unwrap().ActiveSingleSelected.is_none() {
+            if let Some(p) = self.tool.as_ref().unwrap().hover {
+                self.activate_direct(p);
+            }
         }
         self.determine_hovering();
         self.handle_tools();
         // HandleContextMenu (ContextMenuBehaviour.Show is UI); UpdateSelectionBox draws the box.
+    }
+
+    /// A direct activation of a physical object: Utils.Activations.SendOnce, then BroadcastMessage("Use").
+    pub(super) fn activate_direct(&mut self, p: usize) {
+        // SendOnce: OnSingleUse.Invoke. Its only listener is ActivationToggleBehaviour, which link rejects.
+        self.broadcast_use(p);
+    }
+
+    /// BroadcastMessage("Use") on a physical object's GameObject: it and its active descendants, each object's
+    /// components in order.
+    fn broadcast_use(&mut self, p: usize) {
+        let id = self.physicals[p].id;
+        let receivers: Vec<Behaviour> = self.with_component_instance(id, |g, inst, start| {
+            let mut out = Vec::new();
+            for x in std::iter::once(start).chain(inst.descendants(start)) {
+                if !inst.objects[x].active {
+                    continue;
+                }
+                for (k, (_, c)) in inst.prefab.objects[x].components.iter().enumerate() {
+                    let crate::assets::db::Component::Script { class, .. } = c else { continue };
+                    // PhysicalBehaviour.Use only invokes ModdingApi.Events.OnItemActivated (no mods); link checks
+                    // UseEventTrigger's Event is presentation.
+                    if !USE_RECEIVERS.contains(&class.as_str()) || matches!(class.as_str(), "PhysicalBehaviour" | "UseEventTrigger") {
+                        continue;
+                    }
+                    match g.behaviour_of.get(&inst.objects[x].components[k]) {
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_)))) => out.push(b),
+                        _ => unimplemented!("{class}.Use"),
+                    }
+                }
+            }
+            out
+        });
+        for b in receivers {
+            match b {
+                Behaviour::Firearm(f) => self.firearm_use(f),
+                Behaviour::Explosive(e) => self.explosive_use(e),
+                Behaviour::Launcher(l) => self.launcher_use(l),
+                Behaviour::Glowtube(g) => self.glowtube_use(g),
+                Behaviour::Led(i) => self.led_use(i),
+                Behaviour::Detector(i) => self.detector_use(i),
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// ToolControllerBehaviour.DetermineHovering. currentlyHovering was just cleared, so the held object's own

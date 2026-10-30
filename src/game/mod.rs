@@ -10,12 +10,15 @@ pub mod acts;
 pub mod car;
 pub mod tyre;
 pub mod flask;
+pub mod light;
+pub mod detector;
 pub mod dump;
 pub mod explosion;
 pub mod lifecycle;
 pub mod destroyable;
 pub mod fire;
 pub mod firearm;
+pub mod launcher;
 pub mod limb;
 pub mod machinery;
 pub mod link;
@@ -942,11 +945,17 @@ pub enum Behaviour {
     DeleteAfter(usize),
     FireMap(usize),
     Firearm(usize),
+    Launcher(usize),
     PointToVelocity(usize),
     Car(usize),
     Tyre(usize),
     Flask(usize),
+    LiquidContainer(usize),
     TruckDoor(usize),
+    Glowtube(usize),
+    Led(usize),
+    Detector(usize),
+    Sticky(usize),
 }
 
 impl Behaviour {
@@ -971,9 +980,15 @@ impl Behaviour {
             Behaviour::Car(_) => "CarBehaviour",
             Behaviour::Tyre(_) => "TyreDeflationBehaviour",
             Behaviour::Flask(_) => "GasTankBehaviour",
+            Behaviour::LiquidContainer(_) => "LiquidContainerController",
             Behaviour::TruckDoor(_) => "TruckDoorBehaviour",
+            Behaviour::Glowtube(_) => "GlowtubeBehaviour",
+            Behaviour::Led(_) => "LEDBulbBehaviour",
+            Behaviour::Detector(_) => "DetectorBehaviour",
+            Behaviour::Sticky(_) => "StickyGrenadeBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
+            Behaviour::Launcher(_) => "ProjectileLauncherBehaviour",
         }
     }
 }
@@ -1067,6 +1082,7 @@ pub struct Game {
     pub destroyables: Vec<destroyable::Destroyable>,
     pub fire_maps: Vec<fire::FireMap>,
     pub firearms: Vec<firearm::Firearm>,
+    pub launchers: Vec<launcher::Launcher>,
     pub explosives: Vec<explosion::Explosive>,
     pub act_on_collides: Vec<acts::ActOnCollide>,
     pub no_collides: Vec<acts::NoCollide>,
@@ -1076,6 +1092,10 @@ pub struct Game {
     pub cars: Vec<car::CarBehaviour>,
     pub tyres: Vec<tyre::TyreDeflationBehaviour>,
     pub flasks: Vec<flask::Flask>,
+    pub liquid_containers: Vec<flask::LiquidContainer>,
+    pub glowtubes: Vec<light::Glowtube>,
+    pub leds: Vec<light::LedBulb>,
+    pub detectors: Vec<detector::Detector>,
     /// Each TruckDoorBehaviour with its component's instance id.
     pub truck_doors: Vec<(i32, car::TruckDoor)>,
     pub joint_helpers: Vec<car::JointHelper>,
@@ -1084,6 +1104,10 @@ pub struct Game {
     pub delete_afters: Vec<explosion::DeleteAfter>,
     /// Coroutines in WaitForEndOfFrame, in the order they got there.
     pub end_of_frame: Vec<destroyable::Coroutine>,
+    /// GlobalShrapnelEmitter.Instance
+    pub shrapnel: Option<ballistics::ShrapnelEmitter>,
+    /// Coroutines in WaitForFixedUpdate, in the order they got there.
+    pub fixed_update_waits: Vec<destroyable::Coroutine>,
     /// BallisticsEmitter.BallisticIteration coroutines in a wait (`Step::Bullet`); None once resumed or stopped.
     pub bullets: Vec<Option<(ballistics::Bullet, Option<ballistics::BulletHit>)>>,
     pub tracer_pool: ballistics::TracerPool,
@@ -1104,6 +1128,8 @@ pub struct Game {
     pub instantiate_objects: HashMap<i32, (Option<crate::assets::db::ObjRef>, destroyable::InstantiateObject)>,
     /// Object.Destroy calls queued for the delayed-call pass: (time, a component id on the object).
     pub object_destroys: Vec<(f64, i32)>,
+    /// Object.Destroy(FixedJoint2D) calls queued for the delayed-call pass: (time, `fixed_joints` index).
+    pub joint_destroys: Vec<(f64, usize)>,
     /// The manager entry of each registered script component (by instance id), for SetActive.
     pub behaviour_of: HashMap<i32, (i32, Behaviour)>,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).

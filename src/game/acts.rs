@@ -3,6 +3,7 @@
 
 use super::physical::get_average_impulse_remove_outliers;
 use super::{d, mathf, script, Game};
+use crate::assets::db::Component;
 use crate::b2::contacts2d::ScriptCollision;
 
 script! {
@@ -42,6 +43,8 @@ pub enum ActTarget {
     Activate(usize),
     /// FirearmBehaviour.Shoot (`Game::firearms`)
     Shoot(usize),
+    /// ProjectileLauncherBehaviour.Launch (`Game::launchers`)
+    Launch(usize),
 }
 
 /// A script that takes a physical object's collision messages besides the PhysicalBehaviour and LimbBehaviour.
@@ -84,6 +87,7 @@ impl Game {
                 match t {
                     ActTarget::Activate(e) => self.explosive_activate(e),
                     ActTarget::Shoot(f) => self.firearm_shoot(f),
+                    ActTarget::Launch(l) => self.launcher_launch(l),
                 }
             }
         }
@@ -162,15 +166,119 @@ script! {
         after_physical: bool = true,
         /// The component's index on its GameObject.
         index: usize = 0,
+        /// isStuck
+        is_stuck: bool = false,
+        /// joint: the `Game::fixed_joints` entry of the FixedJoint2D CreateJoint added (isStuckToHuman and
+        /// aboutToExplode only reach the EMP_STICKY_GRENADE achievement).
+        joint: Option<usize> = None,
     }
 }
 
+/// Layer indices of TagManager.asset.
+const OBJECTS_LAYER: i32 = 9;
+const DEBRIS_LAYER: i32 = 10;
+
 impl Game {
-    /// StickyGrenadeBehaviour.OnCollisionEnter2D. The state it keeps (isStuck, joint) only changes in CreateJoint, and
-    /// FixedUpdate and OnJointBreak2D do nothing until then.
+    /// `(bool)joint`: the component exists.
+    fn sticky_joint_alive(&self, s: usize) -> bool {
+        self.sticky_grenades[s].joint.is_some_and(|f| !self.fixed_joints[f].destroyed)
+    }
+
+    /// GameObject.layer = layer on the grenade's object (GameObject::SetLayer, 180589640): kLayerChanged reaches its
+    /// components in order, and only Collider2D (RecalculateContacts, 180c14640) and Rigidbody2D (180c1cdc0, a wake)
+    /// act on it among the physics ones (a Renderer's is rendering).
+    fn sticky_set_layer(&mut self, s: usize, layer: i32) {
+        let p = self.sticky_grenades[s].physical.expect("a StickyGrenadeBehaviour receiving collisions has a PhysicalBehaviour");
+        let id = self.physicals[p].id;
+        self.with_component_instance(id, |g, inst, o| {
+            g.world.layers.insert(inst.objects[o].game_object, layer);
+            let prefab = inst.prefab.clone();
+            for (k, (_, component)) in prefab.objects[o].components.iter().enumerate() {
+                match component {
+                    Component::Collider2D(_) => g.world.refilter_collider(inst.objects[o].components[k]),
+                    Component::Rigidbody2D(_) => {
+                        if let Some(&body) = inst.bodies.get(&o) {
+                            g.world.wake_body(body);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// StickyGrenadeBehaviour.CreateJoint
+    fn sticky_create_joint(&mut self, s: usize, phys: usize) {
+        if self.sticky_joint_alive(s) {
+            self.destroy_joint_delayed(self.sticky_grenades[s].joint.unwrap());
+        }
+        let p = self.sticky_grenades[s].physical.expect("a StickyGrenadeBehaviour receiving collisions has a PhysicalBehaviour");
+        // AddComponent<FixedJoint2D> takes the component's instance id.
+        self.allocate_instance_id();
+        let f = self.add_fixed_joint_component(p);
+        self.sticky_grenades[s].joint = Some(f);
+        self.fixed_joint_set_connected_body(f, Some(super::BodyOwner::Physical(phys)));
+        self.sticky_set_layer(s, DEBRIS_LAYER);
+    }
+
+    /// StickyGrenadeBehaviour.DestroyJoint
+    fn sticky_destroy_joint(&mut self, s: usize) {
+        self.sticky_set_layer(s, OBJECTS_LAYER);
+        self.sticky_grenades[s].is_stuck = false;
+        if self.sticky_joint_alive(s) {
+            self.destroy_joint_delayed(self.sticky_grenades[s].joint.unwrap());
+        }
+    }
+
+    /// StickyGrenadeBehaviour.FixedUpdate
+    pub(super) fn sticky_grenade_fixed_update(&mut self, s: usize) {
+        let alive = self.sticky_joint_alive(s);
+        let stuck = self.sticky_grenades[s].is_stuck;
+        // !joint.connectedBody: its Rigidbody2D is gone (or never set).
+        let no_connected_body = alive
+            && match self.fixed_joints[self.sticky_grenades[s].joint.unwrap()].connected {
+                None => true,
+                Some(super::BodyOwner::Physical(p)) => self.destroyed_components.contains(&self.physicals[p].rigidbody.component),
+                Some(super::BodyOwner::Node(k)) => self.destroyed_components.contains(&self.node_rigidbodies[k].rigidbody.component),
+            };
+        if (stuck && !alive) || (!stuck && alive) || (stuck && alive && no_connected_body) {
+            self.sticky_destroy_joint(s);
+        }
+    }
+
+    /// StickyGrenadeBehaviour.OnJointBreak2D, sent to the broken joint's GameObject: `broken != joint` compares the
+    /// components.
+    pub(super) fn sticky_grenade_on_joint_break(&mut self, f: usize) {
+        for s in 0..self.sticky_grenades.len() {
+            if self.sticky_grenades[s].joint == Some(f) {
+                self.sticky_destroy_joint(s);
+            }
+        }
+    }
+
+    /// Object.Destroy(FixedJoint2D): DestroyObjectDelayed queues it at min(fixedTimeAsDouble, the frame's time).
+    fn destroy_joint_delayed(&mut self, f: usize) {
+        let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+        self.joint_destroys.push((at, f));
+    }
+
+    /// The queued joint Destroys due by now, as (time, `fixed_joints` index).
+    pub fn joint_due_destroys(&self, now: f64) -> Vec<(f64, usize)> {
+        self.joint_destroys.iter().copied().filter(|&(at, _)| at <= now).collect()
+    }
+
+    /// The delayed Destroy of a FixedJoint2D (a second one finds it gone).
+    pub fn run_joint_destroy(&mut self, f: usize) {
+        self.joint_destroys.retain(|&(_, j)| j != f);
+        if !self.fixed_joints[f].destroyed {
+            self.fixed_joint_destroy(f);
+        }
+    }
+
+    /// StickyGrenadeBehaviour.OnCollisionEnter2D
     pub(super) fn sticky_grenade_collision_enter(&mut self, s: usize, c: &ScriptCollision) {
         let g = &self.sticky_grenades[s];
-        if !self.explosives[g.explosive].Armed {
+        if g.is_stuck || !self.explosives[g.explosive].Armed {
             return;
         }
         // Global.PhysicalObjectsInWorldByTransform[collision.transform]: the other body's transform, else the collider's.
@@ -179,8 +287,8 @@ impl Game {
             None => self.physical_of_collider(c.collider).filter(|&p| self.physicals[p].in_world),
         };
         if let Some(p) = phys.filter(|&p| !g.unsticky.contains(&self.physicals[p].Properties)) {
-            let _ = p;
-            unimplemented!("StickyGrenadeBehaviour.CreateJoint: GameObject.layer = Debris (Collider2D re-filter) and a runtime FixedJoint2D");
+            self.sticky_grenades[s].is_stuck = true;
+            self.sticky_create_joint(s, p);
         }
     }
 }

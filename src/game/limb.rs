@@ -80,6 +80,8 @@ script! {
         Joint: Option<usize> = None,
         GripBehaviour: Option<usize> = None,
         ConnectedLimbs: Vec<usize> = Vec::new(),
+        /// KillShotParticles is set (its Play is presentation).
+        KillShotParticles: bool = false,
         NearestLimbToBrain: Option<usize> = None,
         StrengthMultipliers: Vec<f32> = Vec::new(),
         SpeciesIdentity: String = "Human".into(),
@@ -157,7 +159,7 @@ impl Default for GoreString {
 }
 
 impl Game {
-    fn mass_strength_ratio(&self, l: usize) -> f32 {
+    pub(super) fn mass_strength_ratio(&self, l: usize) -> f32 {
         let ph = &self.physicals[self.limbs[l].PhysicalBehaviour];
         ph.rigidbody.mass(&self.world) / ph.TrueInitialMass
     }
@@ -1452,6 +1454,7 @@ impl Game {
         due.extend(self.person_due_destroys(now).into_iter().map(|(t, p)| (t, 3, p)));
         due.extend(self.frozen_in_ice_due_destroys(now).into_iter().map(|(t, i)| (t, 4, i)));
         due.extend(self.object_due_destroys(now).into_iter().map(|(t, id)| (t, 5, id as usize)));
+        due.extend(self.joint_due_destroys(now).into_iter().map(|(t, f)| (t, 7, f)));
         if dynamic {
             due.extend(self.coroutines.iter().filter(|c| c.at <= now).map(|c| (c.at, 6, c.seq as usize)));
         }
@@ -1463,6 +1466,8 @@ impl Game {
                     let c = self.coroutines.remove(i);
                     self.resume_coroutine(c);
                 }
+            } else if kind == 7 {
+                self.run_joint_destroy(l);
             } else if kind == 5 {
                 self.run_object_destroy(l as i32);
             } else if kind == 4 {

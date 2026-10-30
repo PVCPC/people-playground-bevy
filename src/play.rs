@@ -28,13 +28,14 @@ struct Hud;
 pub enum Start {
     Recording(PathBuf),
     /// The installed game's folder, the Map asset's name and the catalog item selected (if any).
-    Map(PathBuf, String, Option<String>),
+    /// The game, the map, the --item and the --target.
+    Map(PathBuf, String, Option<String>, Option<String>),
 }
 
 fn load(start: &Start, rig: &HumanRig) -> Result<Game, String> {
     let recording = match start {
         Start::Recording(recording) => recording,
-        Start::Map(game, map, item) => return new_game(game, map, item.as_deref()),
+        Start::Map(game, map, item, _) => return new_game(game, map, item.as_deref()),
     };
     let start = dump::snapshots(recording)?
         .find(|s| s.pt == "FS" && s.of("b2World").next().is_some())
@@ -57,13 +58,51 @@ fn new_game(game: &Path, map: &str, item: Option<&str>) -> Result<Game, String> 
 }
 
 /// --play-test: 30 s of 60 fps frames without a window; prints where each limb ends up. A --play-map-test with
-/// --item spawns the item at the map's center on frame 30 and a flipped one on frame 60.
+/// --item spawns the item at the map's center on frame 30 and a flipped one on frame 60. With a --target, the target
+/// spawns 3 m right of the center, 1.2 m above the ground there, on frame 30 and the item 0.6 m above the ground
+/// below the center on frame 60, activated ("activateDirect" with the mouse on its first object's center of mass)
+/// on frame 64.
 pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
     let mut g = load(start, rig)?;
+    let target = match start {
+        Start::Map(_, _, _, target) => target.clone(),
+        Start::Recording(_) => None,
+    };
+    let item = g.catalog_selected.clone();
+    let mut ground = 0.0;
+    let mut item_physical = 0;
     for n in 0..1800 {
-        // With a catalog item selected: "spawnRight" released at the map's center on frame 30, "spawnLeft" 3 m
-        // to the right on frame 60.
-        if g.catalog_selected.is_some() {
+        if let Some(target) = &target {
+            if n == 29 {
+                g.catalog_selected = Some(target.clone());
+                let c = g.BoundingBox.center;
+                ground = g.raycast_first(crate::b2::math::Vec2::new(c[0], c[1]), [0.0, -1.0], 1.0e4).ok_or("--target: no ground below the map's center")?.point.y;
+            } else if n == 59 {
+                g.catalog_selected = item.clone();
+                item_physical = g.physicals.len();
+            }
+            for (key, at) in [("spawnRight", &[30, 60][..]), ("activateDirect", &[64])] {
+                let down = at.contains(&(n + 1));
+                g.input.controls.insert(key.into(), crate::game::tool::Control { down, held: down, up: at.contains(&n) });
+            }
+            g.input.mouse = match n {
+                ..59 => [g.BoundingBox.center[0] + 3.0, ground + 1.2, 0.0],
+                ..61 => [g.BoundingBox.center[0], ground + 0.6, 0.0],
+                _ => {
+                    let p = g.physicals.get(item_physical).ok_or("--target: the item has no physical object")?;
+                    // Once the item is gone the mouse stays where it was.
+                    match p.destroyed {
+                        true => g.input.mouse,
+                        false => {
+                            let c = g.world.body(p.rigidbody.body).sweep.c;
+                            [c.x, c.y, 0.0]
+                        }
+                    }
+                }
+            };
+        } else if g.catalog_selected.is_some() {
+            // With a catalog item selected: "spawnRight" released at the map's center on frame 30, "spawnLeft" 3 m
+            // to the right on frame 60.
             for (key, at, dx) in [("spawnRight", 30, 0.0), ("spawnLeft", 60, 3.0)] {
                 g.input.controls.insert(key.into(), crate::game::tool::Control { down: n == at - 1, held: n == at - 1, up: n == at });
                 if n == at {
@@ -75,9 +114,10 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
             return Err(format!("frame {n}: {m}"));
         }
     }
-    for l in &g.limbs {
+    for (i, l) in g.limbs.iter().enumerate() {
         let p = &g.physicals[l.PhysicalBehaviour];
-        println!("{:14} {:?} active={}", p.name, &p.transform.position[..2], p.active);
+        let c = &g.circulations[i];
+        println!("{:14} {:?} active={} health={} bleeding={} wounds={}", p.name, &p.transform.position[..2], p.active, l.Health, c.BleedingRate, c.GunshotWoundCount);
     }
     Ok(())
 }

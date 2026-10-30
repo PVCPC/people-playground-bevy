@@ -1,4 +1,5 @@
-//! BallisticsEmitter (the bullets of FirearmBehaviour), BulletTracerPool and CameraShakeBehaviour.
+//! BallisticsEmitter (the bullets of FirearmBehaviour and GlobalShrapnelEmitter), BulletTracerPool and
+//! CameraShakeBehaviour.
 #![allow(non_snake_case)]
 
 use super::destroyable::{Coroutine, Step};
@@ -16,10 +17,7 @@ pub struct Cartridge {
     pub PenetrationRandomAngleMultiplier: f32,
 }
 
-const MAX_ITERATIONS: u32 = 128;
-const MAX_TOTAL_DISTANCE: f32 = 1000.0;
 const THICKNESS: f32 = 0.08;
-const RICOCHET_CHANCE_MULTIPLIER: f32 = 1.0;
 const MATERIAL_HARDNESS_MULTIPLIER: f32 = 0.35;
 const IMPACT_FORCE_MULTIPLIER: f32 = 18.0;
 const BULLET_DROP_MULTIPLIER: f32 = 0.25;
@@ -28,21 +26,39 @@ const CRACK_CHANCE: f32 = 0.8;
 const CRACK_COOLDOWN: f32 = 0.25;
 const WATER_LAYER: u32 = 1 << 4;
 
-/// The classes with a Shot(Shot) / ExitShot(Shot) method.
+/// The classes with a Shot(Shot) / ExitShot(Shot) method, and their subclasses.
 const SHOT_RECEIVERS: &[&str] = &[
     "PhysicalBehaviour", "DestroyableBehaviour", "ExplosiveBehaviour", "DamagableMachineryBehaviour", "TyreDeflationBehaviour", "ActOnShot", "BalloonBehaviour",
-    "BreakJointOnShot", "BulbBehaviour", "CathodeLightBehaviour", "CirculationBehaviour", "DebugTargetDamageMeter", "DroneBehaviour", "FireworksBehaviour",
+    "BreakJointOnShotBehaviour", "BulbBehaviour", "CathodeLightBehaviour", "CirculationBehaviour", "DebugTargetDamageMeter", "DroneBehaviour", "FireworksBehaviour",
     "GlowtubeBehaviour", "JavelinMissileBehaviour", "LimbBehaviour", "LiquidContainerLeakingBehaviour", "OldSyringeBehaviour", "PersonBehaviour",
-    "SentryTurretBehaviour", "ShotMessagePropagator", "SyringeBehaviour", "TelevisionBehaviour", "WaterImpactBehaviour",
+    "SentryTurretBehaviour", "ShotMessagePropagator", "SyringeBehaviour", "TelevisionBehaviour", "WaterImpactBehaviour", "VaseBehaviour",
+    "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
+    "MendingSyringe", "PainKillerSyringe", "PinkSyringe", "UltraStrengthSyringe", "WaterBreathingSyringe", "ZombieSyringe",
 ];
 const EXIT_SHOT_RECEIVERS: &[&str] = &[
     "PhysicalBehaviour", "BalloonBehaviour", "CirculationBehaviour", "LimbBehaviour", "LiquidContainerLeakingBehaviour", "OldSyringeBehaviour", "SyringeBehaviour",
+    "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
+    "MendingSyringe", "PainKillerSyringe", "PinkSyringe", "UltraStrengthSyringe", "WaterBreathingSyringe", "ZombieSyringe",
 ];
 
-/// A FirearmBehaviour's BallisticsEmitter (made in Start).
+impl Cartridge {
+    /// A Cartridge asset's serialized fields.
+    pub fn read(v: &crate::assets::mono::Value) -> Result<Self, String> {
+        let f = |name: &str| v.get(name).and_then(crate::assets::mono::Value::f32).ok_or_else(|| format!("Cartridge.{name}"));
+        Ok(Self { Damage: f("Damage")?, Recoil: f("Recoil")?, ImpactForce: f("ImpactForce")?, StartSpeed: f("StartSpeed")?, PenetrationRandomAngleMultiplier: f("PenetrationRandomAngleMultiplier")? })
+    }
+}
+
+/// A BallisticsEmitter: a FirearmBehaviour's (made in Start) or the GlobalShrapnelEmitter's.
 #[derive(Clone, Debug)]
 pub struct Emitter {
     pub cartridge: Cartridge,
+    pub MaxBallisticsIterations: u32,
+    pub MaxTotalDistance: f32,
+    pub RicochetChanceMultiplier: f32,
+    pub RenderTracersIfTraversal: bool,
+    /// BulletRicochetCallback is FirearmBehaviour.OnRicochet.
+    pub ricochet_callback: bool,
     pub LayersToHit: u32,
     pub WaterLayer: u32,
     pub MaxRange: f32,
@@ -55,15 +71,38 @@ pub struct Emitter {
 
 impl Emitter {
     pub fn new(cartridge: Cartridge, layers: u32, water: u32) -> Self {
-        Self { cartridge, LayersToHit: layers, WaterLayer: water, MaxRange: 1000.0, DoTraversal: false, Charge: 0.0, lastCrackPlayTime: f32::MIN, tracers: 0 }
+        Self {
+            cartridge,
+            MaxBallisticsIterations: 128,
+            MaxTotalDistance: 1000.0,
+            RicochetChanceMultiplier: 1.0,
+            RenderTracersIfTraversal: true,
+            ricochet_callback: false,
+            LayersToHit: layers,
+            WaterLayer: water,
+            MaxRange: 1000.0,
+            DoTraversal: false,
+            Charge: 0.0,
+            lastCrackPlayTime: f32::MIN,
+            tracers: 0,
+        }
     }
 }
+
+/// The level1 GlobalShrapnelEmitter (GlobalShrapnelEmitter.Instance), when its Awake ran.
+#[derive(Clone, Debug)]
+pub struct ShrapnelEmitter {
+    pub emitter: Emitter,
+}
+
+/// The coroutine owner of the GlobalShrapnelEmitter: a scene object that is never destroyed.
+pub const SHRAPNEL_OWNER: i32 = i32::MIN;
 
 /// The arguments of one BallisticIteration.
 #[derive(Clone, Copy, Debug)]
 pub struct Bullet {
-    /// The ConnectedBehaviour (`Game::firearms`).
-    pub firearm: usize,
+    /// The ConnectedBehaviour: a FirearmBehaviour (`Game::firearms`), or None for the GlobalShrapnelEmitter.
+    pub firearm: Option<usize>,
     pub origin: [f32; 2],
     pub direction: [f32; 2],
     pub speed: f32,
@@ -227,17 +266,32 @@ impl Game {
 
     // ---- BallisticsEmitter ----------------------------------------------------------------------------------------
 
-    fn emitter(&self, f: usize) -> &Emitter {
-        self.firearms[f].emitter.as_ref().unwrap_or_else(|| unimplemented!("FirearmBehaviour.Shoot before Start (NullReferenceException)"))
+    fn emitter(&self, f: Option<usize>) -> &Emitter {
+        match f {
+            Some(f) => self.firearms[f].emitter.as_ref().unwrap_or_else(|| unimplemented!("FirearmBehaviour.Shoot before Start (NullReferenceException)")),
+            None => &self.shrapnel.as_ref().expect("the GlobalShrapnelEmitter").emitter,
+        }
+    }
+
+    fn emitter_mut(&mut self, f: Option<usize>) -> &mut Emitter {
+        match f {
+            Some(f) => self.firearms[f].emitter.as_mut().unwrap(),
+            None => &mut self.shrapnel.as_mut().expect("the GlobalShrapnelEmitter").emitter,
+        }
+    }
+
+    /// The ConnectedBehaviour's instance id (its coroutines' owner).
+    fn emitter_owner(&self, f: Option<usize>) -> i32 {
+        f.map_or(SHRAPNEL_OWNER, |f| self.firearms[f].id)
     }
 
     /// BallisticsEmitter.Emit(origin, direction)
-    pub fn emitter_emit(&mut self, f: usize, origin: [f32; 2], direction: [f32; 2]) {
+    pub fn emitter_emit(&mut self, f: Option<usize>, origin: [f32; 2], direction: [f32; 2]) {
         let e = self.emitter(f);
-        let (traversal, charge, speed) = (e.DoTraversal, e.Charge, e.cartridge.StartSpeed);
+        let (traversal, charge, speed) = (e.DoTraversal && e.RenderTracersIfTraversal, e.Charge, e.cartridge.StartSpeed);
         let mut tracer = false;
         if traversal && self.tracer_request() {
-            self.firearms[f].emitter.as_mut().unwrap().tracers += 1;
+            self.emitter_mut(f).tracers += 1;
             tracer = true;
         }
         let b = Bullet { firearm: f, origin, direction: mathf::normalized2(direction), speed, iteration: 0, total: 0.0, previous: None, tracer, splash: true, can_explode: true, charge };
@@ -254,19 +308,19 @@ impl Game {
 
     fn remove_tracer(&mut self, b: &Bullet) {
         if b.tracer {
-            self.firearms[b.firearm].emitter.as_mut().unwrap().tracers -= 1;
+            self.emitter_mut(b.firearm).tracers -= 1;
             self.tracer_return();
         }
     }
 
     /// Random insideUnitCircle * PenetrationRandomAngleMultiplier
-    fn bullet_random_angle(&mut self, f: usize) -> [f32; 2] {
+    fn bullet_random_angle(&mut self, f: Option<usize>) -> [f32; 2] {
         let m = self.emitter(f).cartridge.PenetrationRandomAngleMultiplier;
         mul(self.random.inside_unit_circle(), m)
     }
 
     /// GetDamageForDistance(totalDistance)
-    fn damage_for_distance(&self, f: usize, distance: f32) -> f32 {
+    fn damage_for_distance(&self, f: Option<usize>, distance: f32) -> f32 {
         // DamageMultiplierByDistance
         let m = mathf::clamp((d(1.5f32) / distance + d(0.7f32) / mathf::lerp(distance, 0.8, 0.992)).f(), 0.5, 10.0);
         self.emitter(f).cartridge.Damage * m
@@ -285,17 +339,19 @@ impl Game {
     }
 
     /// PhysicalObjectsInWorldByTransform.TryGetValue(transform) for a transform that is the collider's own (overlap)
-    /// or its attached Rigidbody2D's (raycast), with the root check before it.
-    fn bullet_target(&self, f: usize, p: Option<usize>) -> Option<usize> {
-        let fp = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
-        p.filter(|&p| self.root_id(p) != self.root_id(fp) && self.physicals[p].in_world && !self.physicals[p].destroyed)
+    /// or its attached Rigidbody2D's (raycast), with the root check before it. The GlobalShrapnelEmitter's root is a
+    /// level1 object, never a physical's root.
+    fn bullet_target(&self, f: Option<usize>, p: Option<usize>) -> Option<usize> {
+        let root = f.map(|f| self.root_id(self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D")));
+        p.filter(|&p| Some(self.root_id(p)) != root && self.physicals[p].in_world && !self.physicals[p].destroyed)
     }
 
     /// BallisticIteration up to its next yield; the overlap path's StartCoroutine runs its iteration at once.
     fn bullet_iterate(&mut self, mut b: Bullet) {
         loop {
             let f = b.firearm;
-            if b.iteration >= MAX_ITERATIONS || b.total >= MAX_TOTAL_DISTANCE {
+            let e = self.emitter(f);
+            if b.iteration >= e.MaxBallisticsIterations || b.total >= e.MaxTotalDistance {
                 self.remove_tracer(&b);
                 return;
             }
@@ -364,7 +420,7 @@ impl Game {
                     // WaitForEndOfFrame, then StartCoroutine(BallisticIteration(..)).
                     b = Bullet { origin: add(b.origin, mul(b.direction, traversal)), total: (d(b.total) + d(traversal) * 0.1f32).f(), previous: None, ..b };
                     let slot = self.bullet_slot(b, None);
-                    let owner = self.firearms[f].id;
+                    let owner = self.emitter_owner(f);
                     self.coroutine_seq += 1;
                     self.end_of_frame.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner, step: Step::Bullet(slot) });
                 }
@@ -384,7 +440,7 @@ impl Game {
             ph.charge = mathf::max(charge * ph.EnergyWireResistance, ph.Charge());
             let h = BulletHit { physical: p, hardness, damage: damage2, collider: hit.collider, point, normal, distance: hit.distance };
             let slot = self.bullet_slot(b, Some(h));
-            let owner = self.firearms[f].id;
+            let owner = self.emitter_owner(f);
             self.start_wait(owner, 0.01, Step::Bullet(slot));
             return;
         }
@@ -413,9 +469,11 @@ impl Game {
         let f = b.firearm;
         let mut b = b;
         b.splash = !self.test_for_water_hit(f, b.origin, b.direction, h.damage, b.splash);
-        if self.should_ricochet(b.direction, &h) {
+        if self.should_ricochet(f, b.direction, &h) {
             // RicochetBullet: OnRicochet (FirearmBehaviour) instantiates Prefabs/Ricochet at the hit point.
-            self.spawn_resource("Prefabs/Ricochet", [h.point[0], h.point[1], 0.0]);
+            if self.emitter(f).ricochet_callback {
+                self.spawn_resource("Prefabs/Ricochet", [h.point[0], h.point[1], 0.0]);
+            }
             let dot = dot2(h.normal, b.direction);
             let k = -2.0 * dot;
             let reflect = [(d(k) * h.normal[0] + b.direction[0]).f(), (d(k) * h.normal[1] + b.direction[1]).f()];
@@ -447,14 +505,15 @@ impl Game {
     }
 
     /// ShouldRicochet(incoming, hit, phys)
-    fn should_ricochet(&mut self, incoming: [f32; 2], h: &BulletHit) -> bool {
+    fn should_ricochet(&mut self, f: Option<usize>, incoming: [f32; 2], h: &BulletHit) -> bool {
+        let m = self.emitter(f).RicochetChanceMultiplier;
         let ph = &self.physicals[h.physical];
         // !hit.transform: the physical's GameObject is gone.
         if ph.destroyed {
             return false;
         }
         if !ph.BulletDeflectChanceOverride.is_nan() {
-            let chance = RICOCHET_CHANCE_MULTIPLIER * ph.BulletDeflectChanceOverride;
+            let chance = m * ph.BulletDeflectChanceOverride;
             return chance > self.random.value();
         }
         let props = &self.properties[ph.Properties];
@@ -462,7 +521,7 @@ impl Game {
         let num2 = mathf::clamp01(props.Softness + props.Brittleness);
         let num3 = (1.0 - (d(num2) * 150.0f32 + num)).f();
         if num3 > 0.05 {
-            return num3 * RICOCHET_CHANCE_MULTIPLIER > self.random.value();
+            return num3 * m > self.random.value();
         }
         false
     }
@@ -477,7 +536,7 @@ impl Game {
     }
 
     /// CanPlayCracks(origin, speed, distance); Global.main.Paused is never set.
-    fn can_play_cracks(&mut self, f: usize, origin: [f32; 2], speed: f32, distance: f32) -> bool {
+    fn can_play_cracks(&mut self, f: Option<usize>, origin: [f32; 2], speed: f32, distance: f32) -> bool {
         if self.camera_orthographic_size() > 8.0 || distance < 5.0 {
             return false;
         }
@@ -489,14 +548,14 @@ impl Game {
             return false;
         }
         if CRACK_CHANCE < self.random.value() {
-            self.firearms[f].emitter.as_mut().unwrap().lastCrackPlayTime = time;
+            self.emitter_mut(f).lastCrackPlayTime = time;
             return false;
         }
         true
     }
 
     /// TestForWaterHit(origin, direction, damage, sendMessage)
-    fn test_for_water_hit(&mut self, f: usize, origin: [f32; 2], direction: [f32; 2], damage: f32, send: bool) -> bool {
+    fn test_for_water_hit(&mut self, f: Option<usize>, origin: [f32; 2], direction: [f32; 2], damage: f32, send: bool) -> bool {
         let e = self.emitter(f);
         let (range, mask) = (e.MaxRange, e.WaterLayer);
         let Some(hit) = self.raycast(V::new(origin[0], origin[1]), direction, range, mask, f32::NEG_INFINITY, f32::INFINITY) else { return false };
@@ -563,13 +622,290 @@ impl Game {
                     let m = self.machinery.iter().position(|m| m.PhysicalBehaviour == p).expect("the object's DamagableMachineryBehaviour");
                     self.machinery_shot(m, damage);
                 }
+                ("LimbBehaviour", _) | ("CirculationBehaviour", _) => {
+                    // A limb's CirculationBehaviour shares its index.
+                    let l = self.limbs.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's LimbBehaviour");
+                    match (class.as_str(), exit) {
+                        ("LimbBehaviour", false) => self.limb_shot(l, normal, point, damage),
+                        ("LimbBehaviour", true) => self.limb_exit_shot(l, normal, point, damage),
+                        (_, false) => self.circulation_shot(l, normal, point, damage),
+                        (_, true) => self.circulation_exit_shot(l, normal, point),
+                    }
+                }
                 ("TyreDeflationBehaviour", _) => {
                     let t = self.tyres.iter().position(|t| t.Phys == p).expect("the object's TyreDeflationBehaviour");
                     self.tyre_shot(t, damage, point);
                 }
+                ("GlowtubeBehaviour", _) => {
+                    let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
+                    self.glowtube_shot(g, damage);
+                }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
             }
+        }
+    }
+
+    /// The physical of a RaycastHit2D.transform (the attached Rigidbody2D's GameObject, else the collider's); None for
+    /// a collider without a PhysicalBehaviour there.
+    pub(super) fn hit_transform_physical(&self, hit: &super::explosion::RayHit2D) -> Option<usize> {
+        if let Some(p) = self.physical_of_body(hit.body) {
+            return Some(p);
+        }
+        if self.node_rigidbodies.iter().any(|n| n.rigidbody.body == hit.body) {
+            unimplemented!("RaycastHit2D.transform of a Transform node's Rigidbody2D");
+        }
+        None
+    }
+
+    /// The classes of a script's GameObject that take a message (`receivers`), in component order.
+    fn receivers_of(&mut self, id: i32, receivers: &[&str]) -> Vec<String> {
+        self.with_component_instance(id, |_, inst, o| {
+            inst.prefab.objects[o].components.iter().filter_map(|(_, c)| match c {
+                crate::assets::db::Component::Script { class, .. } if receivers.contains(&class.as_str()) => Some(class.clone()),
+                _ => None,
+            }).collect()
+        })
+    }
+
+    /// LimbBehaviour.Shot
+    fn limb_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2], damage: f32) {
+        use super::misc::damage_type::BULLET;
+        if self.limbs[l].ImmuneToDamage {
+            return;
+        }
+        let mut damage = damage * self.limbs[l].ShotDamageMultiplier;
+        damage /= self.mass_strength_ratio(l);
+        damage *= self.prefs.FragilityMultiplier;
+        if self.limbs[l].IsAndroid {
+            if damage < 40.0 {
+                return;
+            }
+            damage *= 0.2;
+        } else {
+            self.limbs[l].shotHeat += 1.0;
+        }
+        if self.limbs[l].HasLungs && !self.limbs[l].IsAndroid && self.random.value() > 0.9 {
+            self.limbs[l].LungsPunctured = true;
+        }
+        let flag = self.is_world_point_in_vital_part(l, point) && self.random.value() > 0.05;
+        let num = if flag { 7.0 } else { 0.1 } * damage;
+        let (person, p) = (self.limbs[l].Person, self.limbs[l].PhysicalBehaviour);
+        if let Some(effect) = self.people[person].PoolableImpactEffect.filter(|_| !self.prefs.GorelessMode && self.prefs.ChunkyShotParticles)
+            && (self.physicals[p].BurnProgress as f64) < 0.6
+            && self.skins[l].acidProgress < 0.7
+            && num > self.people[person].ImpactEffectShotDamageThreshold
+            && self.random.value() > 0.8
+        {
+            // transform.right = shot.normal: presentation.
+            let effect = effect.expect("LimbBehaviour.Shot: a recording names the PoolableImpactEffect but holds no game data");
+            self.request_pooled_effect(effect, "LimbBehaviour.Shot");
+        }
+        for i in 0..self.limbs[l].ConnectedLimbs.len() {
+            let c = self.limbs[l].ConnectedLimbs[i];
+            if !self.physicals[self.limbs[c].PhysicalBehaviour].destroyed {
+                self.limbs[c].Numbness += 0.5;
+            }
+        }
+        if self.limb_is_considered_alive(l) {
+            let m = self.limbs[l].ShotDamageMultiplier;
+            let a = self.people[person].AdrenalineLevel;
+            self.people[person].AdrenalineLevel = (d(a) + d(self.random.value()) * m).f();
+            let c = self.people[person].Consciousness;
+            self.people[person].Consciousness = (d(c) - d(self.random.range(0.02, 0.1)) * m).f();
+            if !self.limbs[l].IsAndroid && !self.limbs[l].IsZombie {
+                let s = self.people[person].ShockLevel;
+                self.people[person].ShockLevel = (d(s) + d(num) * self.random.value() * 0.0025f32).f();
+                self.person_wince(person, 300.0);
+                self.limbs[l].Numbness = 1.0;
+                if d(self.random.value()) * self.limbs[l].Vitality > d(0.5) && self.random.value() > 0.6 && !self.limb_is_paralysed(l) {
+                    let pain = self.random.value() * 2.0;
+                    self.add_pain(person, pain);
+                }
+                if d(num) > d(2.0) * self.random.value() {
+                    let w = self.people[person].DesiredWalkingDirection;
+                    let delta = d(self.random.value()) * 3.0f32;
+                    let same_side = (normal[0] > 0.0) == (self.people[person].localScale[0] > 0.0);
+                    self.people[person].DesiredWalkingDirection = if same_side { d(w) - delta } else { d(w) + delta }.f();
+                }
+                // Person.SendMessage("Shot", shot)
+                for class in self.receivers_of(self.people[person].id, SHOT_RECEIVERS) {
+                    match class.as_str() {
+                        "PersonBehaviour" => self.person_shot(person),
+                        c => unimplemented!("{c}.Shot on a person root"),
+                    }
+                }
+            }
+            if self.limbs[l].HasBrain && !self.limbs[l].IsAndroid && (!self.limbs[l].IsZombie || !(self.random.value() > 0.2)) {
+                let num2 = if flag { 0.1 } else { 0.8 };
+                if self.random.value() > num2 {
+                    self.limbs[l].Health = 0.0;
+                }
+                if self.random.value() > num2 {
+                    self.people[person].Consciousness = 0.0;
+                }
+            }
+        }
+        // Shot.CanCrush is true for the emitter's shots.
+        if self.prefs.LimbCrushing && damage > 149.0 && mathf::clamp(((d(damage) - 149.0f32) * 0.005f32).f(), 0.3, 0.8) > self.random.value() {
+            if self.prefs.StopAnimationOnDamage {
+                self.people[person].OverridePoseIndex = -1;
+            }
+            self.limb_crush_next_frame(l);
+        } else if self.limbs[l].shotHeat > 5.0 && self.random.value() > 0.35 {
+            if self.limbs[l].HasJoint && self.random.value() > 0.8 {
+                self.limb_slice(l);
+            } else if self.prefs.LimbCrushing {
+                if self.prefs.StopAnimationOnDamage {
+                    self.people[person].OverridePoseIndex = -1;
+                }
+                self.limb_crush_next_frame(l);
+            }
+        }
+        if self.limbs[l].IsZombie || self.random.value() < 0.01 {
+            self.limb_damage(l, num * 0.01);
+        } else {
+            if !self.limbs[l].IsAndroid {
+                self.circulations[l].InternalBleedingIntensity += num;
+                if flag {
+                    self.circulations[l].InternalBleedingIntensity += 5.0;
+                }
+            }
+            let damage = mathf::min(self.limbs[l].InitialHealth / 2.0, num * 2.0);
+            self.limb_damage(l, damage);
+        }
+        let b = damage * 0.1;
+        self.skin_add_damage_point(l, BULLET, point, mathf::max(50.0, b));
+    }
+
+    /// StartCoroutine(LimbBehaviour.CrushNextFrame()): the dismemberment damage point, then WaitForEndOfFrame.
+    fn limb_crush_next_frame(&mut self, l: usize) {
+        let p = self.limbs[l].PhysicalBehaviour;
+        let at = self.physicals[p].transform.position;
+        self.skin_add_damage_point(l, super::misc::damage_type::DISMEMBERMENT, [at[0], at[1]], 15.0);
+        self.coroutine_seq += 1;
+        let owner = self.limbs[l].id;
+        self.end_of_frame.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner, step: Step::LimbCrushEndOfFrame(l) });
+    }
+
+    /// LimbBehaviour.Slice
+    pub(super) fn limb_slice(&mut self, l: usize) {
+        if self.limbs[l].ImmuneToDamage {
+            return;
+        }
+        let person = self.limbs[l].Person;
+        if self.prefs.StopAnimationOnDamage && self.limb_is_considered_alive(l) {
+            self.people[person].OverridePoseIndex = -1;
+        }
+        if self.limb_is_considered_alive(l) {
+            self.people[person].AdrenalineLevel += 1.0;
+        }
+        if self.limbs[l].HasJoint {
+            self.limbs[l].RegenerationSpeed = 0.0;
+            self.limbs[l].Health = 0.0;
+            let h = self.limbs[l].Joint.expect("MissingReferenceException: HasJoint without a Joint");
+            let anchor = self.hinges[h].anchor;
+            let at = self.transform_point3(self.limbs[l].PhysicalBehaviour, [anchor[0], anchor[1], 0.0]);
+            self.act_on_impact(l, 15.0, at);
+            self.limbs[l].BreakingThreshold = 0.0;
+        }
+    }
+
+    /// LimbBehaviour.ExitShot
+    fn limb_exit_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2], damage: f32) {
+        use super::misc::damage_type::BULLET;
+        if self.limbs[l].ImmuneToDamage {
+            return;
+        }
+        let mut damage = damage / self.mass_strength_ratio(l);
+        damage *= self.prefs.FragilityMultiplier;
+        self.skin_add_damage_point(l, BULLET, point, mathf::max(60.0, damage * 0.4));
+        let (person, p) = (self.limbs[l].Person, self.limbs[l].PhysicalBehaviour);
+        if let Some(effect) = self.people[person].PoolableImpactEffect.filter(|_| !self.prefs.GorelessMode && self.prefs.ChunkyShotParticles)
+            && (self.physicals[p].BurnProgress as f64) < 0.6
+            && self.skins[l].acidProgress < 0.7
+            && damage > self.people[person].ImpactEffectShotDamageThreshold
+            && self.random.value() > 0.6
+        {
+            let effect = effect.expect("LimbBehaviour.ExitShot: a recording names the PoolableImpactEffect but holds no game data");
+            self.request_pooled_effect(effect, "LimbBehaviour.ExitShot");
+        }
+        if self.limbs[l].HasLungs && !self.limbs[l].IsAndroid && self.random.value() > 0.9 {
+            self.limbs[l].LungsPunctured = true;
+        }
+        if self.prefs.StopAnimationOnDamage && self.limb_is_considered_alive(l) {
+            self.people[person].OverridePoseIndex = -1;
+        }
+        if !self.prefs.GorelessMode && !self.limbs[l].KillShotParticlesEmitted && self.limbs[l].Health <= mathf::EPSILON && self.limbs[l].KillShotParticles && self.random.value() > 0.7 {
+            // KillShotParticles.Play() and PlayClipOnce: presentation and audio, the draw stays.
+            self.pick_random(self.people[person].DismembermentClips);
+            self.limbs[l].KillShotParticlesEmitted = true;
+        }
+        if self.limbs[l].IsAndroid || self.amount_of_blood(l) < 0.05 {
+            return;
+        }
+        let fallback = self.original_blood_color(l);
+        let colour = self.get_computed_color(l, fallback);
+        // The loop bound Random.Range(1, 4) is drawn again before each pass.
+        let mut i = 0;
+        while i < self.random.range_int(1, 4) {
+            let r = self.random.inside_unit_circle();
+            let direction = [normal[0] + r[0] * 0.4, normal[1] + r[1] * 0.4];
+            let hit = self.raycast(V::new(point[0], point[1]), direction, 3.0, super::explosion::DEFAULT_RAYCAST_LAYERS, f32::NEG_INFINITY, f32::INFINITY);
+            if let Some(hit) = hit {
+                // raycastHit2D.transform.gameObject.SendMessage("Decal", new DecalInstruction(BloodDecal, point, colour))
+                match self.hit_transform_physical(&hit) {
+                    Some(other) => {
+                        let ty = self.decal_descriptor(&self.limbs[l].BloodDecal.clone());
+                        self.physical_decal(other, ty, [hit.point.x, hit.point.y], 1.0, colour);
+                    }
+                    None if self.bare_colliders[&hit.collider].receives(&["DecalControllerBehaviour", "DecalRenderer", "DecalRendererController"]) => {
+                        unimplemented!("SendMessage Decal to the scripts of a collider without a PhysicalBehaviour")
+                    }
+                    None => {}
+                }
+            }
+            i += 1;
+        }
+    }
+
+    /// CirculationBehaviour.Shot
+    fn circulation_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2], damage: f32) {
+        if self.circulations[l].ImmuneToDamage || (self.limbs[l].IsAndroid && damage < 50.0) {
+            return;
+        }
+        let damage = damage * self.limbs[l].ShotDamageMultiplier;
+        if damage <= mathf::EPSILON {
+            return;
+        }
+        let softness = self.properties[self.physicals[self.limbs[l].PhysicalBehaviour].Properties].Softness;
+        if !self.limbs[l].IsZombie && d(self.random.value()) < d(softness) + 0.001f32 {
+            let flag = self.is_world_point_in_artery_rect(l, point);
+            let rate = self.circulations[l].BleedingRate;
+            self.circulations[l].BleedingRate = (d(rate) + d(mathf::max(0.5, damage / 3.5)) * if flag { 2.0f32 } else { 1.0 }).f();
+            self.create_bleeding_particle(l, point, normal, if flag { 1.0 } else { 0.0 });
+        }
+        if !self.limbs[l].IsAndroid && !self.limbs[l].IsZombie && self.random.value() > 0.2 && self.is_world_point_in_vital_part(l, point) {
+            self.circulations[l].IsPump = false;
+        }
+        self.circulations[l].GunshotWoundCount = self.circulations[l].GunshotWoundCount.wrapping_add(1);
+    }
+
+    /// CirculationBehaviour.ExitShot (shot.damage = Limb.ShotDamageMultiplier)
+    fn circulation_exit_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2]) {
+        if self.circulations[l].ImmuneToDamage || self.limbs[l].IsZombie || self.limbs[l].IsAndroid {
+            return;
+        }
+        let damage = self.limbs[l].ShotDamageMultiplier;
+        if damage <= mathf::EPSILON {
+            return;
+        }
+        let flag = self.is_world_point_in_artery_rect(l, point);
+        let rate = self.circulations[l].BleedingRate;
+        self.circulations[l].BleedingRate = (d(rate) + d(mathf::max(0.5, damage / 10.0)) * if flag { 4.0f32 } else { 1.0 }).f();
+        self.create_bleeding_particle(l, point, normal, if flag { 1.0 } else { 0.0 });
+        if self.random.value() > 0.2 && self.is_world_point_in_vital_part(l, point) {
+            self.circulations[l].IsPump = false;
         }
     }
 

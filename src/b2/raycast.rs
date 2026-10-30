@@ -161,12 +161,33 @@ impl Shape {
                 Some(RayOutput { normal: normalize(Vec2::new(sx + rx * a, sy + ry * a)), fraction: a })
             }
             Shape::Polygon(poly) => {
-                if POLYGON_RADIUS < poly.radius {
-                    unimplemented!("b2PolygonShape::RayCast of a rounded polygon");
-                }
                 let p1 = xf.apply_t(input.p1);
                 let p2 = xf.apply_t(input.p2);
                 let d = Vec2::new(p2.x - p1.x, p2.y - p1.y);
+                if POLYGON_RADIUS < poly.radius {
+                    // A capsule of radius - b2_polygonRadius along each edge not facing away from the ray; a hit
+                    // nearer than the best so far becomes the best and caps the next casts' maxFraction.
+                    let mut input = *input;
+                    let mut best = None;
+                    for i in 0..poly.count {
+                        let n = poly.normals[i];
+                        if d.x * n.x + d.y * n.y > 0.0 {
+                            continue;
+                        }
+                        let edge = [poly.vertices[i], poly.vertices[(i + 1) % poly.count]];
+                        if let Some(out) = capsule_ray_cast(poly.radius - POLYGON_RADIUS, edge, &input, xf) {
+                            if input.max_fraction > out.fraction {
+                                input.max_fraction = out.fraction;
+                                best = Some(out);
+                            } else if best.is_none() {
+                                // The output keeps the last cast's values only until the best is written back,
+                                // which is the input's maxFraction and an uninitialised normal.
+                                unimplemented!("b2PolygonShape::RayCast: a rounded edge hit at exactly maxFraction");
+                            }
+                        }
+                    }
+                    return best;
+                }
                 let (mut lower, mut upper) = (0.0f32, input.max_fraction);
                 let mut index: i32 = -1;
                 for i in 0..poly.count {

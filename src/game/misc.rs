@@ -450,6 +450,8 @@ pub enum PendingStart {
     Firearm(usize),
     /// FlaskBehaviour.Start: the `Game::flasks` index.
     Flask(usize),
+    /// DetectorBehaviour.Start: the `Game::detectors` index.
+    Detector(usize),
     /// RandomCarTextureBehaviour.Start: the `Game::random_car_textures` index.
     CarTexture(usize),
     /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
@@ -906,6 +908,7 @@ impl Game {
                 PendingStart::Tyre(t) => self.tyre_start(t),
                 PendingStart::Firearm(f) => self.firearm_start(f),
                 PendingStart::Flask(f) => self.flask_start(f),
+                PendingStart::Detector(i) => self.detector_start(i),
                 PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),
                 PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
                 PendingStart::FirearmAttachmentPoint => {
@@ -940,7 +943,7 @@ impl Game {
     }
 
     /// PhysicalBehaviour.CreateImpactEffect of a Human (ShotImpact: BloodPuff poolable, tagged Poolable).
-    pub fn create_blood_puff(&mut self, p: usize, position: [f32; 2], z: f32, size: f32) {
+    pub fn create_blood_puff(&mut self, p: usize, position: [f32; 2], z: f32, _size: f32) {
         let Some(b) = self.pool_request_blood_puff(position) else { return };
         // localScale *= size (presentation); eulerAngles = (0, 0, z): the emitter's rotation (its local one is identity).
         let half = z * mathf::DEG2RAD * 0.5;

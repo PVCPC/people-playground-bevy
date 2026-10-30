@@ -136,6 +136,8 @@ script! {
         /// DisintegrationCounterBehaviour.DisintegrationCount (the root object's).
         DisintegrationCount: i32 = 0,
         DismembermentClips: usize = 0,
+        /// PoolableImpactEffect when set: the prefab, or None from a recording (which only names it).
+        PoolableImpactEffect: Option<Option<crate::assets::db::ObjRef>> = None,
         /// DripSounds length of the BleedingParticle prefab (Person.BleedingParticlePrefab); None when it is null.
         BleedingDripSounds: Option<usize> = None,
         /// HingeJointLimitAutofixBehaviour.IsFlipped
@@ -333,6 +335,11 @@ impl Game {
             let limb = self.people[person].Limbs[j];
             self.limb_wince(limb, i);
         }
+    }
+
+    /// PersonBehaviour.Shot
+    pub fn person_shot(&mut self, person: usize) {
+        self.person_wince(person, 165.0);
     }
 
     /// PersonBehaviour.SetPose

@@ -93,6 +93,7 @@ fn run() -> Result<(), String> {
     let mut play = None;
     let mut play_map = None;
     let mut item = None;
+    let mut target = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -145,6 +146,7 @@ fn run() -> Result<(), String> {
             }
             "--play-map" => play_map = Some(arguments.next().ok_or("--play-map needs a map name")?),
             "--item" => item = Some(arguments.next().ok_or("--item needs a catalog item name")?),
+            "--target" => target = Some(arguments.next().ok_or("--target needs a catalog item name")?),
             "--play-map-test" => {
                 play_map = Some(arguments.next().ok_or("--play-map-test needs a map name")?);
                 headless = true;
@@ -167,7 +169,7 @@ fn run() -> Result<(), String> {
     }
     let start = match (play, play_map) {
         (Some(recording), _) => Some(play::Start::Recording(recording)),
-        (None, Some(map)) => Some(play::Start::Map(game.clone(), map, item)),
+        (None, Some(map)) => Some(play::Start::Map(game.clone(), map, item, target)),
         (None, None) => None,
     };
     if let Some(start) = start {

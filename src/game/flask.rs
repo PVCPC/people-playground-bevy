@@ -1,5 +1,7 @@
-//! GasTankBehaviour (a FlaskBehaviour, hence a BloodContainer outside a limb). Only OIL, whose container hooks are
-//! empty outside a CirculationBehaviour, can enter one; any other liquid stops at its hook.
+//! FlaskBehaviour and GasTankBehaviour (a BloodContainer outside a limb), and the LiquidContainerController of a flask.
+//! Only liquids whose container hooks are empty outside a CirculationBehaviour (OIL, BLOOD, GORSE BLOOD) can enter
+//! one; any other liquid stops at its hook. The flasks' PointLiquidTransferBehaviour acts only while the object is being used
+//! continuously, which nothing can start yet (ToolController.UseContinuous is unimplemented), so it has no code.
 #![allow(non_snake_case)]
 
 use super::circulation::{mix_instructions, RefFloat, LIQUIDS};
@@ -18,13 +20,28 @@ script! {
     links {
         /// The component's instance id.
         id: i32 = 0,
-        /// Limits.y of GasTankBehaviour (Limits is (0, 20)); AllowsOverflow is false.
+        /// Limits.y: GasTankBehaviour's 20 or FlaskBehaviour's Capacity; AllowsOverflow is false.
         limit: f32 = 20.0,
         /// StartLiquid
         StartLiquid: String = String::new(),
         StartAmount: f32 = 0.0,
         LiquidDistribution: CsDict<usize, RefFloat> = CsDict::default(),
+        /// LiquidContainer, the LiquidContainerController whose fill Update sets.
+        LiquidContainer: Option<usize> = None,
     }
+}
+
+/// LiquidContainerController: its particles, colour and sound are rendering and audio; the Random draws and the
+/// FillPercentage that gates SimulateLiquid stay.
+#[derive(Clone, Debug, Default)]
+pub struct LiquidContainer {
+    pub id: i32,
+    pub FillPercentage: f32,
+    /// Container.min and max
+    pub min: [f32; 2],
+    pub max: [f32; 2],
+    /// UserPreferenceManager.Current.FancyEffects at Awake
+    pub fancy: bool,
 }
 
 impl Game {
@@ -36,7 +53,7 @@ impl Game {
     }
 
     fn flask_hooks_empty(l: usize) {
-        if LIQUIDS[l].0 != "OIL" {
+        if !matches!(LIQUIDS[l].0, "OIL" | "BLOOD" | "GORSE BLOOD") {
             unimplemented!("{}.OnEnterContainer/OnUpdate/OnExitContainer in a FlaskBehaviour", LIQUIDS[l].1);
         }
     }
@@ -93,8 +110,7 @@ impl Game {
         }
     }
 
-    /// FlaskBehaviour.Update: BloodContainer.Update (the LiquidContainer's fill and colour are rendering, and null on
-    /// the prefabs here).
+    /// FlaskBehaviour.Update: BloodContainer.Update, then the LiquidContainer's fill (its colour is rendering).
     pub fn flask_update(&mut self, f: usize) {
         let dt = self.time.deltaTime;
         let s = &mut self.flasks[f];
@@ -119,6 +135,41 @@ impl Game {
         }
         if self.flasks[f].shouldDeleteEmptyEntries {
             self.flask_delete_empty_liquid_entries(f);
+        }
+        if let Some(c) = self.flasks[f].LiquidContainer {
+            // FillPercentage = Mathf.Clamp01(ScaledLiquidAmount); the Color is rendering.
+            let s = &self.flasks[f];
+            let scaled = mathf::map_range(0.0, s.limit, 0.0, 1.0, s.TotalLiquidAmount);
+            self.liquid_containers[c].FillPercentage = mathf::clamp(scaled, 0.0, 1.0);
+        }
+    }
+
+    /// LiquidContainerController.Awake: with FancyEffects the 16 particles take a random position each, x then y.
+    /// (Start's SimulateLiquid draws only for two coincident particles.)
+    pub fn liquid_container_awake(&mut self, c: usize) {
+        let fancy = self.prefs.FancyEffects;
+        self.liquid_containers[c].fancy = fancy;
+        if !fancy {
+            return;
+        }
+        let (min, max) = (self.liquid_containers[c].min, self.liquid_containers[c].max);
+        let mut positions = Vec::new();
+        for _ in 0..16 {
+            let x = self.random.range(min[0], max[0]);
+            let y = self.random.range(min[1], max[1]);
+            if positions.contains(&[x, y]) {
+                unimplemented!("LiquidContainerController.SimulateLiquid: Random.insideUnitCircle for coincident particles");
+            }
+            positions.push([x, y]);
+        }
+    }
+
+    /// LiquidContainerController.FixedUpdate: the simulation only moves the particles (rendering) and the sloshing
+    /// volume, but a particle clamped onto another's position would draw Random.insideUnitCircle.
+    pub fn liquid_container_fixed_update(&mut self, c: usize) {
+        let s = &self.liquid_containers[c];
+        if s.fancy && !mathf::approximately(s.FillPercentage, 0.0) && !mathf::approximately(s.FillPercentage, 1.0) {
+            unimplemented!("LiquidContainerController.SimulateLiquid with a part-filled container");
         }
     }
 }

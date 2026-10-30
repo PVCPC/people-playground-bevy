@@ -563,6 +563,7 @@ impl Game {
             l.SpeciesIdentity = r.req("SpeciesIdentity")?.trim_matches('"').into();
             l.BloodLiquidType = r.req("BloodLiquidType")?.trim_matches('"').into();
             l.BloodDecal = r.req("BloodDecal")?.trim_start_matches('@').split('#').next().unwrap().into();
+            l.KillShotParticles = r.get("KillShotParticles").is_some_and(|t| t != "null");
             if circ_ids.len() != 0 && i >= circ_ids.len() {
                 return Err("limb without circulation".into());
             }
@@ -715,6 +716,8 @@ impl Game {
         p.Head = reference(r.req("Head")?).map(|id| limb_ids[&id]);
         p.BoneBreakClips = list(r.req("BoneBreakClips")?).len();
         p.DismembermentClips = list(r.req("DismembermentClips")?).len();
+        // Older recordings lack it (only shots read it).
+        p.PoolableImpactEffect = r.get("PoolableImpactEffect").filter(|t| *t != "null").map(|_| None);
         p.Poses = rig_poses(rig, &g.limbs)?;
         let pose_named = |t: &str| -> Result<usize, String> {
             let name = t.trim_start_matches("RagdollPose:").trim_matches('"').replace('_', " ");
@@ -907,11 +910,23 @@ impl Game {
                 // Update is the sag of a deflated tyre's material (rendering).
                 (Phase::Update, B::Tyre(_)) => {}
                 (Phase::Update, B::Flask(f)) => self.flask_update(f),
+                (Phase::Fixed, B::LiquidContainer(c)) => self.liquid_container_fixed_update(c),
+                // LiquidContainerController.Update: the sloshing volume and the particle positions the shader reads.
+                (Phase::Update, B::LiquidContainer(_)) => {}
+                (Phase::Fixed, B::Glowtube(g)) => self.glowtube_fixed_update(g),
+                (Phase::Update, B::Glowtube(g)) => self.glowtube_update(g),
+                (Phase::Update, B::Led(i)) => self.led_update(i),
+                (Phase::Fixed, B::Detector(i)) => self.detector_fixed_update(i),
+                // DetectorBehaviour.Update: the glow intensity.
+                (Phase::Update, B::Detector(_)) => {}
+                (Phase::Fixed, B::Sticky(i)) => self.sticky_grenade_fixed_update(i),
                 (Phase::Fixed, B::TruckDoor(t)) => self.truck_door_fixed_update(t, self.truck_doors[t].0),
                 (Phase::Update, B::DeleteAfter(i)) => self.delete_after_update(i),
                 (_, B::FireMap(f)) if { let p = &self.physicals[self.fire_maps[f].physical]; !p.active || p.destroyed } => {}
                 (Phase::Fixed, B::FireMap(f)) => self.fire_map_fixed_update(f),
                 (Phase::Update, B::Firearm(f)) => self.firearm_update(f),
+                (Phase::Fixed, B::Launcher(l)) => self.launcher_fixed_update(l),
+                (Phase::Update, B::Launcher(l)) => self.launcher_update(l),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),

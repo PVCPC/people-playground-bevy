@@ -69,6 +69,7 @@ impl Game {
         let layers = g.LayersToHit;
         self.firearms[f].emitter = Some(Emitter::new(g.Cartridge, layers, (1 << 4) | layers));
         self.firearm_set_traversal(f);
+        self.firearms[f].emitter.as_mut().unwrap().ricochet_callback = true;
     }
 
     /// SetTraversalSettings
@@ -92,6 +93,22 @@ impl Game {
             g.clock.IntervalSeconds = g.AutomaticFireInterval;
         }
         // Phys.IsBeingUsedContinuously(): nothing in the rewrite calls UseContinuous, so the tracker is empty.
+    }
+
+    /// FirearmBehaviour.Use
+    pub fn firearm_use(&mut self, f: usize) {
+        if self.firearms[f].IgnoreUse {
+            return;
+        }
+        self.firearms[f].shotIndex = 0;
+        if self.firearms[f].FireDelay > mathf::EPSILON {
+            // DelayedShot: the TriggerSound is audio.
+            let (id, delay) = (self.firearms[f].id, self.firearms[f].FireDelay);
+            self.start_wait(id, delay, super::destroyable::Step::FirearmShoot(f));
+            return;
+        }
+        self.firearms[f].clock.timeStepAccumulator = 0.0;
+        self.firearm_shoot(f);
     }
 
     /// BarrelPosition: rb.GetRelativePoint(barrelPosition * lossyScale).
@@ -189,6 +206,6 @@ impl Game {
         }
         let spread = mathf::max(0.0025, g.InitialInaccuracy * m);
         let r = self.random.inside_unit_circle();
-        self.emitter_emit(f, origin, [direction[0] + r[0] * spread, direction[1] + r[1] * spread]);
+        self.emitter_emit(Some(f), origin, [direction[0] + r[0] * spread, direction[1] + r[1] * spread]);
     }
 }

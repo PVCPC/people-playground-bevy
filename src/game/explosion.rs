@@ -9,7 +9,7 @@ use crate::b2::world::{BodyId, Shape};
 use crate::b2::contacts2d::ScriptCollision;
 
 /// Physics2D.DefaultRaycastLayers: every layer but Ignore Raycast (2).
-const DEFAULT_RAYCAST_LAYERS: u32 = !(1 << 2);
+pub(super) const DEFAULT_RAYCAST_LAYERS: u32 = !(1 << 2);
 
 script! {
     Explosive {
@@ -46,10 +46,9 @@ script! {
         physical: Option<usize> = None,
         /// BlockingLayers (the Awake default when serialized as 0).
         BlockingLayers: u32 = 0,
-        /// OnExplode's and OnArm's persistent calls reach only audio and particle components.
-        OnExplodePresentation: bool = true,
-        /// OnExplode's CarBehaviour calls, by component id.
-        OnExplodeCars: Vec<(i32, super::car::CarCall)> = Vec::new(),
+        /// OnExplode's CarBehaviour and DetachFromParent calls, in order (the rest are audio and particles).
+        OnExplodeCalls: Vec<super::link::EventCall> = Vec::new(),
+        /// OnArm's persistent calls reach only audio and particle components.
         OnArmPresentation: bool = true,
         VFXOverride: Option<ObjRef> = None,
         /// The Killzone clone's instance id.
@@ -111,7 +110,7 @@ pub struct ExplosionParameters {
 
 /// A fixture a ray crossed, as Raycast2DQuery::ReportFixture records it.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct RayHit2D {
+pub struct RayHit2D {
     pub collider: i32,
     pub game_object: i32,
     pub body: BodyId,
@@ -195,7 +194,7 @@ impl Game {
 
     /// Physics2D.Raycast(origin, direction, distance): PhysicsQuery2D::Raycast (180bf6290) scales the direction by the
     /// reciprocal of its length and casts to origin + distance * direction; the nearest hit.
-    fn raycast_first(&mut self, origin: V, direction: [f32; 2], distance: f32) -> Option<RayHit2D> {
+    pub fn raycast_first(&mut self, origin: V, direction: [f32; 2], distance: f32) -> Option<RayHit2D> {
         self.raycast(origin, direction, distance, DEFAULT_RAYCAST_LAYERS, f32::NEG_INFINITY, f32::INFINITY)
     }
 
@@ -305,6 +304,13 @@ impl Game {
         self.explosive_start_explode(e, delay, false);
     }
 
+    /// ExplosiveBehaviour.Use
+    pub fn explosive_use(&mut self, e: usize) {
+        if !self.explosives[e].Armed && self.explosives[e].ArmOnUse {
+            self.explosive_activate(e);
+        }
+    }
+
     /// ExplosiveBehaviour.ForceImmediateExplosion
     pub fn explosive_force_immediate(&mut self, e: usize) {
         self.explosives[e].coroutines.clear();
@@ -397,13 +403,10 @@ impl Game {
     /// The rest of Explode after WaitForEndOfFrame.
     fn explosive_explode(&mut self, e: usize) {
         let s = &self.explosives[e];
-        if !s.OnExplodePresentation {
-            unimplemented!("ExplosiveBehaviour.OnExplode: a persistent call beyond audio and particles");
-        }
         let (id, p) = (s.id, s.physical);
         let disintegrate = s.DisintegrateOnExplode;
-        for (car, call) in s.OnExplodeCars.clone() {
-            self.car_invoke(car, call);
+        for call in s.OnExplodeCalls.clone() {
+            self.event_call(call);
         }
         if self.explosives[e].DestroyOnExplode {
             self.explosive_disable_colliders(e);
@@ -584,8 +587,11 @@ impl Game {
                 None => {}
             }
         }
-        if ex.BallisticShrapnelCount > 0 {
-            unimplemented!("GlobalShrapnelEmitter.EmitShrapnel");
+        if ex.BallisticShrapnelCount > 0 && self.shrapnel.is_some() {
+            // GlobalShrapnelEmitter.EmitShrapnel: StartCoroutine(EmitRoutine) up to its WaitForEndOfFrame.
+            self.coroutine_seq += 1;
+            let step = super::destroyable::Step::ShrapnelEndOfFrame([ex.Position[0], ex.Position[1]], ex.BallisticShrapnelCount);
+            self.end_of_frame.push(super::destroyable::Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner: super::ballistics::SHRAPNEL_OWNER, step });
         }
     }
 
@@ -613,7 +619,7 @@ impl Game {
             if self.prefs.ProceduralFragments && hit.distance < 3.0 && (self.random.value() as f64) < 0.25 {
                 unimplemented!("ExplosionCreator.FragmentationRay: LimbBehaviour.Crush after Utils.DelayCoroutine");
             }
-            unimplemented!("LimbBehaviour.Slice");
+            self.limb_slice(l);
         }
     }
 
@@ -622,7 +628,7 @@ impl Game {
     /// receivers among the rewritten scripts).
     fn broadcast_on_fragment_hit(&mut self, collider: i32, game_object: i32, force: f32) {
         let Some(p) = self.physical_of_collider(collider) else {
-            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour"]) {
+            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour"]) {
                 unimplemented!("BroadcastMessage OnFragmentHit to the scripts of a collider without a PhysicalBehaviour");
             }
             return;
@@ -637,7 +643,7 @@ impl Game {
                 }
                 for k in 0..inst.objects[x].components.len() {
                     if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_)) {
+                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_)) {
                             out.push(b);
                         }
                     }
@@ -651,6 +657,8 @@ impl Game {
                 Behaviour::Machinery(m) => self.machinery_on_fragment_hit(m, force),
                 Behaviour::Explosive(e) => self.explosive_on_fragment_hit(e),
                 Behaviour::Tyre(t) => self.tyre_on_fragment_hit(t, force),
+                // GlowtubeBehaviour.OnFragmentHit
+                Behaviour::Glowtube(g) => self.glowtube_break(g),
                 _ => unreachable!(),
             }
         }
