@@ -151,6 +151,9 @@ script! {
         transform: Pose = Pose::default(),
         /// The Transform's parent (index into Game.transform_nodes).
         parent: Option<usize> = None,
+        /// Rigidbody2D m_DrivenByParentRigidbody (CheckForDrivenByParentRigidbody, 180c1dc80): for a non-static body,
+        /// the b2 body of the nearest ancestor with a Rigidbody2D.
+        driven_by: Option<usize> = None,
         onCollisionStayBuffer: [Option<ColliderBoolPair>; 8] = [None; 8],
         LocalColliderGridPoints: Option<Vec<[f32; 2]>> = None,
         stabWoundCount: u32 = 0,
@@ -238,7 +241,7 @@ impl Game {
 
     /// The topmost Transform node above a physical object (None for a root).
     fn transform_root(&self, p: usize) -> Option<usize> {
-        let (mut root, mut n) = (None, self.physicals[p].parent);
+        let (mut root, mut n) = (self.body_node(p), self.physicals[p].parent);
         while let Some(i) = n {
             root = Some(i);
             n = self.transform_nodes[i].parent;

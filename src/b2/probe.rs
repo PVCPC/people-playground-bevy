@@ -783,6 +783,8 @@ pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_distance_joint(executable)?;
     compare_weld(executable)?;
     compare_prismatic(executable)?;
+    compare_rope(executable)?;
+    compare_wheel(executable)?;
     compare_perlin(executable)?;
     compare_curve(executable)
 }
@@ -1432,6 +1434,222 @@ fn compare_distance_joint(executable: &std::path::Path) -> Result<(), String> {
         }
     }
     report("DISTANCE JOINT", bad, replies.len(), first)
+}
+
+const ROPE_INIT: u32 = 0xbc2fb0;
+const ROPE_SOLVE_VELOCITY: u32 = 0xbc6320;
+const ROPE_SOLVE_POSITION: u32 = 0xbc4ac0;
+
+/// b2RopeJoint.
+fn rope_bytes(j: &super::rope_joint::RopeJoint) -> Vec<u8> {
+    let mut b = vec![0; 0xf8];
+    put(&mut b, 0x70, j.a.index as u32);
+    put(&mut b, 0x74, j.b.index as u32);
+    put_vec(&mut b, 0x78, j.a.axis);
+    put_vec(&mut b, 0x80, j.b.axis);
+    put_vec(&mut b, 0x98, j.def.local_anchor_a);
+    put_vec(&mut b, 0xa0, j.def.local_anchor_b);
+    put(&mut b, 0xa8, j.def.max_length.to_bits());
+    put(&mut b, 0xac, j.length.to_bits());
+    put(&mut b, 0xb0, j.impulse.to_bits());
+    put_vec(&mut b, 0xb4, j.u);
+    put_vec(&mut b, 0xbc, j.r_a);
+    put_vec(&mut b, 0xc4, j.r_b);
+    put_vec(&mut b, 0xcc, j.a.local_center);
+    put_vec(&mut b, 0xd4, j.b.local_center);
+    for (k, x) in [j.a.inv_mass, j.b.inv_mass, j.a.inv_i, j.b.inv_i, j.mass].iter().enumerate() {
+        put(&mut b, 0xdc + 4 * k, x.to_bits());
+    }
+    put(&mut b, 0xf0, j.state as u32);
+    b
+}
+
+const WHEEL_INIT: u32 = 0xbc88b0;
+const WHEEL_SOLVE_VELOCITY: u32 = 0xbcaa40;
+const WHEEL_SOLVE_POSITION: u32 = 0xbc9be0;
+
+/// b2WheelJoint.
+fn wheel_bytes(j: &super::wheel_joint::WheelJoint) -> Vec<u8> {
+    let mut b = vec![0; 0x130];
+    put(&mut b, 0x70, j.a.index as u32);
+    put(&mut b, 0x74, j.b.index as u32);
+    put_vec(&mut b, 0x78, j.a.axis);
+    put_vec(&mut b, 0x80, j.b.axis);
+    put(&mut b, 0x98, j.def.frequency_hz.to_bits());
+    put(&mut b, 0x9c, j.def.damping_ratio.to_bits());
+    put_vec(&mut b, 0xa0, j.def.local_anchor_a);
+    put_vec(&mut b, 0xa8, j.def.local_anchor_b);
+    put_vec(&mut b, 0xb0, j.local_x_axis_a);
+    put_vec(&mut b, 0xb8, j.local_y_axis_a);
+    put(&mut b, 0xc0, j.impulse.to_bits());
+    put(&mut b, 0xc4, j.motor_impulse.to_bits());
+    put(&mut b, 0xc8, j.spring_impulse.to_bits());
+    put(&mut b, 0xcc, j.def.max_motor_torque.to_bits());
+    put(&mut b, 0xd0, j.def.motor_speed.to_bits());
+    b[0xd4] = j.def.enable_motor as u8;
+    put_vec(&mut b, 0xd8, j.a.local_center);
+    put_vec(&mut b, 0xe0, j.b.local_center);
+    for (k, x) in [j.a.inv_mass, j.b.inv_mass, j.a.inv_i, j.b.inv_i].iter().enumerate() {
+        put(&mut b, 0xe8 + 4 * k, x.to_bits());
+    }
+    put_vec(&mut b, 0xf8, j.ax);
+    put_vec(&mut b, 0x100, j.ay);
+    for (k, x) in [j.s_ax, j.s_bx, j.s_ay, j.s_by, j.mass, j.motor_mass, j.spring_mass, j.bias, j.gamma].iter().enumerate() {
+        put(&mut b, 0x108 + 4 * k, x.to_bits());
+    }
+    b
+}
+
+/// One random joint stepped through init, three velocity and three position solves, each native call starting from
+/// the rewrite's state: `new` draws the joint (and may move the positions), the functions drive it.
+#[allow(clippy::type_complexity)]
+fn compare_step_joint<J>(
+    executable: &std::path::Path,
+    label: &str,
+    seed: u32,
+    rvas: [u32; 3],
+    new: impl Fn(&mut Random, usize, &super::revolute::JointBody, &super::revolute::JointBody, &mut [Position]) -> J,
+    bytes: fn(&J) -> Vec<u8>,
+    set_bodies: fn(&mut J, super::revolute::JointBody, super::revolute::JointBody),
+    init: fn(&mut J, super::revolute::JointBody, super::revolute::JointBody, &TimeStep, &[Position], &mut [Velocity]),
+    velocity: fn(&mut J, &TimeStep, &mut [Velocity]),
+    position: fn(&J, &mut [Position]) -> bool,
+) -> Result<(), String> {
+    use super::revolute::JointBody;
+    let mut random = Random(seed);
+    let mut calls = Vec::new();
+    let mut expected: Vec<(&str, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    let axes = [Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0)];
+    for case in 0..2048 {
+        let body = |random: &mut Random, index: usize, side: usize| {
+            let fixed = (case + side) % 11 == 0;
+            JointBody {
+                index,
+                local_center: random.vec(0.3),
+                inv_mass: if fixed { 0.0 } else { random.range(0.2, 4.0) },
+                inv_i: if fixed || random.next() % 9 == 0 { 0.0 } else { random.range(0.5, 40.0) },
+                axis: axes[random.next() as usize % axes.len()],
+            }
+        };
+        let (ia, ib) = if random.next() % 2 == 0 { (0, 1) } else { (2, 0) };
+        let (a, b) = (body(&mut random, ia, 0), body(&mut random, ib, 1));
+        let mut positions: Vec<Position> = (0..3).map(|_| Position { c: random.vec(1.0), a: random.range(-3.0, 3.0) }).collect();
+        let mut joint = new(&mut random, case, &a, &b, &mut positions);
+        let mut velocities: Vec<Velocity> = (0..3).map(|_| Velocity { v: random.vec(5.0), w: random.range(-8.0, 8.0) }).collect();
+        let dt = [1.0 / 60.0, 0.02][random.next() as usize % 2];
+        let step = TimeStep { dt, inv_dt: 1.0 / dt, dt_ratio: random.range(0.5, 1.5), velocity_iterations: 8, position_iterations: 8, warm_starting: random.next() % 4 != 0 };
+        let record = |op, joint: &J, positions: &[Position], velocities: &[Velocity]| {
+            let (p, v) = island_bytes(positions, velocities);
+            (op, bytes(joint), p, v)
+        };
+        set_bodies(&mut joint, a, b);
+        calls.push(joint_call(rvas[0], bytes(&joint), [&a, &b], &step, &positions, &velocities));
+        init(&mut joint, a, b, &step, &positions, &mut velocities);
+        expected.push(record("init", &joint, &positions, &velocities));
+        for _ in 0..3 {
+            calls.push(joint_call(rvas[1], bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            velocity(&mut joint, &step, &mut velocities);
+            expected.push(record("velocity", &joint, &positions, &velocities));
+        }
+        for _ in 0..3 {
+            calls.push(joint_call(rvas[2], bytes(&joint), [&a, &b], &step, &positions, &velocities));
+            let solved = position(&joint, &mut positions);
+            let mut r = record("position", &joint, &positions, &velocities);
+            r.1.push(solved as u8);
+            expected.push(r);
+        }
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: solver_globals(), calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, reply) in replies.iter().enumerate() {
+        let (op, joint, p, v) = &expected[i];
+        let mut native_joint = unhex(&reply.buffers[0]);
+        native_joint[0x60..0x70].fill(0);
+        if *op == "position" {
+            native_joint.push((reply.ret & 0xff != 0) as u8);
+        }
+        let native = [native_joint, unhex(&reply.buffers[2]), unhex(&reply.buffers[3])];
+        for (k, (n, r)) in native.iter().zip([joint, p, v]).enumerate() {
+            if n != r {
+                bad += 1;
+                let at = n.iter().zip(r).position(|(x, y)| x != y).unwrap_or(n.len().min(r.len()));
+                let o = at & !3;
+                first.get_or_insert_with(|| format!("call {i} {op}: buffer {k} byte {at:#x} native={:#x} rust={:#x}", get(n, o.min(n.len() - 4)), get(r, o.min(r.len() - 4))));
+                break;
+            }
+        }
+    }
+    report(label, bad, replies.len(), first)
+}
+
+/// Random ropes (slack, taut, stretched and coincident anchors; static and fixed-rotation sides; axis locks).
+fn compare_rope(executable: &std::path::Path) -> Result<(), String> {
+    use super::rope_joint::*;
+    compare_step_joint(
+        executable,
+        "ROPE JOINT",
+        0x5eed_000d,
+        [ROPE_INIT, ROPE_SOLVE_VELOCITY, ROPE_SOLVE_POSITION],
+        |random, case, a, b, positions| {
+            let def = RopeDef { local_anchor_a: random.vec(0.5), local_anchor_b: random.vec(0.5), max_length: [0.05, 0.005, random.range(0.005, 2.0)][random.next() as usize % 3] };
+            if case % 13 == 0 {
+                // Anchors on top of each other: the axis falls back to zero.
+                let (qa, qb) = (super::math::Rot::new(positions[a.index].a), super::math::Rot::new(positions[b.index].a));
+                let wa = qa.apply(def.local_anchor_a - a.local_center);
+                let rb = qb.apply(def.local_anchor_b - b.local_center);
+                positions[b.index].c = Vec2::new(positions[a.index].c.x + wa.x - rb.x, positions[a.index].c.y + wa.y - rb.y);
+            }
+            let mut joint = RopeJoint::new(def);
+            joint.impulse = random.range(-1.0, 1.0);
+            joint
+        },
+        rope_bytes,
+        |j, a, b| {
+            j.a = a;
+            j.b = b;
+        },
+        |j, a, b, step, p, v| j.init_velocity_constraints(a, b, step, p, v),
+        |j, step, v| j.solve_velocity_constraints(step, v),
+        |j, p| j.solve_position_constraints(p),
+    )
+}
+
+/// Random wheels (springs soft and off; motors on and off; random axes; static and fixed-rotation sides; axis locks).
+fn compare_wheel(executable: &std::path::Path) -> Result<(), String> {
+    use super::wheel_joint::*;
+    compare_step_joint(
+        executable,
+        "WHEEL JOINT",
+        0x5eed_000e,
+        [WHEEL_INIT, WHEEL_SOLVE_VELOCITY, WHEEL_SOLVE_POSITION],
+        |random, _, _, _, _| {
+            let angle = random.range(-3.2, 3.2);
+            let def = WheelDef {
+                local_anchor_a: random.vec(0.5),
+                local_anchor_b: random.vec(0.5),
+                local_axis_a: Vec2::new(angle.cos(), angle.sin()),
+                enable_motor: random.next() % 2 == 0,
+                max_motor_torque: random.range(0.0, 50.0),
+                motor_speed: random.range(-10.0, 10.0),
+                frequency_hz: [0.0, random.range(0.0, 10.0), random.range(0.0, 10.0)][random.next() as usize % 3],
+                damping_ratio: random.range(0.0, 1.0),
+            };
+            let mut joint = WheelJoint::new(def);
+            joint.impulse = random.range(-1.0, 1.0);
+            joint.motor_impulse = random.range(-0.5, 0.5);
+            joint.spring_impulse = random.range(-1.0, 1.0);
+            joint
+        },
+        wheel_bytes,
+        |j, a, b| {
+            j.a = a;
+            j.b = b;
+        },
+        |j, a, b, step, p, v| j.init_velocity_constraints(a, b, step, p, v),
+        |j, step, v| j.solve_velocity_constraints(step, v),
+        |j, p| j.solve_position_constraints(p),
+    )
 }
 
 const WELD_INIT: u32 = 0xbc34b0;

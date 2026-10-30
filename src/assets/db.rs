@@ -294,6 +294,40 @@ mod tests {
         }
     }
 
+    /// Lists the catalog prefabs' Rigidbody2Ds under another Rigidbody2D: child (type), nearest body above (type),
+    /// the child's scripts and joints. Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn catalog_nested_bodies() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            let body = |o: usize| p.objects[o].components.iter().find_map(|(_, c)| match c { Component::Rigidbody2D(rb) => Some(rb.body_type), _ => None });
+            for o in 0..p.objects.len() {
+                let Some(t) = body(o) else { continue };
+                let mut up = p.objects[o].parent;
+                while let Some(u) = up {
+                    if let Some(tu) = body(u) {
+                        let what: Vec<String> = p.objects[o].components.iter().filter_map(|(_, c)| match c {
+                            Component::Script { class, .. } => Some(class.clone()),
+                            Component::Joint2D(j) => Some(format!("{:?}", std::mem::discriminant(&j.kind)).chars().take(0).collect::<String>() + "Joint"),
+                            _ => None,
+                        }).collect();
+                        println!("NEST {} | {} ({t}) under {} ({tu}) | {}", p.objects[0].name, p.objects[o].name, p.objects[u].name, what.join(","));
+                        break;
+                    }
+                    up = p.objects[u].parent;
+                }
+            }
+        }
+    }
+
     /// The game's catalog (CatalogData.Items) resolves, and every spawnable prefab's tree reads completely.
     #[test]
     fn catalog_prefabs_load() {

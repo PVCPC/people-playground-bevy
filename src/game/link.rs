@@ -178,14 +178,15 @@ impl Game {
         let person = script(prefab, 0, "PersonBehaviour").map(|_| self.people.len());
 
         // TransformChain: each body's parents up to the root, the first body to reach one listing it.
+        let mut body_parents = std::collections::BTreeSet::new();
         for o in (0..n).filter(|o| inst.bodies.contains_key(o)) {
             let mut p = inst.objects[o].parent;
             while let Some(t) = p {
                 // A static body never moves in the simulation, so its Transform serves as a plain node (the
-                // Default map's walls under Root).
+                // Default map's walls under Root); a moving body's node follows its physical.
                 let static_body = prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(rb) if rb.body_type == 2));
                 if inst.bodies.contains_key(&t) && !static_body {
-                    return Err(format!("{}: a body under a non-static body", prefab.objects[o].name));
+                    body_parents.insert(t);
                 }
                 if l.arenas.node.contains_key(&t) {
                     break;
@@ -225,6 +226,10 @@ impl Game {
                 }
             }
         }
+        for t in body_parents {
+            let p = *l.arenas.physical.get(&t).ok_or_else(|| format!("{}: a body under a Rigidbody2D without a PhysicalBehaviour", prefab.objects[t].name))?;
+            self.node_bodies.insert(l.arenas.node[&t], p);
+        }
         for class in ["CirculationBehaviour", "ConnectedNodeBehaviour", "SkinMaterialHandler"] {
             for o in 0..n {
                 if (script(prefab, o, class).is_some()) != l.arenas.limb.contains_key(&o) {
@@ -261,6 +266,16 @@ impl Game {
             self.rigidbody_hierarchy_changed |= rb.body_type != 2;
             p.transform = pose(inst, o);
             p.parent = inst.objects[o].parent.map(|t| l.arenas.node[&t]);
+            if rb.body_type != 2 {
+                let mut up = inst.objects[o].parent;
+                while let Some(t) = up {
+                    if prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_))) {
+                        p.driven_by = Some(*inst.bodies.get(&t).ok_or_else(|| format!("{}: driven by a Rigidbody2D without a body", p.name))?);
+                        break;
+                    }
+                    up = inst.objects[t].parent;
+                }
+            }
             p.LocalColliderGridPoints = Some(array(v, "LocalColliderGridPoints")?.iter().map(floats::<2>).collect::<Result<_, _>>()?);
             // Awake's GetComponent<LocalFirePropagationMap>() and Start's GetComponents<DecalControllerBehaviour>().
             p.has_fire_map = script(prefab, o, "LocalFirePropagationMap").is_some();

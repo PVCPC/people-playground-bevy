@@ -16,4 +16,5 @@ pub mod shape;
 pub mod solver;
 pub mod toi;
 pub mod weld;
+pub mod wheel_joint;
 pub mod world;

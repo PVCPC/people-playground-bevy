@@ -87,17 +87,28 @@ impl Game {
         self.run_pending_starts();
     }
 
-    /// Each awake Rigidbody2D's body pose to its Transform: the position's x/y, and the rotation's z turn replaced
-    /// by the body angle (keeping any x/y tilt).
+    /// PhysicsManager2D::Simulate's write-back over the rigidbody update lists: each awake Rigidbody2D's body pose
+    /// to its Transform (the position's x/y, and the rotation's z turn replaced by the body angle, keeping any x/y
+    /// tilt). A body driven by a parent Rigidbody2D is written asleep too, as is a static one below the root.
     fn write_back_transforms(&mut self) {
-        for p in 0..self.physicals.len() {
+        for p in self.rigidbody_order() {
             // A disintegrated object's Rigidbody2D left the scene's list with its body.
             if self.physicals[p].rigidbody.detached.is_some() {
                 continue;
             }
-            let b = self.world.body(self.physicals[p].rigidbody.body);
-            if b.user.is_none() || b.flags & BODY_AWAKE == 0 {
+            let ph = &self.physicals[p];
+            let b = self.world.body(ph.rigidbody.body);
+            if b.user.is_none() {
                 continue;
+            }
+            if ph.driven_by.is_none() && b.flags & BODY_AWAKE == 0 && !(ph.rigidbody.bodyType == 2 && self.depth(p) > 0) {
+                continue;
+            }
+            if let Some(parent) = ph.driven_by
+                && ph.rigidbody.bodyType == 1
+                && self.world.body(parent).flags & BODY_AWAKE != 0
+            {
+                unimplemented!("Rigidbody2D write-back: a kinematic body following its parent's Transform");
             }
             let (x, y, a) = (b.xf.p.x, b.xf.p.y, b.sweep.a);
             if !x.is_finite() || !y.is_finite() || !a.is_finite() {
@@ -121,6 +132,65 @@ impl Game {
             (t.position, t.rotation, t.local) = (world.0, world.1, Some(local));
             let m = &mut self.physicals[p].rigidbody.movement;
             (m.current, m.body) = (pose, pose);
+            self.refresh_nested(p);
+        }
+    }
+
+    /// PhysicsScene2D's rigidbody update lists (AddRigidbodyUpdates, 180c1c280): by GetTransformDepth capped at 63,
+    /// creation order within a depth.
+    fn rigidbody_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.physicals.len()).collect();
+        if !self.node_bodies.is_empty() {
+            order.sort_by_key(|&p| self.depth(p).min(63));
+        }
+        order
+    }
+
+    /// GetTransformDepth (1807f17f0): the physical's ancestor count.
+    fn depth(&self, p: usize) -> usize {
+        let (mut d, mut n) = (0, self.physicals[p].parent);
+        while let Some(i) = n {
+            d += 1;
+            n = self.transform_nodes[i].parent;
+        }
+        d
+    }
+
+    /// The node that is physical `p`'s own Transform (it parents other physicals).
+    pub(crate) fn body_node(&self, p: usize) -> Option<usize> {
+        self.node_bodies.iter().find_map(|(&n, &q)| (q == p).then_some(n))
+    }
+
+    /// A transform node's TRS; a body's node has its physical's local pose.
+    pub(crate) fn node_trs(&self, n: usize) -> transform::Trs {
+        let mut trs = self.transform_nodes[n].trs;
+        if let Some(&p) = self.node_bodies.get(&n) {
+            let (t, q) = self.physicals[p].transform.local.expect("a body node without a local pose");
+            (trs.t[0], trs.t[1], trs.t[2], trs.q) = (t[0], t[1], t[2], q);
+        }
+        trs
+    }
+
+    /// Transform.position/rotation of the physicals under body `p`'s Transform once it moved: their local poses
+    /// through the new chain.
+    fn refresh_nested(&mut self, p: usize) {
+        let Some(node) = self.body_node(p) else { return };
+        for q in 0..self.physicals.len() {
+            let mut n = self.physicals[q].parent;
+            while n.is_some_and(|i| i != node) {
+                n = self.transform_nodes[n.unwrap()].parent;
+            }
+            if n.is_none() {
+                continue;
+            }
+            let chain = self.parent_chain(q);
+            let (t, mut r) = self.physicals[q].transform.local.expect("a nested physical without a local pose");
+            let mut v = [t[0], t[1], t[2], 0.0];
+            for n in &chain {
+                (v, r) = (transform::global_position(n, v), transform::global_rotation(n, r));
+            }
+            let pose = &mut self.physicals[q].transform;
+            (pose.position, pose.rotation) = ([v[0], v[1], v[2]], r);
         }
     }
 
@@ -138,7 +208,7 @@ impl Game {
         let mut chain = Vec::new();
         let mut n = self.physicals[p].parent;
         while let Some(i) = n {
-            chain.push(self.transform_nodes[i].trs);
+            chain.push(self.node_trs(i));
             n = self.transform_nodes[i].parent;
         }
         chain
@@ -154,10 +224,10 @@ impl Game {
         }
         let r = (self.time.timeAsDouble - last_time) / last_delta as f64;
         let t = (if 0.0 <= r { r.min(1.0) } else { 0.0 }) as f32;
-        for p in 0..self.physicals.len() {
+        for p in self.rigidbody_order() {
             let rb = &self.physicals[p].rigidbody;
-            // Kinematic bodies driven by a parent body are skipped; no rewritten object has one.
-            if !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 {
+            // A kinematic body driven by a parent body follows the parent instead.
+            if !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && self.physicals[p].driven_by.is_some() {
                 continue;
             }
             // RigidbodyInterpolation2D.Extrapolate is never set by the game (prefabs and Global.CurrentInterpolationMode
@@ -172,6 +242,7 @@ impl Game {
             ph.rigidbody.movement.current = pose;
             let (local, world) = transform::set_world(&chain, pose.0, pose.1);
             (ph.transform.position, ph.transform.rotation, ph.transform.local) = (world.0, world.1, Some(local));
+            self.refresh_nested(p);
         }
     }
 
@@ -235,6 +306,10 @@ impl Game {
                 Some(JointKind::Rope(r)) => {
                     let f = r.reaction_force(inv_dt);
                     ([f.x, f.y], 0.0)
+                }
+                Some(JointKind::Wheel(w)) => {
+                    let f = w.reaction_force(inv_dt);
+                    ([f.x, f.y], w.motor_torque(inv_dt))
                 }
                 Some(JointKind::Prismatic(p)) => {
                     let f = p.reaction_force(inv_dt);

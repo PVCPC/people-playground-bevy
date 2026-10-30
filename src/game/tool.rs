@@ -245,7 +245,7 @@ impl Game {
         let mut chain = Vec::new();
         let mut n = self.physicals[p].parent;
         while let Some(i) = n {
-            chain.push(self.transform_nodes[i].trs);
+            chain.push(self.node_trs(i));
             n = self.transform_nodes[i].parent;
         }
         chain.reverse();

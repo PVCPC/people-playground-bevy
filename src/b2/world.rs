@@ -9,6 +9,7 @@ use super::distance::{distance, DistanceProxy, SimplexCache};
 use super::math::{Rot, Transform, Vec2};
 use super::distance_joint::{DistanceDef, DistanceJoint};
 use super::rope_joint::{RopeDef, RopeJoint};
+use super::wheel_joint::{WheelDef, WheelJoint};
 use super::weld::{WeldDef, WeldJoint};
 use super::prismatic::{PrismaticDef, PrismaticJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
@@ -424,7 +425,7 @@ pub struct Contact {
 
 pub type JointId = usize;
 
-/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D, FixedJoint2D, SliderJoint2D and DistanceJoint2D.
+/// The b2Joint types the game creates: HingeJoint2D, SpringJoint2D, FixedJoint2D, SliderJoint2D and DistanceJoint2D and WheelJoint2D.
 #[derive(Clone, Debug)]
 pub enum JointKind {
     Revolute(RevoluteJoint),
@@ -432,6 +433,13 @@ pub enum JointKind {
     Weld(WeldJoint),
     Prismatic(PrismaticJoint),
     Rope(RopeJoint),
+    Wheel(WheelJoint),
+}
+
+impl From<WheelDef> for JointKind {
+    fn from(def: WheelDef) -> Self {
+        Self::Wheel(WheelJoint::new(def))
+    }
 }
 
 impl From<RopeDef> for JointKind {
@@ -539,6 +547,7 @@ impl Joint {
             JointKind::Weld(w) => (w.a, w.b),
             JointKind::Prismatic(p) => (p.a, p.b),
             JointKind::Rope(r) => (r.a, r.b),
+            JointKind::Wheel(w) => (w.a, w.b),
         }
     }
 
@@ -549,6 +558,7 @@ impl Joint {
             JointKind::Weld(w) => (&mut w.a, &mut w.b),
             JointKind::Prismatic(p) => (&mut p.a, &mut p.b),
             JointKind::Rope(r) => (&mut r.a, &mut r.b),
+            JointKind::Wheel(w) => (&mut w.a, &mut w.b),
         }
     }
 }
@@ -1546,6 +1556,7 @@ impl World {
                 JointKind::Weld(w) => w.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Prismatic(p) => p.init_velocity_constraints(a, b, step, &positions, &mut velocities),
                 JointKind::Rope(r) => r.init_velocity_constraints(a, b, step, &positions, &mut velocities),
+                JointKind::Wheel(w) => w.init_velocity_constraints(a, b, step, &positions, &mut velocities),
             }
         }
         for _ in 0..step.velocity_iterations {
@@ -1556,6 +1567,7 @@ impl World {
                     JointKind::Weld(w) => w.solve_velocity_constraints(&mut velocities),
                     JointKind::Prismatic(p) => p.solve_velocity_constraints(step, &mut velocities),
                     JointKind::Rope(r) => r.solve_velocity_constraints(step, &mut velocities),
+                    JointKind::Wheel(w) => w.solve_velocity_constraints(step, &mut velocities),
                 }
             }
             solver.solve_velocity_constraints(&mut velocities);
@@ -1595,6 +1607,7 @@ impl World {
                     JointKind::Weld(w) => w.solve_position_constraints(&mut positions),
                     JointKind::Prismatic(p) => p.solve_position_constraints(&mut positions),
                     JointKind::Rope(r) => r.solve_position_constraints(&mut positions),
+                    JointKind::Wheel(w) => w.solve_position_constraints(&mut positions),
                 };
             }
             if contacts_solved && joints_solved {

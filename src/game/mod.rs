@@ -839,8 +839,11 @@ pub struct Game {
     pub ignore_stack: std::collections::HashMap<(i32, i32), i32>,
     /// LimbBehaviour.VitalParts by limb: Bounds as center then extents. The dump loader fills it.
     pub vital_parts: std::collections::HashMap<usize, Vec<[f32; 6]>>,
-    /// Rigidbody-less Transforms that parent physical objects.
+    /// The Transforms that parent physical objects: Rigidbody-less ones and static bodies' (fixed TRS), and
+    /// non-static bodies' (`node_bodies`).
     pub transform_nodes: Vec<crate::unity::transform::Node>,
+    /// The `transform_nodes` that are a physical's own Transform, by node: their TRS is the physical's pose.
+    pub node_bodies: std::collections::HashMap<usize, usize>,
     /// The DecalDescriptor assets in use (DecalController.descriptor indexes it).
     pub decal_descriptors: Vec<misc::DecalDescriptor>,
     /// Instances whose Transform changes (an Awake's or the catalog's scale) wait for Physics2D's next
