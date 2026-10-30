@@ -765,8 +765,23 @@ impl Game {
             self.add_pain(person, 2.0);
             self.people[person].OxygenLevel = (d(self.people[person].OxygenLevel) - d(dt) * 0.5f32).f();
         }
-        // ponytail: stab-wound blood decals arrive with stabbing.
-        assert!(self.physicals[p].stabWoundCount == 0, "stabbing is not rewritten yet");
+        if self.physicals[p].stabWoundCount != 0 {
+            let mut i = 0;
+            while i < self.physicals[p].beingStabbedBy.len() {
+                let stabber = self.physicals[p].beingStabbedBy[i];
+                i += 1;
+                if !self.physicals[stabber].destroyed && self.physicals[stabber].StabCausesWound && self.get_relative_stab_speed(stabber, p) > 0.05 {
+                    let point = self.get_global_stab_point(stabber, p).expect("beingStabbedBy without a penetration");
+                    let fallback = self.original_blood_color(l);
+                    let colour = self.get_computed_color(l, fallback);
+                    // SendMessage skips an inactive stabber.
+                    if self.physicals[stabber].active {
+                        let ty = super::misc::decal_descriptor(&self.limbs[l].BloodDecal);
+                        self.physical_decal(stabber, ty, point, 1.0, colour);
+                    }
+                }
+            }
+        }
         let limb = &mut self.limbs[l];
         if limb.Health > mathf::EPSILON && limb.previousHealth <= mathf::EPSILON {
             limb.KillShotParticlesEmitted = false;

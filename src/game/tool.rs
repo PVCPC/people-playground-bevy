@@ -154,7 +154,7 @@ impl Game {
     /// PhysicsQuery2D::OverlapPointAll (180bf4d70) runs b2World::QueryAABB on the point; ReportFixture (180bf72d0)
     /// skips triggers (queriesHitTriggers is off), other layers, Transforms outside the depth range, a collider
     /// already hit and shapes that don't contain the point; the hits go by ascending Transform z (stable).
-    fn overlap_point(&self, point: [f32; 3], mask: u32, min_depth: f32, max_depth: f32) -> Vec<usize> {
+    pub(super) fn overlap_point(&self, point: [f32; 3], mask: u32, min_depth: f32, max_depth: f32) -> Vec<usize> {
         let p = V::new(point[0], point[1]);
         let hits = self.overlap_query(self.world.query_point(p), mask, min_depth, max_depth, |shape, xf| test_point(shape, xf, p));
         if hits.len() > 16 {

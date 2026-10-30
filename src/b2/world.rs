@@ -543,7 +543,7 @@ pub struct World {
     /// The contact listener's PhysicsContacts2D.
     pub contacts2d: Contacts2D,
     /// PhysicsScene2D's fixtureless static ground body (what a joint without connectedBody attaches to), made on first use.
-    ground: Option<BodyId>,
+    pub(crate) ground: Option<BodyId>,
 }
 
 impl Default for World {

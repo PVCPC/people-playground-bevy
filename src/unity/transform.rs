@@ -350,6 +350,19 @@ pub fn from_to_rotation_up(v: [f32; 3]) -> [f32; 4] {
 /// local TRS, then each parent up to the root.
 pub fn transform_aabb(center: [f32; 3], extents: [f32; 3], chain: &[Trs]) -> ([f32; 3], [f32; 3]) {
     unsafe {
+        let (m, t) = global_matrix_ps(chain);
+        let c = ld([center[0], center[1], center[2], center[2]]);
+        let e = ld([extents[0], extents[1], extents[2], extents[2]]);
+        let ctr = _mm_add_ps(_mm_add_ps(_mm_mul_ps(m[0], sh!(c, 0x00)), _mm_add_ps(_mm_mul_ps(m[1], sh!(c, 0x55)), _mm_mul_ps(m[2], sh!(c, 0xaa)))), t);
+        let ab = |v: __m128| _mm_and_ps(v, k([0x7fffffff; 4]));
+        let ext = _mm_add_ps(_mm_add_ps(ab(_mm_mul_ps(sh!(e, 0x00), m[0])), ab(_mm_mul_ps(sh!(e, 0x55), m[1]))), ab(_mm_mul_ps(sh!(e, 0xaa), m[2])));
+        let (c, e) = (out(ctr), out(ext));
+        ([c[0], c[1], c[2]], [e[0], e[1], e[2]])
+    }
+}
+
+fn global_matrix_ps(chain: &[Trs]) -> ([__m128; 3], __m128) {
+    unsafe {
         let scaled = |n: &Trs| {
             let [c0, c1, c2] = rot_columns(ld(n.q));
             let s = ld(n.s);
@@ -362,14 +375,42 @@ pub fn transform_aabb(center: [f32; 3], extents: [f32; 3], chain: &[Trs]) -> ([f
             t = _mm_add_ps(_mm_add_ps(_mm_mul_ps(p[0], sh!(t, 0x00)), _mm_add_ps(_mm_mul_ps(p[1], sh!(t, 0x55)), _mm_mul_ps(p[2], sh!(t, 0xaa)))), ld(n.t));
             m = mat_mul(&p, &m);
         }
-        let c = ld([center[0], center[1], center[2], center[2]]);
-        let e = ld([extents[0], extents[1], extents[2], extents[2]]);
-        let ctr = _mm_add_ps(_mm_add_ps(_mm_mul_ps(m[0], sh!(c, 0x00)), _mm_add_ps(_mm_mul_ps(m[1], sh!(c, 0x55)), _mm_mul_ps(m[2], sh!(c, 0xaa)))), t);
-        let ab = |v: __m128| _mm_and_ps(v, k([0x7fffffff; 4]));
-        let ext = _mm_add_ps(_mm_add_ps(ab(_mm_mul_ps(sh!(e, 0x00), m[0])), ab(_mm_mul_ps(sh!(e, 0x55), m[1]))), ab(_mm_mul_ps(sh!(e, 0xaa), m[2])));
-        let (c, e) = (out(ctr), out(ext));
-        ([c[0], c[1], c[2]], [e[0], e[1], e[2]])
+        (m, t)
     }
+}
+
+/// Transform::GetLocalToWorldMatrix (1807f1130 -> CalculateGlobalMatrix 1801a56e0), column-major: the rotation-scale
+/// columns with w cleared, then the translation with w = 1. `chain` is the object's own local TRS, then each parent.
+pub fn local_to_world(chain: &[Trs]) -> [f32; 16] {
+    let (m, t) = global_matrix_ps(chain);
+    let mut out16 = [0.0f32; 16];
+    for (c, col) in m.iter().enumerate() {
+        out16[c * 4..c * 4 + 3].copy_from_slice(&out(*col)[..3]);
+    }
+    out16[12..15].copy_from_slice(&out(t)[..3]);
+    out16[15] = 1.0;
+    out16
+}
+
+/// QuaternionToMatrix (180740e60), scalar: column-major, no translation.
+pub fn quaternion_to_matrix(q: [f32; 4]) -> [f32; 16] {
+    let [x, y, z, w] = q;
+    let (x2, y2, z2) = (x + x, y + y, z + z);
+    let (xx, yy, zz) = (x * x2, y * y2, z * z2);
+    let (xy, xz, yz) = (x * y2, x * z2, y * z2);
+    let (wx, wy, wz) = (w * x2, w * y2, w * z2);
+    let mut m = [0.0f32; 16];
+    m[0] = 1.0 - (zz + yy);
+    m[1] = wz + xy;
+    m[2] = xz - wy;
+    m[4] = xy - wz;
+    m[5] = 1.0 - (zz + xx);
+    m[6] = wx + yz;
+    m[8] = wy + xz;
+    m[9] = yz - wx;
+    m[10] = 1.0 - (yy + xx);
+    m[15] = 1.0;
+    m
 }
 
 /// Bounds.ClosestPoint (Bounds_CUSTOM_ClosestPoint_Injected 18094a880 -> CalculateClosestPoint 180640690): the point

@@ -261,10 +261,23 @@ impl Game {
             p.Sharp = r.req("Sharp")? == "1";
             p.IgnoreStabResistance = r.req("IgnoreStabResistance")? == "1";
             p.SharpForceThresholdMultiplier = f(r.req("SharpForceThresholdMultiplier")?);
-            // The dump has only ever listed empty SharpAxes; a non-empty element format is not known.
-            if list(r.req("SharpAxes")?).len() != 0 {
-                return Err("non-empty SharpAxes are not loaded yet".into());
+            // SharpAxis(Axis=x,y LowerLimit=f UpperLimit=f LooseUpperLimit=b LooseLowerLimit=b)
+            for item in list(r.req("SharpAxes")?) {
+                let v = inner_fields(item);
+                let get = |k: &str| -> Result<&str, String> { v.iter().find(|(n, _)| n == k).map(|(_, x)| x.as_str()).ok_or(format!("SharpAxis.{k}")) };
+                p.SharpAxes.push(super::physical::SharpAxis {
+                    Axis: floats(get("Axis")?),
+                    LowerLimit: f(get("LowerLimit")?),
+                    UpperLimit: f(get("UpperLimit")?),
+                    LooseUpperLimit: get("LooseUpperLimit")? == "1",
+                    LooseLowerLimit: get("LooseLowerLimit")? == "1",
+                });
             }
+            p.LodgeStrengthMultiplier = f(r.req("LodgeStrengthMultiplier")?);
+            p.StabSound = match r.req("StabSound")? {
+                "null" => None,
+                t => Some(list(t).len()),
+            };
             p.friction = match (r.get("friction"), r.req("PhysicMaterial")?) {
                 (Some(bits), _) => Some(f(bits)),
                 (None, "null") => None,
@@ -331,6 +344,8 @@ impl Game {
             p.has_fire_map = r.req("LocalFirePropagationMap")? != "null";
             p.MaximumStabVictims = r.req("MaximumStabVictims")?.parse().map_err(|e| format!("{} MaximumStabVictims: {e}", r.name))?;
             p.LooseEndSize = f(r.req("LooseEndSize")?);
+            p.StabReleaseSpeedModifier = f(r.req("StabReleaseSpeedModifier")?);
+            p.StabWoundSizeMultiplier = f(r.req("StabWoundSizeMultiplier")?);
             p.OverrideImpactSounds = list(r.req("OverrideImpactSounds")?).len();
             p.audioSource = r.req("audioSource")? != "null";
             // From dump17 on: the SpriteRenderer's local AABB (center, extents).
@@ -345,19 +360,29 @@ impl Game {
                 let collider = |k: &String| k.split(':').next()?.rsplit_once('#').filter(|(o, _)| *o == r.name).map(|(_, id)| id.parse::<i32>().unwrap());
                 p.collider = rs.fixtures.keys().find_map(collider).unwrap_or(0);
             }
-            match limb_by_name(&r.name) {
-                Some(l) => {
-                    let rb = rbs[l];
+            // A limb, or a PPG_STAB item (ItemRigidbody2D/ItemB2Body records: a dynamic body of its own).
+            let owner: Option<(&Record, Option<&Record>, crate::b2::world::BodyId)> = match limb_by_name(&r.name) {
+                Some(l) => Some((rbs[l], s.of("b2Body").nth(l), limb_bodies[l])),
+                None => match s.of("ItemRigidbody2D").find(|x| x.name.replace(' ', "_") == r.name) {
+                    Some(rb) => {
+                        let body = restored.as_ref().and_then(|rs| rs.bodies.get(&format!("{}#{}", r.name, rb.id))).ok_or("an item without the b2 world")?;
+                        Some((rb, s.of("ItemB2Body").find(|x| x.id == rb.id), *body))
+                    }
+                    None => None,
+                },
+            };
+            match owner {
+                Some((rb, raw, body)) => {
                     p.rigidbody = Rigidbody {
-                        body: limb_bodies[l],
+                        body,
                         bodyType: rb.req("bodyType")?.parse().unwrap(),
                         collisionDetectionMode: rb.req("cdm")?.parse().unwrap(),
                         interpolation: rb.req("interpolation")?.parse().unwrap(),
-                        movement: s.of("b2Body").nth(l).and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
+                        movement: raw.and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
                         detached: None,
                     };
                     // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
-                    let changed = s.of("b2Body").nth(l).and_then(|r| r.get("hierarchyChanged"));
+                    let changed = raw.and_then(|r| r.get("hierarchyChanged"));
                     g.rigidbody_hierarchy_changed |= changed.map_or(!p.rigidbody.movement.listed && p.rigidbody.bodyType != 2, |v| v == "1");
                     p.parent = rb.get("parent").and_then(|t| node_of(&g, t));
                     p.transform = Pose {
@@ -490,6 +515,9 @@ impl Game {
                     AudioSource: g.req("AudioSource")? != "null",
                     ..Default::default()
                 };
+            }
+            if let Some(v) = r.get("VitalParts").filter(|v| *v != "null") {
+                g.vital_parts.insert(i, list(v).into_iter().map(bounds).collect());
             }
             l.ConnectedLimbs = list(r.req("ConnectedLimbs")?).into_iter().map(|t| limb_ids[&reference(t).unwrap()]).collect();
             l.NearestLimbToBrain = reference(r.req("NearestLimbToBrain")?).map(|id| limb_ids[&id]);
@@ -1081,8 +1109,8 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         }
     }
     // Body velocities and forces the scripts write.
-    for r in s.of("b2Body") {
-        let Some(p) = g.limbs.iter().map(|l| l.PhysicalBehaviour).find(|&p| g.physicals[p].name == r.name && !g.physicals[p].destroyed) else {
+    for r in s.of("b2Body").chain(s.of("ItemB2Body")) {
+        let Some(p) = g.limbs.iter().map(|l| l.PhysicalBehaviour).chain(g.physicals.iter().position(|x| x.name == r.name && s.of("ItemB2Body").any(|i| i.id == r.id))).find(|&p| g.physicals[p].name == r.name && !g.physicals[p].destroyed) else {
             out.push(format!("b2Body {}: ours destroyed", r.name));
             continue;
         };
@@ -1106,6 +1134,7 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
             out.push(format!("b2Body {}.sleepTime: game {sleep:08x} ours {:08x}", r.name, b.sleep_time.to_bits()));
         }
     }
+    out.extend(compare_stabs(g, s));
     let w = words(s.snap("random"));
     if g.random.state != [w[0], w[1], w[2], w[3]] {
         out.push(format!("random: game {w:08x?} ours {:08x?}", g.random.state));
@@ -1123,6 +1152,105 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
         }
     }
     out.extend(particles);
+    out
+}
+
+/// The stab bookkeeping against the PhysicalBehaviour records (stabWoundCount, beingStabbedBy, penetrations and
+/// victimPenetrations as the recorder formats them) and the SliderJoint2D records (Joint2D values, translation, speed).
+fn compare_stabs(g: &Game, s: &Snapshot) -> Vec<String> {
+    let mut out = Vec::new();
+    let hex = |v: f32| format!("{:08x}", v.to_bits());
+    let at = |p: usize| format!("@{}#{}", g.physicals[p].name, g.physicals[p].id);
+    let collider = |c: i32| format!("@{}#{c}", g.physical_of_collider(c).map_or("?".to_string(), |p| g.physicals[p].name.clone()));
+    let pen_text = |i: usize| {
+        let p = &g.penetration_arena[i];
+        let a = &p.Axis;
+        let joint = match p.Joint {
+            None => "null",
+            Some(j) if g.fixed_joints[j].destroyed => "destroyed",
+            Some(_) => "@",
+        };
+        format!(
+            "Penetration(Stabber={} Victim={} Joint={joint} Duration={} Axis=SharpAxis(Axis={},{} LowerLimit={} UpperLimit={} LooseUpperLimit={} LooseLowerLimit={}) RelevantColliders=[{}] CurrentConnectedAnchor={},{} Active={})",
+            at(p.Stabber),
+            p.Victim.map_or("null".to_string(), at),
+            hex(p.Duration),
+            hex(a.Axis[0]),
+            hex(a.Axis[1]),
+            hex(a.LowerLimit),
+            hex(a.UpperLimit),
+            a.LooseUpperLimit as u8,
+            a.LooseLowerLimit as u8,
+            p.RelevantColliders.iter().map(|&c| collider(c)).collect::<Vec<_>>().join(";"),
+            hex(p.CurrentConnectedAnchor[0]),
+            hex(p.CurrentConnectedAnchor[1]),
+            p.Active as u8
+        )
+    };
+    // The game's Joint is "@name#id" of a live component; only whether it is set is compared.
+    let loose = |t: &str| -> String {
+        let mut o = String::new();
+        let mut rest = t;
+        while let Some(i) = rest.find("Joint=@") {
+            o.push_str(&rest[..i + 7]);
+            let end = rest[i..].find(' ').map_or(rest.len(), |e| i + e);
+            rest = &rest[end..];
+        }
+        o + rest
+    };
+    for r in s.of("PhysicalBehaviour") {
+        let Some(p) = g.physicals.iter().position(|x| x.id == r.id) else { continue };
+        let ph = &g.physicals[p];
+        let join = |v: Vec<String>| format!("[{}]", v.join(";"));
+        let mut check = |k: &str, ours: String| {
+            if let Some(theirs) = r.get(k) {
+                if loose(theirs) != ours {
+                    out.push(format!("Physical {}.{k}: game {} ours {ours}", r.name, theirs));
+                }
+            }
+        };
+        check("stabWoundCount", ph.stabWoundCount.to_string());
+        check("beingStabbedBy", join(ph.beingStabbedBy.iter().map(|&q| at(q)).collect()));
+        check("penetrations", join(ph.penetrations.iter().map(|&i| pen_text(i)).collect()));
+        check("victimPenetrations", join(ph.victimPenetrations.iter().map(|&i| pen_text(i)).collect()));
+    }
+    for r in s.of("SliderJoint2D") {
+        let name = |t: &str| t.trim_start_matches('@').rsplit_once('#').map_or(t.to_string(), |x| x.0.to_string());
+        let connected = name(r.get("connected").unwrap_or("null"));
+        let Some(f) = (0..g.fixed_joints.len()).find(|&f| {
+            let j = &g.fixed_joints[f];
+            !j.destroyed && j.slider.is_some() && g.physicals[j.attached].name == r.name && j.connected.is_some_and(|c| g.physicals[c].name == connected)
+        }) else {
+            out.push(format!("SliderJoint2D {} -> {connected}: ours missing", r.name));
+            continue;
+        };
+        let j = &g.fixed_joints[f];
+        let (st, sl) = (&j.state, j.slider.as_ref().unwrap());
+        let ours = [
+            ("enabled", (j.enabled as u8).to_string()),
+            ("anchor", format!("{},{}", hex(st.anchor.x), hex(st.anchor.y))),
+            ("connectedAnchor", format!("{},{}", hex(st.connected_anchor.x), hex(st.connected_anchor.y))),
+            ("auto", format!("{},{}", st.auto_configure_connected_anchor as u8, sl.auto_configure_angle as u8)),
+            ("angle", hex(sl.angle)),
+            ("motor", format!("{},{},{}", sl.use_motor as u8, hex(sl.motor_speed), hex(sl.max_motor_torque))),
+            ("limits", format!("{},{},{}", sl.use_limits as u8, hex(sl.lower), hex(sl.upper))),
+            ("breakForce", hex(st.break_force)),
+            ("breakTorque", hex(st.break_torque)),
+            ("collide", (st.enable_collision as u8).to_string()),
+            ("translation", hex(g.slider_joint_translation(f))),
+            ("speed", hex(g.slider_joint_speed(f))),
+        ];
+        for (k, ours) in ours {
+            let theirs = r.get(k).unwrap_or("");
+            if theirs != ours {
+                out.push(format!("SliderJoint2D {} -> {connected}.{k}: game {theirs} ours {ours}", r.name));
+            }
+        }
+    }
+    let live = g.fixed_joints.iter().filter(|j| !j.destroyed && j.slider.is_some()).count();
+    if live != s.of("SliderJoint2D").count() {
+        out.push(format!("SliderJoint2D count: game {} ours {live}", s.of("SliderJoint2D").count()));
+    }
     out
 }
 
@@ -1263,9 +1391,9 @@ fn movement_words(m: &MovementState) -> Vec<u32> {
 fn compare_transforms(g: &Game, chained: &Snapshot, to: &Snapshot) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let chain = chained.of("TransformChain").any(|r| r.get("parent").is_some());
-    for rb in to.of("Rigidbody2D").filter(|_| chain) {
-        let l = g.limbs.iter().position(|l| g.physicals[l.PhysicalBehaviour].name == rb.name).ok_or(format!("no limb {}", rb.name))?;
-        let t = &g.physicals[g.limbs[l].PhysicalBehaviour].transform;
+    for rb in to.of("Rigidbody2D").chain(to.of("ItemRigidbody2D")).filter(|_| chain) {
+        let p = g.limbs.iter().map(|l| l.PhysicalBehaviour).chain(g.physicals.iter().position(|x| x.name == rb.name && to.of("ItemRigidbody2D").any(|i| i.id == rb.id))).find(|&p| g.physicals[p].name == rb.name).ok_or(format!("no limb {}", rb.name))?;
+        let t = &g.physicals[p].transform;
         let (pos, rot): ([f32; 3], [f32; 4]) = (floats(rb.req("tpos")?), floats(rb.req("trot")?));
         let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
         if bits(&pos) != bits(&t.position) || bits(&rot) != bits(&t.rotation) {

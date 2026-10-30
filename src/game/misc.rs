@@ -397,7 +397,26 @@ impl Game {
                 // RegenerateWounds; Sync only uploads to the material.
                 self.regenerate_wounds(l, interval);
             }
-            assert!(self.physicals[self.limbs[l].PhysicalBehaviour].victimPenetrations.is_empty());
+            let phys = self.limbs[l].PhysicalBehaviour;
+            let mut j = 0;
+            while j < self.physicals[phys].victimPenetrations.len() {
+                let pen = self.penetration_arena[self.physicals[phys].victimPenetrations[j]].clone();
+                j += 1;
+                let stabber = pen.Stabber;
+                if !pen.Active || self.physicals[stabber].destroyed || !self.physicals[stabber].StabCausesWound || self.physicals[stabber].isDisintegrated {
+                    continue;
+                }
+                let sharp_end = self.get_sharp_end(stabber, &pen.Axis);
+                // Physics2D.OverlapPointNonAlloc: DefaultRaycastLayers, unbounded depth; a hit on the victim's object.
+                let victim = pen.Victim.expect("victim penetration without a victim");
+                let inside = self.overlap_point([sharp_end[0], sharp_end[1], 0.0], 0xffff_fffb, f32::NEG_INFINITY, f32::INFINITY).contains(&victim);
+                if !inside {
+                    let (c, e) = self.sprite_world_bounds(phys);
+                    let (closest, _) = crate::unity::transform::bounds_closest_point([sharp_end[0], sharp_end[1], 0.0], c, e);
+                    let size = (d(8.0) * d(self.physicals[stabber].StabWoundSizeMultiplier)).f();
+                    self.skin_add_damage_point(l, damage_type::STAB, [closest[0], closest[1]], size);
+                }
+            }
         }
     }
 

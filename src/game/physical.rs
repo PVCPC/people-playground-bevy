@@ -32,14 +32,14 @@ pub struct PhysicalProperties {
     pub HardImpact: usize,
     /// SizzleSounds length; None when the array is null.
     pub SizzleSounds: Option<usize>,
-    // The stabbing values; the dump loader does not read them yet (Sharp stays false, so stabbing never starts).
+    // The stabbing values.
     pub Sharp: bool,
     pub IgnoreStabResistance: bool,
     pub SharpForceThresholdMultiplier: f32,
     pub SharpAxes: Vec<SharpAxis>,
-    /// Not read by the dump loader yet (PhysicalProperties.LodgeStrengthMultiplier is 1 in the game's defaults).
+    /// LodgeStrengthMultiplier
     pub LodgeStrengthMultiplier: f32,
-    /// StabSound length; None when the array is null. Not read by the dump loader yet.
+    /// StabSound length; None when the array is null.
     pub StabSound: Option<usize>,
 }
 

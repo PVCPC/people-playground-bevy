@@ -6,7 +6,7 @@ use crate::b2::broadphase::Aabb;
 use crate::b2::collide::{ContactFeature, Manifold, ManifoldPoint, ManifoldType};
 use crate::b2::contacts2d::{Collision2D, ContactState, Manifold2D, Message, Report};
 use crate::b2::shape::{MassData, Polygon};
-use crate::b2::world::{Body, BodyId, ColliderRef, ContactId, Filter, FixtureDef, FixtureId, JointId, RigidbodyRef, Shape, World, CONTACT_TOUCHING};
+use crate::b2::world::{Body, BodyId, JointKind, ColliderRef, ContactId, Filter, FixtureDef, FixtureId, JointId, RigidbodyRef, Shape, World, CONTACT_TOUCHING};
 
 pub struct Restored {
     pub world: World,
@@ -141,6 +141,9 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         let id = world.create_body(&BodyDef { kind, user, ..Default::default() });
         load_body(world.body_mut(id), e)?;
         bodies.insert(name.to_string(), id);
+        if name == "ground" {
+            world.ground = Some(id);
+        }
         for &f in names(e.req("fixtures")?).iter().rev() {
             let (mut def, mass) = fixture_def(fixture_records.get(f).ok_or(format!("no b2Fixture {f}"))?)?;
             let (object, collider) = object_ref(f)?;
@@ -202,6 +205,18 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
             let b = *bodies.get(connected).ok_or(format!("drag joint connects to {connected}"))?;
             joints.insert(format!("{}#{}", h.name, h.id), restore_revolute(&mut world, &words(j), a, b));
         }
+    }
+    // A stab's SliderJoint2D on the item (body A) connected to the victim (body B).
+    for h in s.of("SliderJoint2D") {
+        let j = h.req("joint")?;
+        if j == "null" {
+            continue;
+        }
+        let own = s.of("ItemRigidbody2D").find(|r| r.name.replace(' ', "_") == h.name).ok_or(format!("slider {} without a body", h.name))?;
+        let connected = h.req("connected")?.trim_start_matches('@');
+        let a = bodies[&format!("{}#{}", h.name, own.id)];
+        let b = *bodies.get(connected).ok_or(format!("slider {} connects to {connected}", h.name))?;
+        joints.insert(format!("{}#{}", h.name, h.id), restore_prismatic(&mut world, &words(j), a, b));
     }
     // Contacts, list tail first.
     let records: Vec<&Record> = s.of("b2Contact").collect();
@@ -294,6 +309,41 @@ fn restore_revolute(world: &mut World, w: &[u32], a: BodyId, b: BodyId) -> Joint
     rev.motor_impulse = fl(7);
     rev.limit_state = w[37];
     id
+}
+
+/// A b2PrismaticJoint from its recorded words (0x98..0xe4): anchors, local axes, reference angle, impulses, limits,
+/// motor and limit state.
+fn restore_prismatic(world: &mut World, w: &[u32], a: BodyId, b: BodyId) -> JointId {
+    let fl = |i: usize| f32::from_bits(w[i]);
+    let def = crate::b2::prismatic::PrismaticDef {
+        local_anchor_a: V::new(fl(0), fl(1)),
+        local_anchor_b: V::new(fl(2), fl(3)),
+        local_axis_a: V::new(fl(4), fl(5)),
+        reference_angle: fl(8),
+        enable_limit: w[17] & 0xff != 0,
+        lower_translation: fl(13),
+        upper_translation: fl(14),
+        enable_motor: w[17] & 0xff00 != 0,
+        max_motor_force: fl(15),
+        motor_speed: fl(16),
+    };
+    let id = world.create_joint(def, a, b, false);
+    let p = world.joints[id].as_mut().unwrap().prismatic_mut();
+    p.impulse = [fl(9), fl(10), fl(11)];
+    p.motor_impulse = fl(12);
+    p.limit_state = w[18];
+    id
+}
+
+/// restore_prismatic's words back from a live joint.
+fn prismatic_words(p: &crate::b2::prismatic::PrismaticJoint) -> Vec<u32> {
+    let d = &p.def;
+    let x = p.local_axis();
+    let y = V::new(x.y * -1.0, x.x);
+    let mut out: Vec<u32> = [d.local_anchor_a.x, d.local_anchor_a.y, d.local_anchor_b.x, d.local_anchor_b.y, x.x, x.y, y.x, y.y, d.reference_angle, p.impulse[0], p.impulse[1], p.impulse[2], p.motor_impulse, d.lower_translation, d.upper_translation, d.max_motor_force, d.motor_speed].iter().map(|v| v.to_bits()).collect();
+    out.push(d.enable_limit as u32 | (d.enable_motor as u32) << 8);
+    out.push(p.limit_state);
+    out
 }
 
 fn contact_state(v: u32) -> Result<ContactState, String> {
@@ -511,7 +561,7 @@ pub fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> 
     let body_name: HashMap<BodyId, &str> = r.bodies.iter().map(|(n, &b)| (b, n.as_str())).collect();
     let fixture_name: HashMap<FixtureId, &str> = r.fixtures.iter().map(|(n, &f)| (f, n.as_str())).collect();
     let theirs = s.of("b2World").next().ok_or("no b2World record")?.req("bodies")?.to_string();
-    let ours = w.body_list.iter().rev().map(|b| body_name[b]).collect::<Vec<_>>().join(";");
+    let ours = w.body_list.iter().rev().map(|b| body_name.get(b).copied().unwrap_or("?")).collect::<Vec<_>>().join(";");
     if theirs != ours {
         out.push(format!("b2World.bodies: game {theirs} ours {ours}"));
     }
@@ -610,6 +660,32 @@ pub fn compare_world(r: &Restored, s: &Snapshot) -> Result<Vec<String>, String> 
         if g[37] != rev.limit_state {
             out.push(format!("b2RevoluteJoint {}.limitState: game {} ours {}", h.name, g[37], rev.limit_state));
         }
+    }
+    // Stab joints: every live b2PrismaticJoint of the game against ours, word by word (0x98..0xe4).
+    let mut game_sliders = 0;
+    for h in s.of("SliderJoint2D") {
+        let j = h.req("joint")?;
+        if j == "null" {
+            continue;
+        }
+        game_sliders += 1;
+        let own = s.of("ItemRigidbody2D").find(|r| r.name.replace(' ', "_") == h.name).ok_or("slider without a body")?;
+        let a = r.bodies[&format!("{}#{}", h.name, own.id)];
+        let connected = r.bodies.get(h.req("connected")?.trim_start_matches('@')).copied();
+        let Some(&(_, id)) = w.body(a).joints.iter().find(|&&(o, id)| matches!(w.joints[id].as_ref().unwrap().kind, JointKind::Prismatic(_)) && w.joints[id].as_ref().unwrap().body_a == a && Some(o) == connected) else {
+            out.push(format!("b2PrismaticJoint {}: missing", h.name));
+            continue;
+        };
+        let ours = prismatic_words(w.joints[id].as_ref().unwrap().prismatic());
+        for (k, (gw, o)) in words(j).iter().zip(ours).enumerate() {
+            if *gw != o {
+                out.push(format!("b2PrismaticJoint {}.w{}: game {gw:08x} ours {o:08x}", h.name, k));
+            }
+        }
+    }
+    let ours_sliders = w.joints.iter().flatten().filter(|j| matches!(j.kind, JointKind::Prismatic(_))).count();
+    if ours_sliders != game_sliders {
+        out.push(format!("b2PrismaticJoint count: game {game_sliders} ours {ours_sliders}"));
     }
     Ok(out)
 }
