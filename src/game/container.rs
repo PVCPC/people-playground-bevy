@@ -259,24 +259,30 @@ impl Game {
         self.liquid_on_exit_container(liquid, o);
     }
 
-    // ---- Liquid's virtual hooks ----
+    // ---- Liquid's virtual members: the translated liquids', and GorseBlood's (AcidRoutine is a coroutine) ----
+
+    fn translated(liquid: usize) -> bool {
+        super::translated::LIQUID_CLASSES.contains(&LIQUIDS[liquid].1)
+    }
 
     fn liquid_unwritten(liquid: usize, hook: &str) -> ! {
         unimplemented!("{}.{hook}", LIQUIDS[liquid].1)
     }
 
-    /// Liquid.OnEnterContainer: empty in Blood, GorseBlood and Oil.
-    fn liquid_on_enter_container(&mut self, liquid: usize, _o: Owner) {
+    /// Liquid.OnEnterContainer
+    fn liquid_on_enter_container(&mut self, liquid: usize, o: Owner) {
         match LIQUIDS[liquid].1 {
-            "Blood" | "GorseBlood" | "Oil" => {}
+            _ if Self::translated(liquid) => self.tr_liquid_on_enter_container(liquid, o),
+            "GorseBlood" => {}
             _ => Self::liquid_unwritten(liquid, "OnEnterContainer"),
         }
     }
 
-    /// Liquid.OnExitContainer: empty in Blood, GorseBlood and Oil.
-    fn liquid_on_exit_container(&mut self, liquid: usize, _o: Owner) {
+    /// Liquid.OnExitContainer
+    fn liquid_on_exit_container(&mut self, liquid: usize, o: Owner) {
         match LIQUIDS[liquid].1 {
-            "Blood" | "GorseBlood" | "Oil" => {}
+            _ if Self::translated(liquid) => self.tr_liquid_on_exit_container(liquid, o),
+            "GorseBlood" => {}
             _ => Self::liquid_unwritten(liquid, "OnExitContainer"),
         }
     }
@@ -284,15 +290,9 @@ impl Game {
     /// Liquid.OnEnterLimb
     fn liquid_on_enter_limb(&mut self, liquid: usize, l: usize) {
         match LIQUIDS[liquid].1 {
-            "Blood" => {}
+            _ if Self::translated(liquid) => self.tr_liquid_on_enter_limb(liquid, l),
             "GorseBlood" if self.limbs[l].SpeciesIdentity == "Gorse" => {}
             "GorseBlood" => unimplemented!("GorseBlood.AcidRoutine (a coroutine on the limb's CirculationBehaviour)"),
-            "Oil" => {
-                if self.limbs[l].SpeciesIdentity != "Android" {
-                    self.limbs[l].Numbness += 0.5;
-                    self.circulations[l].IsPump = false;
-                }
-            }
             _ => Self::liquid_unwritten(liquid, "OnEnterLimb"),
         }
     }
@@ -300,22 +300,9 @@ impl Game {
     /// Liquid.OnUpdate
     fn liquid_on_update(&mut self, liquid: usize, o: Owner) {
         match LIQUIDS[liquid].1 {
-            // Blood.OnUpdate (GorseBlood inherits it)
-            "Blood" | "GorseBlood" => {
-                if let Owner::Circulation(l) = o
-                    && self.limbs[l].SpeciesIdentity == "Android"
-                    && self.random.value() > 0.995
-                {
-                    let p = self.limbs[l].PhysicalBehaviour;
-                    let c = self.physicals[p].Charge() + 5.0;
-                    self.physicals[p].charge = c;
-                }
-            }
-            "Oil" => {
-                if let Owner::Circulation(l) = o {
-                    self.liquid_on_enter_limb(liquid, l);
-                }
-            }
+            _ if Self::translated(liquid) => self.tr_liquid_on_update(liquid, o),
+            // Blood.OnUpdate, inherited.
+            "GorseBlood" => self.blood_on_update(liquid, o),
             _ => Self::liquid_unwritten(liquid, "OnUpdate"),
         }
     }
