@@ -163,6 +163,8 @@ script! {
         enabled: bool = true,
         /// The GameObject was destroyed (Object.Destroy ran): removed from PhysicalObjectsInWorld.
         destroyed: bool = false,
+        /// In Global.PhysicalObjectsInWorld: Start adds it (a spawned one is out until then).
+        in_world: bool = true,
         /// Set when the oracle loads a component it has no data for.
         has_fire_map: bool = false,
         /// The DecalControllerBehaviours PhysicalBehaviour.Decal added, one per descriptor, in add order.
@@ -247,6 +249,7 @@ impl Game {
     /// PhysicalBehaviour.Start, run in Start order (`physicals` is Global.PhysicalObjectsInWorld, which Start
     /// appends to). Random.InitState(GetHashCode()) seeds with `hash_code`.
     pub fn physical_start(&mut self, p: usize) {
+        self.physicals[p].in_world = true;
         if !self.has_audio_time_scale_above(p) {
             // transform.root.gameObject.AddComponent<AudioSourceTimeScaleBehaviour>()
             self.allocate_instance_id();

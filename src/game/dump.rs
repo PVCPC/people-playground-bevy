@@ -912,12 +912,18 @@ impl Game {
         self.map_light_coroutines();
         self.gore_string_delayed_calls(true);
         // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
+        // Global's ManagedLateUpdate walks PhysicalObjectsInWorld, which a spawned PhysicalBehaviour joins in Start.
         for p in 0..self.physicals.len() {
-            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated {
+            if self.physicals[p].enabled && !self.physicals[p].isDisintegrated && self.physicals[p].in_world {
                 self.physical_late_update(p);
             }
         }
         for p in 0..self.people.len() {
+            // A behaviour's Start runs right before its first LateUpdate.
+            if let Some(i) = self.pending_starts.iter().position(|s| *s == super::misc::PendingStart::Person(p)) {
+                self.pending_starts.remove(i);
+                self.person_start(p);
+            }
             self.person_late_update(p);
         }
         for l in 0..self.limbs.len() {
@@ -930,6 +936,8 @@ impl Game {
             self.chunksUpToDate = false;
         }
         self.blood_puff_particles_update();
+        // The Starts still due after the LateUpdate phase (a Person spawned this frame), before the render.
+        self.run_pending_starts();
     }
 
     /// The render after LateUpdate: SkinMaterialHandler.OnWillRenderObject of each limb the camera drew, in call

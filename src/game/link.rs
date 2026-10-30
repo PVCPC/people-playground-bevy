@@ -447,9 +447,10 @@ impl Game {
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
     /// AwakeFromLoad queues, the scripts' deserialization (`link_instance`), then queue 0x14's Awake calls.
-    /// Returns the behaviours whose Start is pending; Unity runs Start later (`start_behaviours`). The b2 bodies
-    /// see PersonBehaviour.Awake's rescale at the next SyncTransforms.
-    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Result<(Instance, Linked, Vec<(usize, usize)>), String> {
+    /// The Starts are queued: Unity runs them in the spawn frame, PersonBehaviour's before its LateUpdate and the
+    /// rest after the LateUpdate phase (`update_scripts`). The b2 bodies see PersonBehaviour.Awake's rescale at the
+    /// next SyncTransforms.
+    pub fn spawn(&mut self, db: &mut AssetDb, prefab: &Prefab, position: [f32; 3], rotation: [f32; 4], original_ids: &HashMap<ObjRef, i32>) -> Result<(Instance, Linked), String> {
         let (mut inst, behaviours) = self.instantiate_native(prefab, position, rotation, original_ids);
         let first = self.physicals.len();
         let linked = self.link_instance(db, prefab, &inst)?;
@@ -461,7 +462,8 @@ impl Game {
             self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
-        Ok((inst, linked, behaviours))
+        self.queue_starts(prefab, &linked, &behaviours);
+        Ok((inst, linked))
     }
 
     /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order. The classes left out have no Awake
@@ -489,30 +491,33 @@ impl Game {
         }
     }
 
-    /// Start of each behaviour `spawn` returned, in the same order. Each PhysicalBehaviour's `hash_code` must be
-    /// set first: Random.InitState(GetHashCode()) takes Mono's object hash, a function of the object's address
-    /// in the managed heap. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts
-    /// only touch rendering, event subscriptions and the stat manager.
-    pub fn start_behaviours(&mut self, prefab: &Prefab, linked: &Linked, order: &[(usize, usize)]) {
+    /// Queues the Start of each behaviour in `order` (`run_pending_starts`, or PersonBehaviour's before its first
+    /// LateUpdate). Each PhysicalBehaviour's `hash_code` must be set by then: Random.InitState(GetHashCode()) takes
+    /// Mono's object hash. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts only
+    /// touch rendering, event subscriptions and the stat manager.
+    pub fn queue_starts(&mut self, prefab: &Prefab, linked: &Linked, order: &[(usize, usize)]) {
+        use super::misc::PendingStart;
         for &(o, c) in order {
             let Component::Script { class, fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
             let limb = || linked.limbs[&o];
             let flag = |name: &str| field(v, name).and_then(|x| x.bool().ok_or_else(|| name.to_string())).unwrap();
-            match class.as_str() {
-                "PersonBehaviour" => self.person_start(linked.person),
-                "HingeJointLimitAutofixBehaviour" => self.hinge_joint_limit_autofix_start(linked.person),
-                "CirculationBehaviour" => self.circulation_start(limb()),
-                "PhysicalBehaviour" => self.physical_start(self.limbs[limb()].PhysicalBehaviour),
-                "LimbBehaviour" => self.limb_start(limb()),
-                "ConnectedNodeBehaviour" => {
-                    let keep: Option<Vec<bool>> = v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect());
-                    self.node_start(limb(), keep.as_deref());
+            let start = match class.as_str() {
+                "PersonBehaviour" => PendingStart::Person(linked.person),
+                "HingeJointLimitAutofixBehaviour" => PendingStart::HingeJointLimitAutofix(linked.person),
+                "CirculationBehaviour" => PendingStart::Circulation(limb()),
+                "PhysicalBehaviour" => {
+                    let p = self.limbs[limb()].PhysicalBehaviour;
+                    self.physicals[p].in_world = false;
+                    PendingStart::Physical(p)
                 }
-                "GripBehaviour" => self.grip_start(self.limbs[limb()].GripBehaviour.unwrap()),
-                "GoreStringBehaviour" => self.gore_string_start(limb(), flag("CreateJointOnStart")),
+                "LimbBehaviour" => PendingStart::Limb(limb()),
+                "ConnectedNodeBehaviour" => PendingStart::Node(limb(), v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect())),
+                "GripBehaviour" => PendingStart::Grip(self.limbs[limb()].GripBehaviour.unwrap()),
+                "GoreStringBehaviour" => PendingStart::GoreString(limb(), flag("CreateJointOnStart")),
                 "ShatteredObjectGenerator" if flag("GenerateOnStart") => unimplemented!("ShatteredObjectGenerator.Start with GenerateOnStart"),
-                _ => {}
-            }
+                _ => continue,
+            };
+            self.pending_starts.push(start);
         }
     }
 
@@ -616,7 +621,9 @@ mod tests {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
-        g.start_behaviours(&prefab, &linked, &order);
+        g.queue_starts(&prefab, &linked, &order);
+        g.run_pending_starts();
+        assert!(g.physicals.iter().all(|p| p.in_world));
         // The first frame's render: OnWillRenderObject fills the blood colour caches.
         for l in 0..g.limbs.len() {
             g.skin_will_render(l);

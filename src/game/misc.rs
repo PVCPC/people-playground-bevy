@@ -300,9 +300,21 @@ pub struct ObjectPool {
 }
 
 /// A behaviour whose Start is still due.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PendingStart {
     Splat(usize),
+    /// A spawned Person's scripts (`Game::spawn`), by arena index. PersonBehaviour.Start runs before its first
+    /// LateUpdate; the rest after the LateUpdate phase.
+    Person(usize),
+    HingeJointLimitAutofix(usize),
+    Circulation(usize),
+    Physical(usize),
+    Limb(usize),
+    /// ConnectedNodeBehaviour with its serialized SerialisableConnectedNodes (None when null).
+    Node(usize, Option<Vec<bool>>),
+    Grip(usize),
+    /// GoreStringBehaviour with its serialized CreateJointOnStart.
+    GoreString(usize, bool),
     /// ExplosionSoundBehviour on a BloodExplosion (three Near clips, StartWhenAwake, no distant sound).
     BloodExplosionSound,
     /// A new BloodPuff's ExplosionSoundBehviour (eight Near clips).
@@ -582,6 +594,14 @@ impl Game {
                 PendingStart::BloodPuffSound => {
                     self.pick_random(8);
                 }
+                PendingStart::Person(p) => self.person_start(p),
+                PendingStart::HingeJointLimitAutofix(p) => self.hinge_joint_limit_autofix_start(p),
+                PendingStart::Circulation(l) => self.circulation_start(l),
+                PendingStart::Physical(p) => self.physical_start(p),
+                PendingStart::Limb(l) => self.limb_start(l),
+                PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),
+                PendingStart::Grip(g) => self.grip_start(g),
+                PendingStart::GoreString(l, create) => self.gore_string_start(l, create),
                 PendingStart::BloodPuffEmitterWater(b) => {
                     let s = self.blood_puffs[b].splat;
                     let p = self.splats[s].parent_position;
