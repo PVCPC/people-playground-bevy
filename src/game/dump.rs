@@ -407,6 +407,8 @@ impl Game {
                         interpolation: rb.req("interpolation")?.parse().unwrap(),
                         movement: raw.and_then(|r| r.get("move")).map_or(MovementState::default(), |w| movement_state(&words(w))),
                         detached: None,
+                        component: 0,
+                        detached_props: [0.0; 3],
                     };
                     // Older recordings lack the scene's flag: a non-static body out of the list was just (re)added.
                     let changed = raw.and_then(|r| r.get("hierarchyChanged"));
@@ -424,7 +426,7 @@ impl Game {
                         Some((_, &b)) => b,
                         None => g.world.create_body(&BodyDef::default()),
                     };
-                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None };
+                    p.rigidbody = Rigidbody { body, bodyType: 2, collisionDetectionMode: 0, interpolation: 0, movement: MovementState::default(), detached: None, component: 0, detached_props: [0.0; 3] };
                     // From dump16 on the record carries the object's Transform.
                     if let Some(pos) = r.get("tpos") {
                         p.parent = r.get("parent").and_then(|t| node_of(&g, t));
@@ -737,6 +739,28 @@ impl Game {
             }
         }
         g.people.push(p);
+        // The recorded Person's behaviours (all execution order 0): the root's, each limb's components, the
+        // snapshot's splats, the GForceMeasureBehaviours LimbBehaviour.Start added, the bleeding particles.
+        for p in 0..g.people.len() {
+            g.behaviours.add(0, super::Behaviour::Person(p));
+        }
+        for l in 0..g.limbs.len() {
+            g.behaviours.add(0, super::Behaviour::Skin(l));
+            g.behaviours.add(0, super::Behaviour::Circulation(l));
+            if let Some(gr) = g.limbs[l].GripBehaviour {
+                g.behaviours.add(0, super::Behaviour::Grip(gr));
+            }
+            g.behaviours.add(0, super::Behaviour::GoreString(l));
+        }
+        for s in 0..g.splats.len() {
+            g.behaviours.add(0, super::Behaviour::Splat(s));
+        }
+        for l in 0..g.gforces.len() {
+            g.behaviours.add(0, super::Behaviour::GForce(l));
+        }
+        for b in 0..g.bleeding.len() {
+            g.behaviours.add(0, super::Behaviour::Bleeding(b));
+        }
         if let Some(r) = s.of("ToolControllerBehaviour").next() {
             g.tool = Some(load_tool(&g, s, r, restored.as_ref().ok_or("a tool without the b2 world")?)?);
         }
@@ -841,26 +865,44 @@ impl Game {
             }
         }
         self.water_manager_fixed_update();
-        for p in 0..self.people.len() {
-            self.person_fixed_update(p);
-        }
-        // Each limb's GripBehaviour runs right after its CirculationBehaviour (recorded call order). Unity's own
-        // messages skip a deactivated (disintegrated) limb; the managers above only check enabled.
-        for l in 0..self.limbs.len() {
-            if !self.limb_active(l) {
+        self.run_behaviours(super::Phase::Fixed);
+    }
+
+    /// One pass of a behaviour manager over the list as it stood at the start (IntegrateLists); a behaviour removed
+    /// during the pass is skipped (its SafeIterator).
+    pub fn run_behaviours(&mut self, phase: super::Phase) {
+        use super::{Behaviour as B, Phase};
+        let list = self.behaviours.list(phase).clone();
+        for entry in list {
+            if !self.behaviours.list(phase).contains(&entry) {
                 continue;
             }
-            self.circulation_fixed_update(l);
-            if let Some(g) = self.limbs[l].GripBehaviour {
-                self.grip_fixed_update(g);
-            }
-        }
-        for s in 0..self.splats.len() {
-            self.splat_fixed_update(s);
-        }
-        for l in 0..self.limbs.len() {
-            if self.limb_active(l) {
-                self.gforce_fixed_update(l);
+            // Unity's own messages skip a deactivated (disintegrated) limb's components; the managed updates only
+            // check enabled.
+            match (phase, entry.1) {
+                (_, B::Circulation(l) | B::Skin(l) | B::GoreString(l) | B::GForce(l)) if !self.limb_active(l) => {}
+                (_, B::Grip(g)) if !self.physicals[self.grips[g].PhysicalBehaviour].active => {}
+                (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
+                (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
+                (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),
+                (Phase::Fixed, B::Splat(s)) => self.splat_fixed_update(s),
+                (Phase::Fixed, B::GForce(l)) => self.gforce_fixed_update(l),
+                (Phase::Update, B::Person(p)) => self.person_update(p),
+                (Phase::Update, B::Skin(l)) => self.skin_update(l),
+                (Phase::Update, B::Circulation(l)) => self.blood_container_update(l),
+                (Phase::Update, B::Grip(g)) => self.grip_update(g),
+                (Phase::Update, B::GoreString(l)) => self.gore_string_update(l),
+                (Phase::Update, B::Bleeding(b)) => self.bleeding_update(b),
+                (Phase::Late, B::Person(p)) => {
+                    // A behaviour's Start runs right before its first LateUpdate.
+                    if let Some(i) = self.pending_starts.iter().position(|s| *s == super::misc::PendingStart::Person(p)) {
+                        self.pending_starts.remove(i);
+                        self.person_start(p);
+                    }
+                    self.person_late_update(p);
+                }
+                (Phase::Late, B::Skin(l)) => self.skin_late_update(l),
+                (phase, b) => unreachable!("{b:?} in the {phase:?} manager"),
             }
         }
     }
@@ -887,27 +929,7 @@ impl Game {
                 self.limb_update(l);
             }
         }
-        for p in 0..self.people.len() {
-            self.person_update(p);
-        }
-        // Per limb: SkinMaterialHandler, BloodContainer, GripBehaviour, GoreStringBehaviour (no joints: returns).
-        for l in 0..self.limbs.len() {
-            if !self.limb_active(l) {
-                continue;
-            }
-            self.skin_update(l);
-            self.blood_container_update(l);
-            if let Some(g) = self.limbs[l].GripBehaviour {
-                self.grip_update(g);
-            }
-            self.gore_string_update(l);
-        }
-        // Bleeding particles are children of their limb.
-        for b in 0..self.bleeding.len() {
-            if self.limb_active(self.bleeding[b].CirculationBehaviour) {
-                self.bleeding_update(b);
-            }
-        }
+        self.run_behaviours(super::Phase::Update);
         self.node_controller_update();
         // Global.Update: UpdateMousePosition (timeScale stays at its target).
         self.MousePosition = self.input.mouse;
@@ -926,19 +948,7 @@ impl Game {
                 self.physical_late_update(p);
             }
         }
-        for p in 0..self.people.len() {
-            // A behaviour's Start runs right before its first LateUpdate.
-            if let Some(i) = self.pending_starts.iter().position(|s| *s == super::misc::PendingStart::Person(p)) {
-                self.pending_starts.remove(i);
-                self.person_start(p);
-            }
-            self.person_late_update(p);
-        }
-        for l in 0..self.limbs.len() {
-            if self.limb_active(l) {
-                self.skin_late_update(l);
-            }
-        }
+        self.run_behaviours(super::Phase::Late);
         // Global.LateUpdate
         if self.time.frameCount % 2 == 0 {
             self.chunksUpToDate = false;

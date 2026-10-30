@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 pub mod circulation;
 pub mod dump;
+pub mod lifecycle;
 pub mod limb;
 pub mod link;
 pub mod map;
@@ -504,6 +505,10 @@ pub struct Rigidbody {
     pub movement: MovementState,
     /// Set once Rigidbody2D::Cleanup has destroyed the b2 body (m_Body null): the component's own mass fields.
     pub detached: Option<crate::b2::world::RigidbodyMass>,
+    /// The Rigidbody2D component's instance id.
+    pub component: i32,
+    /// While detached, the component's linear drag, angular drag and gravity scale (the next Create reads them).
+    pub detached_props: [f32; 3],
 }
 
 /// RigidbodyMovementState2D (Rigidbody2D+0x98): the body pose before and after the last physics step, and the
@@ -857,6 +862,81 @@ impl Pose {
     }
 }
 
+/// A spawnable MonoBehaviour with Unity Update, FixedUpdate or LateUpdate messages, by its arena index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Behaviour {
+    Person(usize),
+    /// CirculationBehaviour (its BloodContainer.Update) by limb.
+    Circulation(usize),
+    Skin(usize),
+    Grip(usize),
+    GoreString(usize),
+    GForce(usize),
+    Splat(usize),
+    Bleeding(usize),
+}
+
+impl Behaviour {
+    fn class(self) -> &'static str {
+        match self {
+            Behaviour::Person(_) => "PersonBehaviour",
+            Behaviour::Circulation(_) => "CirculationBehaviour",
+            Behaviour::Skin(_) => "SkinMaterialHandler",
+            Behaviour::Grip(_) => "GripBehaviour",
+            Behaviour::GoreString(_) => "GoreStringBehaviour",
+            Behaviour::GForce(_) => "GForceMeasureBehaviour",
+            Behaviour::Splat(_) => "FancyBloodSplatController",
+            Behaviour::Bleeding(_) => "BleedingParticleBehaviour",
+        }
+    }
+}
+
+/// The passes of Unity's FixedBehaviourManager, BehaviourManager and LateBehaviourManager.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Phase {
+    Fixed,
+    Update,
+    Late,
+}
+
+/// The spawnable behaviours in Unity's three behaviour managers: by execution order, then AddBehaviour order
+/// (BaseBehaviourManager::AddBehaviour 180632040 appends to the order's pending list, IntegrateLists 180634580
+/// appends that to the list at the next pass). A behaviour is added once Awake ran on an active, enabled one.
+#[derive(Default)]
+pub struct Behaviours {
+    pub fixed: Vec<(i32, Behaviour)>,
+    pub update: Vec<(i32, Behaviour)>,
+    pub late: Vec<(i32, Behaviour)>,
+}
+
+impl Behaviours {
+    pub fn list(&self, phase: Phase) -> &Vec<(i32, Behaviour)> {
+        match phase {
+            Phase::Fixed => &self.fixed,
+            Phase::Update => &self.update,
+            Phase::Late => &self.late,
+        }
+    }
+
+    /// MonoBehaviour::AddToManager: into each manager whose message the class declares.
+    pub fn add(&mut self, order: i32, b: Behaviour) {
+        let messages = lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == b.class()).unwrap().1;
+        for (list, m) in [(&mut self.fixed, "FixedUpdate"), (&mut self.update, "Update"), (&mut self.late, "LateUpdate")] {
+            if messages.contains(&m) {
+                let at = list.partition_point(|&(o, _)| o <= order);
+                list.insert(at, (order, b));
+            }
+        }
+    }
+
+    /// MonoBehaviour::RemoveFromManager
+    pub fn remove(&mut self, b: Behaviour) {
+        for list in [&mut self.fixed, &mut self.update, &mut self.late] {
+            list.retain(|&(_, k)| k != b);
+        }
+    }
+}
+
 /// Everything the rewritten scripts touch: the b2 world, engine state and the component arenas.
 /// Limb-owned components (circulation, node, skin, gforce) share the limb's index.
 #[derive(Default)]
@@ -886,6 +966,8 @@ pub struct Game {
     /// The joints below each pending HingeJointLimitAutofixBehaviour host (`PendingStart::HingeJointLimitAutofixItem`'s
     /// index), kept current by `refresh_autofix_joints` until its Start.
     pub autofix_joints: Vec<misc::AutofixJoints>,
+    pub joint_break_sounds: Vec<misc::JointBreakSound>,
+    pub behaviours: Behaviours,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
     pub blood_puffs: Vec<misc::BloodPuff>,
     pub blood_puff_pool: Option<misc::ObjectPool>,

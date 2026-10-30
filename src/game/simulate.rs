@@ -309,8 +309,11 @@ impl Game {
             let prefab = inst.prefab.clone();
             self.sync_transforms(&mut inst, &prefab);
             self.refresh_autofix_joints(&inst);
-            // A WaterBehaviour's later GameObject.SetActive calls need the clone.
-            if prefab.objects.iter().any(|o| o.components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "WaterBehaviour"))) {
+            // A WaterBehaviour's later GameObject.SetActive calls and a Rigidbody2D's later bodyType changes need the clone.
+            if prefab.objects.iter().any(|o| o.components.iter().any(|(_, c)| match c {
+                crate::assets::db::Component::Script { class, .. } => class == "WaterBehaviour",
+                c => matches!(c, crate::assets::db::Component::Rigidbody2D(_)),
+            })) {
                 self.retained.push(inst);
             }
         }
@@ -474,6 +477,9 @@ impl Game {
                         self.fixed_joint_destroy(f);
                     }
                 }
+                // The JointBreakSoundBehaviours on the joint's GameObject come after the scripts above in component
+                // order, and the destroy draws nothing.
+                self.joint_break_sound_on_break(j);
                 self.joint_break_limits.retain(|&k| k != j);
             }
             if next.is_some_and(|n| !self.joint_break_limits.contains(&n)) {

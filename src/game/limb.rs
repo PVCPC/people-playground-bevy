@@ -434,6 +434,7 @@ impl Game {
             assert_eq!(self.gforces.len(), l, "GForceMeasureBehaviour arena out of step with the limbs");
             self.allocate_instance_id();
             self.gforces.push(Default::default());
+            self.behaviours.add(0, super::Behaviour::GForce(l));
         }
         self.limbs[l].IsOnFloor = false;
         if self.limbs[l].Broken {
@@ -1138,6 +1139,7 @@ impl Game {
                     attached: None,
                     parent_person: None,
                 });
+                self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
                 let s = self.splats.len() - 1;
                 self.pending_starts.push(super::misc::PendingStart::Splat(s));
                 s

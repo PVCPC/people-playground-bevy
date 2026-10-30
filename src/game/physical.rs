@@ -148,7 +148,7 @@ script! {
         /// gameObject.isStatic
         isStatic: bool = false,
         Properties: usize = 0,
-        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None },
+        rigidbody: Rigidbody = Rigidbody { body: 0, bodyType: 0, collisionDetectionMode: 0, interpolation: 0, movement: super::MovementState::default(), detached: None, component: 0, detached_props: [0.0; 3] },
         transform: Pose = Pose::default(),
         /// The Transform's parent (index into Game.transform_nodes).
         parent: Option<usize> = None,
@@ -1398,10 +1398,12 @@ impl Game {
             }
             self.world.destroy_joint(j);
         }
-        let mass = self.world.body(body).rigidbody;
+        let b = self.world.body(body);
+        let (mass, props) = (b.rigidbody, [b.linear_damping, b.angular_damping, b.gravity_scale]);
         self.world.destroy_body(body);
         let rb = &mut self.physicals[p].rigidbody;
         rb.detached = Some(mass);
+        rb.detached_props = props;
         rb.movement.listed = false;
         self.rigidbody_hierarchy_changed = true;
     }

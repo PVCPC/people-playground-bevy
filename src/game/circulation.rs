@@ -673,6 +673,7 @@ impl Game {
                 attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
                 parent_person: Some(self.limbs[parent].Person),
             });
+            self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
             let s = self.splats.len() - 1;
             self.update_splat_pose(s);
             self.pending_starts.push(super::misc::PendingStart::Splat(s));
@@ -702,6 +703,7 @@ impl Game {
             emission_enabled: false,
             destroyed: false,
         });
+        self.behaviours.add(0, super::Behaviour::Bleeding(self.bleeding.len() - 1));
         self.bleeding.len() - 1
     }
 

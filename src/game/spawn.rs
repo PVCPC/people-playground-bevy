@@ -25,6 +25,10 @@ pub struct Clone {
     pub parent: Option<usize>,
     /// GameObject.activeInHierarchy.
     pub active: bool,
+    /// GameObject.activeSelf.
+    pub self_active: bool,
+    /// The object has been active in the hierarchy before: its scripts have been awoken.
+    pub activated: bool,
 }
 
 /// An instantiated prefab: the clones in prefab order, and the b2 objects their components made.
@@ -373,7 +377,7 @@ impl Game {
                 trs.q = rotation;
             }
             let active = o.active && o.parent.map_or(true, |p| inst.objects[p].active);
-            inst.objects.push(Clone { game_object, components, trs, parent: o.parent, active });
+            inst.objects.push(Clone { game_object, components, trs, parent: o.parent, active, self_active: o.active, activated: active });
         }
         // A clone copies its original's interests (CopyTransformSubhierarchy); a prefab asset has no Physics2D
         // interest, so the clones start with none and nothing changed.
@@ -466,19 +470,75 @@ impl Game {
         id
     }
 
-    /// GameObject.SetActive on clone `o`. Only false is rewritten: GameObject::Deactivate (180587a20) of an active
-    /// object, whose ActivateAwakeRecursivelyInternal (1805865f0) goes through the children first, in Transform
-    /// order, then deactivates the object's own components in component order. An object already inactive in the
-    /// hierarchy has nothing to deactivate. Every Collider2D and Rigidbody2D of the subtree is deactivated here;
-    /// the MonoBehaviours it passes (their OnDisable) are returned, (object, component), in Unity's order.
+    /// GameObject.SetActive on clone `o` (GameObject::SetSelfActive, 180589740). Deactivating an active object is
+    /// GameObject::Deactivate (180587a20) through ActivateAwakeRecursivelyInternal (1805865f0), which goes through
+    /// the children first, in Transform order, then deactivates the object's own components in component order;
+    /// activating queues the same walk's components on an AwakeFromLoadQueue. An object already inactive in the
+    /// hierarchy only takes the flag. Every Collider2D and Rigidbody2D of the subtree is (de)activated here;
+    /// the MonoBehaviours it passes (their OnDisable, or OnEnable) are returned, (object, component), in Unity's
+    /// order.
     pub fn set_active(&mut self, inst: &mut Instance, o: usize, active: bool) -> Vec<(usize, usize)> {
         if active {
-            unimplemented!("GameObject.SetActive(true)");
+            return self.activate(inst, o);
         }
+        inst.objects[o].self_active = false;
         let prefab = inst.prefab.clone();
         let mut scripts = Vec::new();
         self.deactivate_recursively(inst, &prefab, o, &mut scripts);
         scripts
+    }
+
+    /// GameObject.SetActive(true): the flag, then (with the parents active) ActivateAwakeRecursivelyInternal queues
+    /// the components of the subtree, children first, and AwakeFromLoadQueue::AwakeFromLoad wakes the queues in
+    /// order, each in the order its items were queued; the MonoBehaviours (queue 0x14) by execution order and,
+    /// within it, the higher instance id first. Returns those, (object, component).
+    fn activate(&mut self, inst: &mut Instance, o: usize) -> Vec<(usize, usize)> {
+        inst.objects[o].self_active = true;
+        if inst.objects[o].active || inst.objects[o].parent.is_some_and(|p| !inst.objects[p].active) {
+            return Vec::new();
+        }
+        let prefab = inst.prefab.clone();
+        let mut queued = Vec::new();
+        self.activate_recursively(inst, &prefab, o, &mut queued);
+        let mut scripts = Vec::new();
+        for queue in 0..=0x14 {
+            for &(d, c) in &queued {
+                let comp = &prefab.objects[d].components[c].1;
+                if queue_index(Some(comp)) != queue {
+                    continue;
+                }
+                match comp {
+                    Component::Rigidbody2D(rb) => self.rigidbody2d_activate(inst, &prefab, d, c, rb),
+                    Component::Collider2D(_) => self.collider2d_awake(inst, &prefab, d, c),
+                    Component::Joint2D(_) => unimplemented!("Joint2D::AwakeFromLoad on GameObject.SetActive(true)"),
+                    Component::Script { .. } => scripts.push((d, c)),
+                    // Transform, SpriteRenderer and the unread classes hold no Physics2D state.
+                    _ => {}
+                }
+            }
+        }
+        scripts.sort_by_key(|&(d, c)| {
+            let Component::Script { execution_order, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
+            (*execution_order, std::cmp::Reverse(inst.objects[d].components[c]))
+        });
+        for &(d, c) in &scripts {
+            let Component::Script { class, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
+            super::link::check_rewritten(class, false);
+            if !inst.objects[d].activated {
+                unimplemented!("{}: GameObject.SetActive(true) on an object whose scripts never ran Awake and Start", prefab.objects[d].name);
+            }
+        }
+        scripts
+    }
+
+    fn activate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, queued: &mut Vec<(usize, usize)>) {
+        inst.objects[o].active = true;
+        for &child in &prefab.objects[o].children {
+            if inst.objects[child].self_active {
+                self.activate_recursively(inst, prefab, child, queued);
+            }
+        }
+        queued.extend((0..prefab.objects[o].components.len()).map(|c| (o, c)));
     }
 
     fn deactivate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, scripts: &mut Vec<(usize, usize)>) {
@@ -535,10 +595,14 @@ impl Game {
             unimplemented!("{}: Rigidbody2D::Cleanup with joints", prefab.objects[o].name);
         }
         // m_Body becomes null: a PhysicalBehaviour's Rigidbody keeps the component's own mass fields.
-        let mass = self.world.body(body).rigidbody;
-        for ph in self.physicals.iter_mut().filter(|ph| ph.rigidbody.body == body && ph.rigidbody.detached.is_none()) {
-            ph.rigidbody.detached = Some(mass);
-            ph.rigidbody.movement.listed = false;
+        let b = self.world.body(body);
+        let (mass, props) = (b.rigidbody, [b.linear_damping, b.angular_damping, b.gravity_scale]);
+        for rb in self.physicals.iter_mut().map(|ph| &mut ph.rigidbody).chain(self.node_rigidbodies.iter_mut().map(|n| &mut n.rigidbody)) {
+            if rb.body == body && rb.detached.is_none() {
+                rb.detached = Some(mass);
+                rb.detached_props = props;
+                rb.movement.listed = false;
+            }
         }
         self.world.destroy_body(body);
         inst.bodies.remove(&o);
@@ -549,12 +613,139 @@ impl Game {
     /// Rigidbody2D::AwakeFromLoad (180c1c8e0) in instantiate mode: Create on an active object without a body.
     fn rigidbody2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData) {
         if inst.objects[o].active && !inst.bodies.contains_key(&o) {
-            self.rigidbody2d_create(inst, prefab, o, c, rb);
+            self.rigidbody2d_create(inst, prefab, o, c, rb, None);
         }
     }
 
+    /// Rigidbody2D::AwakeFromLoad (180c1c8e0) in kActivateAwakeFromLoad mode: Create on an active object without a
+    /// body, from the component's own fields (its owner keeps them while the body is gone) and the owner's Transform;
+    /// the scene's lists get the Rigidbody2D and the nearest ancestor Rigidbody2D drives it.
+    fn rigidbody2d_activate(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData) {
+        if inst.bodies.contains_key(&o) {
+            return;
+        }
+        let Some(owner) = self.rigidbody_owner(inst.objects[o].components[c]) else {
+            unimplemented!("{}: Rigidbody2D re-created without a PhysicalBehaviour or Transform node owner", prefab.objects[o].name);
+        };
+        let mut fields = rb.clone();
+        let r = self.owner_rigidbody(owner);
+        let mass = r.detached.expect("a Rigidbody2D without a body is detached");
+        (fields.body_type, fields.collision_detection, fields.interpolate) = (r.bodyType, r.collisionDetectionMode, r.interpolation);
+        [fields.linear_drag, fields.angular_drag, fields.gravity_scale] = r.detached_props;
+        let pose = self.owner_pose(owner);
+        self.rigidbody2d_create(inst, prefab, o, c, &fields, Some((pose, mass)));
+        let body = inst.bodies[&o];
+        let driven_by = self.rigidbody2d_driven_by(inst, prefab, o, fields.body_type);
+        let r = self.owner_rigidbody_mut(owner);
+        r.body = body;
+        r.detached = None;
+        r.movement.listed = false;
+        self.set_driven_by(owner, driven_by);
+        // AddRigidbodyUpdates: m_RigidbodyHierarchyChanged.
+        self.rigidbody_hierarchy_changed = true;
+    }
+
+    /// The owner of the Rigidbody2D component `id`: its PhysicalBehaviour, or its Transform node's body.
+    pub(super) fn rigidbody_owner(&self, id: i32) -> Option<BodyOwner> {
+        self.physicals
+            .iter()
+            .position(|p| p.rigidbody.component == id)
+            .map(BodyOwner::Physical)
+            .or_else(|| self.node_rigidbodies.iter().position(|n| n.rigidbody.component == id).map(BodyOwner::Node))
+    }
+
+    pub(super) fn owner_rigidbody(&self, o: BodyOwner) -> &Rigidbody {
+        match o {
+            BodyOwner::Physical(p) => &self.physicals[p].rigidbody,
+            BodyOwner::Node(k) => &self.node_rigidbodies[k].rigidbody,
+        }
+    }
+
+    pub(super) fn owner_rigidbody_mut(&mut self, o: BodyOwner) -> &mut Rigidbody {
+        match o {
+            BodyOwner::Physical(p) => &mut self.physicals[p].rigidbody,
+            BodyOwner::Node(k) => &mut self.node_rigidbodies[k].rigidbody,
+        }
+    }
+
+    fn set_driven_by(&mut self, o: BodyOwner, driven_by: Option<BodyId>) {
+        match o {
+            BodyOwner::Physical(p) => self.physicals[p].driven_by = driven_by,
+            BodyOwner::Node(k) => self.node_rigidbodies[k].driven_by = driven_by,
+        }
+    }
+
+    /// Transform.position/rotation of a Rigidbody2D's owner.
+    fn owner_pose(&self, o: BodyOwner) -> ([f32; 3], [f32; 4]) {
+        match o {
+            BodyOwner::Physical(p) => (self.physicals[p].transform.position, self.physicals[p].transform.rotation),
+            BodyOwner::Node(k) => self.node_world(self.node_rigidbodies[k].node),
+        }
+    }
+
+    /// Rigidbody2D::CheckForDrivenByParentRigidbody(null) (180c1dc80): unless static, the nearest ancestor with a
+    /// Rigidbody2D drives it.
+    fn rigidbody2d_driven_by(&self, inst: &Instance, prefab: &Prefab, o: usize, body_type: i32) -> Option<BodyId> {
+        if body_type == 2 {
+            return None;
+        }
+        let mut up = inst.objects[o].parent;
+        while let Some(t) = up {
+            if prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_))) {
+                return Some(*inst.bodies.get(&t).unwrap_or_else(|| unimplemented!("{}: driven by a Rigidbody2D without a body", prefab.objects[o].name)));
+            }
+            up = inst.objects[t].parent;
+        }
+        None
+    }
+
+    /// Rigidbody2D::SetBodyType (180c23120) through the `bodyType` setter (force off) of the Rigidbody2D `owner`
+    /// has on object `o`. The type is stored; a changed type moves the Rigidbody2D in the scene's update lists
+    /// (RemoveRigidbodyUpdates, AddRigidbodyUpdates: the movement list is rebuilt after the next step); a Rigidbody2D
+    /// with a body then has its colliders' contacts flagged and the colliders re-created (RecreateCollider),
+    /// b2Body::SetType, the movement state reset to the body pose, the contacts recalculated and the driving
+    /// ancestor looked up again.
+    pub fn rigidbody2d_set_body_type(&mut self, inst: &mut Instance, owner: BodyOwner, o: usize, body_type: i32) {
+        let prefab = inst.prefab.clone();
+        let rb = self.owner_rigidbody_mut(owner);
+        let old = rb.bodyType;
+        rb.bodyType = body_type;
+        if body_type == old || rb.detached.is_some() {
+            return;
+        }
+        rb.movement.listed = false;
+        let body = rb.body;
+        self.rigidbody_hierarchy_changed = true;
+        // GetAttachedColliders sorts the Collider2D pointers; with one collider the order cannot differ.
+        let mut colliders: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        colliders.sort_unstable();
+        if colliders.len() > 1 {
+            unimplemented!("{}: Rigidbody2D.bodyType with several attached colliders (GetAttachedColliders pointer order)", prefab.objects[o].name);
+        }
+        // FlagAllColliderContactsForRecreate.
+        for &(co, cc) in &colliders {
+            self.world.contacts2d.flag_for_recreate(inst.objects[co].components[cc]);
+        }
+        for &(co, cc) in &colliders {
+            self.collider2d_recreate(inst, &prefab, co, cc);
+        }
+        self.world.set_body_type(body, match body_type {
+            0 => BodyType::Dynamic,
+            1 => BodyType::Kinematic,
+            _ => BodyType::Static,
+        });
+        // RigidbodyMovementState2D: previous and current become the body pose; no interpolation. The linear and
+        // angular move states (MovePosition, MoveRotation) are never set.
+        let m = &mut self.owner_rigidbody_mut(owner).movement;
+        (m.previous, m.current, m.interpolating) = (m.body, m.body, false);
+        self.rigidbody2d_recalculate_contacts(inst, &prefab, body);
+        let driven_by = self.rigidbody2d_driven_by(inst, &prefab, o, body_type);
+        self.set_driven_by(owner, driven_by);
+    }
+
     /// Rigidbody2D::Create (180c1e6b0).
-    fn rigidbody2d_create(&mut self, inst: &mut Instance, _prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData) {
+    /// `restore` is a re-creation after SetActive(true): the owner's pose, and the component's mass fields.
+    fn rigidbody2d_create(&mut self, inst: &mut Instance, _prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData, restore: Option<(([f32; 3], [f32; 4]), RigidbodyMass)>) {
         if rb.constraints & 3 != 0 {
             unimplemented!("Rigidbody2D FreezePositionX/Y (b2BodyDef.fixedPositionX/Y)");
         }
@@ -574,14 +765,14 @@ impl Game {
             active: rb.simulated,
             awake,
             allow_sleep,
-            rigidbody: RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None },
+            rigidbody: restore.map_or(RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None }, |r| r.1),
             user: Some(RigidbodyRef { id: inst.objects[o].components[c], game_object: inst.objects[o].game_object }),
             ..Default::default()
         };
         if inst.objects[o].active {
-            let p = inst.position(o);
+            let (p, q) = restore.map_or_else(|| (inst.position(o), inst.rotation(o)), |r| r.0);
             def.position = V::new(p[0], p[1]);
-            def.angle = body_angle(inst.rotation(o));
+            def.angle = body_angle(q);
         }
         let body = self.world.create_body(&def);
         self.world.reset_mass_data(body);
@@ -673,7 +864,8 @@ impl Game {
             if col.enabled && !col.used_by_effector {
                 self.world.refilter_collider(inst.objects[o].components[c]);
                 if self.world.body(body).kind == BodyType::Static {
-                    unimplemented!("Collider2D::WakeAllBodyContacts on a static Rigidbody2D");
+                    // Collider2D::WakeAllBodyContacts (180c17960).
+                    self.world.wake_contact_bodies(body);
                 }
             }
         }

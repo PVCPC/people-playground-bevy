@@ -377,6 +377,36 @@ mod tests {
         }
     }
 
+    /// Every MonoBehaviour class in the catalog prefabs, with how many items use it (`-- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn catalog_script_classes() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        let mut classes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            for o in &p.objects {
+                for (_, c) in &o.components {
+                    if let Component::Script { class, .. } = c {
+                        let items = classes.entry(class.clone()).or_default();
+                        if items.last() != Some(&p.objects[0].name) {
+                            items.push(p.objects[0].name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        for (class, items) in &classes {
+            println!("CLASS {class} {} | {}", items.len(), items.iter().take(4).cloned().collect::<Vec<_>>().join(", "));
+        }
+    }
+
     /// Rigidbody2Ds on objects without a PhysicalBehaviour, with their scripts and the joints connected to them.
     #[test]
     #[ignore]

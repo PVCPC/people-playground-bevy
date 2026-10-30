@@ -295,6 +295,15 @@ impl DecalDescriptor {
     }
 }
 
+/// JointBreakSoundBehaviour: the joints on its own GameObject, as the break limit keys they sit under.
+#[derive(Clone, Debug)]
+pub struct JointBreakSound {
+    pub joints: Vec<BreakJoint>,
+    pub enabled: bool,
+    /// Clips.Length
+    pub clips: usize,
+}
+
 impl Game {
     /// The arena index of the DecalDescriptor named `name` (a recording writes it with underscores).
     fn decal_descriptor_index(&self, name: &str) -> Option<usize> {
@@ -708,6 +717,18 @@ impl Game {
         }
     }
 
+    /// JointBreakSoundBehaviour.OnJointBreak2D: PlayOneShot or PlayClipOnce of Clips.PickRandom() (audio, the draw
+    /// stays), then OnBreak (audio and particles only, checked at instantiation).
+    pub fn joint_break_sound_on_break(&mut self, j: BreakJoint) {
+        for s in 0..self.joint_break_sounds.len() {
+            let sound = &self.joint_break_sounds[s];
+            if sound.enabled && sound.joints.contains(&j) {
+                let clips = sound.clips;
+                self.pick_random(clips);
+            }
+        }
+    }
+
     /// The Fixed/Slider arena entry for a prefab joint: from here on its break limit is `BreakJoint::Fixed`, in the same
     /// place of the list, and the component setters apply.
     fn adopt_prefab_joint(&mut self, a: &AutofixJoint) -> usize {
@@ -730,7 +751,7 @@ impl Game {
         }
         if let Some(slot) = a.slot {
             self.anchored_joints[slot].joint = None;
-            for k in self.joint_break_limits.iter_mut().filter(|k| **k == BreakJoint::Anchored(slot)) {
+            for k in self.joint_break_limits.iter_mut().chain(self.joint_break_sounds.iter_mut().flat_map(|s| &mut s.joints)).filter(|k| **k == BreakJoint::Anchored(slot)) {
                 *k = BreakJoint::Fixed(f);
             }
         }
@@ -905,6 +926,7 @@ impl Game {
             attached: None,
             parent_person: None,
         });
+        self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
         let s = self.splats.len() - 1;
         let b = self.blood_puffs.len();
         self.blood_puffs.push(BloodPuff { active: true, splat: s, emitter_active, particle_time: 0.0 });

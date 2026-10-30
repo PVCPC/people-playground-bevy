@@ -197,6 +197,44 @@ impl Linker<'_> {
     }
 }
 
+/// A UnityEvent's persistent calls (all but the Off ones run on Invoke) may only reach audio and particle components,
+/// which the rewrite does not simulate.
+fn check_presentation_event(prefab: &Prefab, file: usize, event: &Value, what: &str) {
+    let calls = event.get("m_PersistentCalls").and_then(|c| c.get("m_Calls")).and_then(Value::array).unwrap();
+    for call in calls.iter().filter(|c| c.get("m_CallState").and_then(Value::i64) != Some(0)) {
+        let target = call.get("m_Target").and_then(Value::pptr).unwrap();
+        // AudioSource, the audio filters and reverb zone, ParticleSystem.
+        let presentation = target.file == 0
+            && prefab.index.get(&ObjRef { file, path_id: target.path_id }).is_some_and(|&(o, c)| {
+                c != usize::MAX && matches!(prefab.objects[o].components[c].1, Component::Other(82 | 164..=170 | 198))
+            });
+        if !presentation {
+            unimplemented!("{what}: a persistent call on {target:?}");
+        }
+    }
+}
+
+/// Stops at a MonoBehaviour whose Unity messages (lifecycle.rs) the rewrite does not run: every class with any is
+/// either rewritten or only touches audio, rendering or statistics the rewrite does not simulate.
+pub(super) fn check_rewritten(class: &str, person_root: bool) {
+    match class {
+        "PhysicalBehaviour" | "LimbBehaviour" | "CirculationBehaviour" | "PersonBehaviour" | "SkinMaterialHandler" | "ConnectedNodeBehaviour"
+        | "GoreStringBehaviour" | "GripBehaviour" | "HingeJointLimitAutofixBehaviour" | "MapLightBehaviour" | "MapConfig" | "BoundingBoxBehaviour"
+        | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
+        | "JointBreakSoundBehaviour" => {}
+        // OnChildDisintegrated over a person's limbs (PersonBehaviour.DisintegrationCount).
+        "DisintegrationCounterBehaviour" if person_root => {}
+        // Global.AddAudioSource/RemoveAudioSource, AudioSource.volume, StatManager, SpriteRenderer.color.
+        "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "IncreaseStatOnStart" | "PanelsBehaviour" => {}
+        _ => {
+            let messages = super::lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == class).map_or(&[][..], |(_, m)| *m);
+            if !messages.is_empty() {
+                unimplemented!("{class} ({})", messages.join(", "));
+            }
+        }
+    }
+}
+
 impl Game {
     /// The instance's scripts as arena entries with their serialized fields and links, in prefab order (the
     /// order GetComponentsInChildren lists them, and the queue 0x14 order within one script class). Limb-owned
@@ -281,7 +319,8 @@ impl Game {
                 None if !inst.objects[o].active => (usize::MAX, Some(crate::b2::world::RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None })),
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
-            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached };
+            let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
+            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             let mut driven_by = None;
             if rb.body_type != 2 && detached.is_none() {
@@ -370,7 +409,8 @@ impl Game {
                 None if !p.active => (usize::MAX, Some(crate::b2::world::RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None })),
                 None => unreachable!("an active Rigidbody2D without a body"),
             };
-            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached };
+            let component = inst.objects[o].components[prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).unwrap()];
+            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached, component, detached_props: [rb.linear_drag, rb.angular_drag, rb.gravity_scale] };
             // Rigidbody2D::Create set the scene's m_RigidbodyHierarchyChanged.
             self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             p.transform = pose(inst, o);
@@ -752,7 +792,8 @@ impl Game {
             if !inst.objects[o].active {
                 continue;
             }
-            let Component::Script { class, enabled, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            let Component::Script { class, enabled, execution_order, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            check_rewritten(class, linked.person.is_some() && o == 0);
             if *enabled {
                 enabled_behaviours.insert((o, c));
             }
@@ -791,9 +832,49 @@ impl Game {
                 "WaterBehaviour" => self.water_awake(linked.waters[&o]),
                 "LimbBehaviour" => self.limb_awake(limb()),
                 "CirculationBehaviour" => self.circulation_awake(limb()),
+                // Registered with its object: OnJointBreak2D for the joints on its own GameObject (SendMessage reaches no
+                // other) and the break limit key each sits under.
+                "JointBreakSoundBehaviour" => {
+                    let Component::Script { fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+                    let file = prefab.objects[o].game_object.file;
+                    let local = |p: PPtr| {
+                        assert_eq!(p.file, 0, "JointBreakSoundBehaviour: a reference outside its prefab");
+                        (!p.is_null()).then(|| prefab.index[&ObjRef { file, path_id: p.path_id }])
+                    };
+                    let joints = v.get("Joints").and_then(Value::array).unwrap().iter().filter_map(|j| local(j.pptr().unwrap())).filter(|&(jo, _)| jo == o);
+                    let joints = joints.filter_map(|k| self.break_joint_key(inst, k)).collect();
+                    check_presentation_event(prefab, file, v.get("OnBreak").unwrap(), "JointBreakSoundBehaviour.OnBreak");
+                    self.joint_break_sounds.push(super::misc::JointBreakSound {
+                        joints,
+                        enabled: *enabled,
+                        clips: v.get("Clips").and_then(Value::array).map_or(0, <[_]>::len),
+                    });
+                }
                 _ => {}
             }
+            // Behaviour::AddToManager after Awake, for an enabled one.
+            let behaviour = match class.as_str() {
+                "PersonBehaviour" => Some(Behaviour::Person(linked.person.unwrap())),
+                "CirculationBehaviour" => Some(Behaviour::Circulation(limb())),
+                "SkinMaterialHandler" => Some(Behaviour::Skin(limb())),
+                "GripBehaviour" => Some(Behaviour::Grip(self.limbs[limb()].GripBehaviour.unwrap())),
+                "GoreStringBehaviour" => Some(Behaviour::GoreString(limb())),
+                "GForceMeasureBehaviour" => Some(Behaviour::GForce(limb())),
+                _ => None,
+            };
+            if let (Some(b), true) = (behaviour, *enabled) {
+                self.behaviours.add(*execution_order, b);
+            }
         }
+    }
+
+    /// The m_JointBreakLimits key of a created prefab joint (`Game::hinges` took a linked hinge's slot over).
+    fn break_joint_key(&self, inst: &Instance, k: (usize, usize)) -> Option<BreakJoint> {
+        let slot = inst.hinges.get(&k).and_then(|s| s.slot).or_else(|| inst.anchored.get(&k).and_then(|s| s.slot))?;
+        Some(match self.anchored_joints[slot].hinge {
+            Some(h) => BreakJoint::Hinge(h),
+            None => BreakJoint::Anchored(slot),
+        })
     }
 
     /// `host.GetComponentsInChildren<HingeJoint2D>()`, `<SliderJoint2D>()` and `<FixedJoint2D>()`: the host and its active

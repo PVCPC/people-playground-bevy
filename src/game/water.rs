@@ -1,7 +1,7 @@
 //! WaterBehaviour and WaterBehaviourManager: the water volumes (their trigger collider, buoyancy and drag on
 //! every physical object, the temperature states) and the IsUnderWater flag they keep.
 use super::misc::{ObjectPool, PendingStart, SlotSet};
-use super::{d, mathf, script, Game};
+use super::{d, mathf, script, BodyOwner, Game};
 use crate::assets::db::{AssetDb, Component, ObjRef, Prefab};
 use crate::assets::mono::Value;
 use std::collections::HashMap;
@@ -312,12 +312,38 @@ impl Game {
         r
     }
 
+    /// Runs `f` on the clone that holds the component `id` (still unsynced, or retained by the sync), with the
+    /// index of its object.
+    fn with_component_instance<R>(&mut self, id: i32, f: impl FnOnce(&mut Game, &mut super::spawn::Instance, usize) -> R) -> R {
+        let owns = |i: &super::spawn::Instance| i.objects.iter().any(|x| x.components.contains(&id));
+        let (list, i) = match self.unsynced.iter().position(owns) {
+            Some(i) => (true, i),
+            None => (false, self.retained.iter().position(owns).unwrap_or_else(|| unimplemented!("component {id}: no clone kept for it"))),
+        };
+        let mut inst = if list { self.unsynced.remove(i) } else { self.retained.remove(i) };
+        let o = inst.objects.iter().position(|x| x.components.contains(&id)).unwrap();
+        let r = f(self, &mut inst, o);
+        if list { self.unsynced.insert(i, inst) } else { self.retained.insert(i, inst) }
+        r
+    }
+
     /// GameObject.SetActive on one of the water's prefab objects. SetActive(true) of an active object does nothing.
     fn water_set_active(&mut self, w: usize, o: usize, active: bool) {
         self.with_water_instance(w, |g, inst| {
             if active {
-                if !inst.objects[o].active {
-                    g.set_active(inst, o, true);
+                let prefab = inst.prefab.clone();
+                for (d, k) in g.set_active(inst, o, true) {
+                    let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+                    let id = inst.objects[d].components[k];
+                    match class.as_str() {
+                        "PhysicalBehaviour" => {
+                            let p = g.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
+                            g.physicals[p].active = true;
+                        }
+                        // No OnEnable.
+                        "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" => {}
+                        _ => unimplemented!("{class}.OnEnable"),
+                    }
                 }
                 return;
             }
@@ -378,7 +404,16 @@ impl Game {
 
     /// Rigidbody2D.bodyType = t (0 Dynamic, 2 Static).
     fn rigidbody_set_body_type(&mut self, p: usize, body_type: i32) {
-        unimplemented!("{}: Rigidbody2D.bodyType = {body_type} (Rigidbody2D::SetBodyType: b2Body::SetType's body-list move and contact destruction, FlagAllColliderContactsForRecreate, RecalculateContacts, CheckForDrivenByParentRigidbody)", self.physicals[p].name);
+        let rb = &mut self.physicals[p].rigidbody;
+        if rb.detached.is_some() {
+            rb.bodyType = body_type;
+            return;
+        }
+        let component = rb.component;
+        if component == 0 {
+            unimplemented!("{}: Rigidbody2D.bodyType of a recorded body (no clone)", self.physicals[p].name);
+        }
+        self.with_component_instance(component, |g, inst, o| g.rigidbody2d_set_body_type(inst, BodyOwner::Physical(p), o, body_type));
     }
 
     /// physical.gameObject.AddComponent<FrozenInIceBehaviour>(): its Awake takes the SkinMaterialHandler's ShouldRot.

@@ -848,6 +848,49 @@ impl World {
         }
     }
 
+    /// b2Body::SetType (180bba4c0): the body moves between the world's static and non-static arrays (Unity's swap
+    /// removal), the mass is reset, a static body stops, and every contact goes, with its fixtures' proxies touched.
+    pub fn set_body_type(&mut self, id: BodyId, kind: BodyType) {
+        let old = self.body(id).kind;
+        if old == kind {
+            return;
+        }
+        let swap_to = |from: &mut Vec<BodyId>, to: &mut Vec<BodyId>| {
+            let at = from.iter().position(|&b| b == id).unwrap();
+            from.swap_remove(at);
+            to.push(id);
+        };
+        if old == BodyType::Static {
+            swap_to(&mut self.static_bodies, &mut self.non_static_bodies);
+        }
+        self.body_mut(id).kind = kind;
+        self.reset_mass_data(id);
+        if kind == BodyType::Static {
+            let b = self.body_mut(id);
+            b.linear_velocity = Vec2::ZERO;
+            b.angular_velocity = 0.0;
+            b.sweep.c0 = b.sweep.c;
+            b.sweep.a0 = b.sweep.a;
+            self.synchronize_fixtures(id);
+            swap_to(&mut self.non_static_bodies, &mut self.static_bodies);
+            self.body_mut(id).flags &= !BODY_AWAKE;
+        } else {
+            self.body_mut(id).flags |= BODY_AWAKE;
+        }
+        let b = self.body_mut(id);
+        b.sleep_time = 0.0;
+        b.force = Vec2::ZERO;
+        b.torque = 0.0;
+        for (_, c) in self.body(id).contacts.clone().into_iter().rev() {
+            self.destroy_contact(c);
+        }
+        for &f in self.body(id).fixtures.clone().iter().rev() {
+            for &(_, proxy) in &self.fixtures[f].as_ref().unwrap().proxies {
+                self.broad_phase.touch_proxy(proxy);
+            }
+        }
+    }
+
     /// Collider2D::RecreateCollider's first pass (180c14750): both bodies of each of the body's contacts without
     /// the 0x40 flag are woken.
     pub fn wake_contact_bodies(&mut self, id: BodyId) {
