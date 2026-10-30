@@ -469,7 +469,7 @@ impl Game {
                 limits: [f(limits[1]), f(limits[2])],
                 breakForce: f(r.req("breakForce")?),
                 breakTorque: f(r.req("breakTorque")?),
-                connected,
+                connected: Some(limb_bodies[connected]),
                 anchor: [0.0; 2],
                 connectedAnchor: [0.0; 2],
                 enabled: r.req("enabled")? == "1",

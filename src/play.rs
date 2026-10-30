@@ -218,7 +218,9 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
 
 /// A physical object's own sprite (the limbs use the rig's).
 #[derive(Component)]
-struct ObjectSprite(usize);
+/// The physical, and the scale from the sprite's units to the world (sliced and tiled sprites are laid out in
+/// pixels so their borders keep their texel size).
+struct ObjectSprite(usize, f32);
 
 /// A sprite from the game's data for each non-limb physical object without one; textures decoded once.
 fn object_sprites(
@@ -271,10 +273,24 @@ fn object_sprites(
         sprite.rect = Some(Rect::new(x, height - y - h, x + w, height - y));
         sprite.custom_size = Some(Vec2::new(w, h) / s.pixels_to_units);
         sprite.color = Color::srgba(color[0], color[1], color[2], color[3]);
+        let ([flip_x, flip_y], draw_mode, size) = g.physicals[p].sprite_draw;
+        (sprite.flip_x, sprite.flip_y) = (flip_x, flip_y);
         let pivot = Vec2::from_array(s.pivot) * Vec2::new(s.rect[2], s.rect[3]) - Vec2::from_array(s.texture_rect_offset);
-        let anchor = Anchor(pivot / Vec2::new(w, h) - Vec2::splat(0.5));
+        let mut anchor = Anchor(pivot / Vec2::new(w, h) - Vec2::splat(0.5));
+        let mut scale = 1.0;
+        if draw_mode != 0 {
+            // Unity's border is left, bottom, right, top in pixels; Bevy's insets run from the top left.
+            let [l, b, r, t] = s.border;
+            let border = bevy::sprite::BorderRect { min_inset: Vec2::new(l, t), max_inset: Vec2::new(r, b) };
+            // ponytail: Tiled draws as Continuous tiling; Adaptive (SpriteTileMode) would stretch below its threshold.
+            let mode = if draw_mode == 1 { bevy::sprite::SliceScaleMode::Stretch } else { bevy::sprite::SliceScaleMode::Tile { stretch_value: 1.0 } };
+            sprite.image_mode = bevy::sprite::SpriteImageMode::Sliced(bevy::sprite::TextureSlicer { border, center_scale_mode: mode, sides_scale_mode: mode, max_corner_scale: 1.0 });
+            sprite.custom_size = Some(Vec2::from_array(size) * s.pixels_to_units);
+            anchor = Anchor(Vec2::from_array(s.pivot) - Vec2::splat(0.5));
+            scale = 1.0 / s.pixels_to_units;
+        }
         // ponytail: sorting order only; sorting layers (TagManager order) when two layers overlap wrongly.
-        commands.spawn((ObjectSprite(p), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+        commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
     }
     *done = g.physicals.len();
 }
@@ -313,13 +329,13 @@ fn draw(
             .with_scale(Vec3::new(sx * p.transform.localScale[0], sy * p.transform.localScale[1], 1.0));
         *visibility = if p.active { Visibility::Inherited } else { Visibility::Hidden };
     }
-    for (&ObjectSprite(p), mut transform, mut visibility) in &mut objects {
+    for (&ObjectSprite(p, k), mut transform, mut visibility) in &mut objects {
         let p = &g.physicals[p];
         let [x, y, _] = p.transform.position;
         let [qx, qy, qz, qw] = p.transform.rotation;
         let s = p.transform.localScale;
         let z = transform.translation.z;
-        *transform = Transform::from_xyz(x, y, z).with_rotation(Quat::from_xyzw(qx, qy, qz, qw)).with_scale(Vec3::new(s[0], s[1], 1.0));
+        *transform = Transform::from_xyz(x, y, z).with_rotation(Quat::from_xyzw(qx, qy, qz, qw)).with_scale(Vec3::new(s[0] * k, s[1] * k, 1.0));
         *visibility = if p.active && !p.isDisintegrated { Visibility::Inherited } else { Visibility::Hidden };
     }
     // Everything else (sprite-less map parts and props) as collider outlines.
@@ -346,6 +362,14 @@ fn draw(
                 }
                 Shape::Chain(c) => {
                     gizmos.linestrip_2d(c.vertices.iter().map(|&v| world(v)), color);
+                }
+                Shape::Capsule(c) => {
+                    let [a, b] = c.vertices.map(world);
+                    gizmos.circle_2d(a, c.radius, color);
+                    gizmos.circle_2d(b, c.radius, color);
+                    let n = (b - a).normalize_or_zero().perp() * c.radius;
+                    gizmos.line_2d(a + n, b + n, color);
+                    gizmos.line_2d(a - n, b - n, color);
                 }
             }
         }

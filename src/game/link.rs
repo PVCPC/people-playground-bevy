@@ -5,10 +5,10 @@
 
 use super::circulation::Circulation;
 use super::limb::{GoreString, Limb};
-use super::misc::{GForce, Grip, Node, Skin};
+use super::misc::{AutofixJoint, AutofixJoints, GForce, Grip, Node, Skin};
 use super::person::{LimbPose, Person, RagdollPose};
 use super::physical::{Physical, PhysicalProperties, SharpAxis};
-use super::spawn::{load_values, Instance};
+use super::spawn::{anchored_initial_state, joint_connected_object, load_values, Instance};
 use super::*;
 use crate::assets::classes::PPtr;
 use crate::assets::components::{JointKind, PhysicsMaterial2D, Sprite};
@@ -39,6 +39,8 @@ pub struct Linked {
     pub limbs: HashMap<usize, usize>,
     pub nodes: HashMap<usize, usize>,
     pub physicals: HashMap<usize, usize>,
+    /// Game::hinges index by (object, component).
+    pub hinges: HashMap<(usize, usize), usize>,
     pub map_lights: HashMap<usize, usize>,
     /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
     pub parent_audio: Option<usize>,
@@ -121,6 +123,31 @@ fn sprite_bounds(s: &Sprite) -> ([f32; 3], [f32; 3]) {
     ([ex - s.pivot[0] * w, ey - s.pivot[1] * h, 0.0], [ex, ey, 0.1])
 }
 
+/// SpriteRenderer::GetSpriteBounds (1806e6840): Simple takes the sprite's bounds, mirrored by the flips
+/// (Sprite::GetBounds negates the corners); Sliced and Tiled the renderer's size around the pivot, the flips as
+/// signs, encapsulated from an empty AABB with z -0.1 and 0.1.
+fn renderer_bounds(s: &Sprite, r: &crate::assets::components::SpriteRenderer) -> ([f32; 3], [f32; 3]) {
+    if r.draw_mode == 0 {
+        let (mut c, e) = sprite_bounds(s);
+        if r.flip_x {
+            c[0] = -c[0];
+        }
+        if r.flip_y {
+            c[1] = -c[1];
+        }
+        return (c, e);
+    }
+    let sign = |flip: bool| if flip { -1.0f32 } else { 1.0 };
+    let corner = |size: f32, pivot: f32, f: f32| {
+        let below = size * pivot * f;
+        (size * f - below, -below)
+    };
+    let (hx, lx) = corner(r.size[0], s.pivot[0], sign(r.flip_x));
+    let (hy, ly) = corner(r.size[1], s.pivot[1], sign(r.flip_y));
+    let (min, max) = ([hx.min(lx), hy.min(ly), -0.1f32], [hx.max(lx), hy.max(ly), 0.1f32]);
+    (std::array::from_fn(|i| (min[i] + max[i]) * 0.5), std::array::from_fn(|i| (max[i] - min[i]) * 0.5))
+}
+
 struct Linker<'a> {
     prefab: &'a Prefab,
     inst: &'a Instance,
@@ -177,9 +204,10 @@ impl Game {
         let n = prefab.objects.len();
         let person = script(prefab, 0, "PersonBehaviour").map(|_| self.people.len());
 
-        // TransformChain: each body's parents up to the root, the first body to reach one listing it.
+        // TransformChain: each Rigidbody2D's parents up to the root (an inactive one's too: it has no body yet), the
+        // first to reach one listing it.
         let mut body_parents = std::collections::BTreeSet::new();
-        for o in (0..n).filter(|o| inst.bodies.contains_key(o)) {
+        for o in (0..n).filter(|&o| prefab.objects[o].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_)))) {
             let mut p = inst.objects[o].parent;
             while let Some(t) = p {
                 // A static body never moves in the simulation, so its Transform serves as a plain node (the
@@ -259,14 +287,22 @@ impl Game {
                 Some(asset) => self.physical_properties(db, asset)?,
                 None => unimplemented!("{}: PhysicalBehaviour without Properties", p.name),
             };
-            let body = *inst.bodies.get(&o).ok_or_else(|| format!("{}: PhysicalBehaviour without a Rigidbody2D", p.name))?;
-            let Some(Component::Rigidbody2D(rb)) = prefab.objects[o].components.iter().map(|(_, x)| x).find(|x| matches!(x, Component::Rigidbody2D(_))) else { unreachable!() };
-            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached: None };
+            let Some(Component::Rigidbody2D(rb)) = prefab.objects[o].components.iter().map(|(_, x)| x).find(|x| matches!(x, Component::Rigidbody2D(_))) else {
+                return Err(format!("{}: PhysicalBehaviour without a Rigidbody2D", p.name));
+            };
+            // An inactive object's Rigidbody2D has no body (m_Body null) until it is activated.
+            let (body, detached) = match inst.bodies.get(&o) {
+                Some(&body) => (body, None),
+                None if !p.active => (usize::MAX, Some(crate::b2::world::RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None })),
+                None => unreachable!("an active Rigidbody2D without a body"),
+            };
+            p.rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached };
             // Rigidbody2D::Create set the scene's m_RigidbodyHierarchyChanged.
-            self.rigidbody_hierarchy_changed |= rb.body_type != 2;
+            self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
             p.transform = pose(inst, o);
             p.parent = inst.objects[o].parent.map(|t| l.arenas.node[&t]);
-            if rb.body_type != 2 {
+            // Rigidbody2D::Create's CheckForDrivenByParentRigidbody.
+            if rb.body_type != 2 && detached.is_none() {
                 let mut up = inst.objects[o].parent;
                 while let Some(t) = up {
                     if prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_))) {
@@ -292,12 +328,10 @@ impl Game {
                 _ => None,
             });
             if let Some(r) = renderer {
-                if r.draw_mode != 0 || r.flip_x || r.flip_y {
-                    unimplemented!("{}: a sliced, tiled or flipped sprite", p.name);
-                }
                 let sprite = db.resolve(file, r.sprite).ok_or("a SpriteRenderer without a sprite")?;
-                p.sprite_bounds = Some(sprite_bounds(&Sprite::read(db.data(sprite))?));
+                p.sprite_bounds = Some(renderer_bounds(&Sprite::read(db.data(sprite))?, r));
                 p.sprite = Some((sprite, r.color, r.sorting_order));
+                p.sprite_draw = ([r.flip_x, r.flip_y], r.draw_mode, r.size);
             }
             self.physicals.push(p);
         }
@@ -306,7 +340,7 @@ impl Game {
             for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
                 let Component::Joint2D(j) = comp else { continue };
                 let JointKind::Hinge { use_motor, motor_speed, max_motor_torque, use_limits, lower, upper } = j.kind else { continue };
-                let connected = l.object_of(j.connected_body)?.ok_or("an unconnected hinge")?;
+                let connected = l.object_of(j.connected_body)?;
                 let h = Hinge {
                     joint: inst.joints.get(&(o, c)).copied(),
                     useMotor: use_motor,
@@ -315,14 +349,20 @@ impl Game {
                     limits: [lower, upper],
                     breakForce: j.break_force,
                     breakTorque: j.break_torque,
-                    connected: *l.arenas.limb.get(&connected).ok_or("a hinge to a body without a LimbBehaviour")?,
+                    connected: connected.map(|b| inst.bodies.get(&b).copied().ok_or("a hinge to an object without a Rigidbody2D")).transpose()?,
                     anchor: j.anchor,
                     connectedAnchor: inst.hinges.get(&(o, c)).map_or(j.connected_anchor, |s| s.connected_anchor),
                     enabled: j.enabled,
                     destroyed: false,
                 };
-                if h.breakForce != f32::INFINITY || h.breakTorque != f32::INFINITY {
-                    unimplemented!("PhysicsScene2D m_JointBreakLimits order for a spawned hinge with a finite break limit");
+                // The create put the joint in m_JointBreakLimits as BreakJoint::Anchored(slot): it becomes Hinge(h), in place.
+                if let Some(slot) = inst.hinges.get(&(o, c)).and_then(|s| s.slot) {
+                    let anchored = BreakJoint::Anchored(slot);
+                    for k in self.joint_break_limits.iter_mut().filter(|k| **k == anchored) {
+                        *k = BreakJoint::Hinge(self.hinges.len());
+                    }
+                    self.anchored_joints[slot].joint = None;
+                    self.anchored_joints[slot].hinge = Some(self.hinges.len());
                 }
                 self.hinges.push(h);
             }
@@ -492,7 +532,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, map_lights, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -652,6 +692,47 @@ impl Game {
         }
     }
 
+    /// `host.GetComponentsInChildren<HingeJoint2D>()`, `<SliderJoint2D>()` and `<FixedJoint2D>()`: the host and its active
+    /// descendants, depth first, each object's components in order (disabled components included).
+    fn autofix_components(&self, prefab: &Prefab, inst: &Instance, linked: &Linked, host: usize) -> AutofixJoints {
+        let mut out = AutofixJoints::default();
+        let physical = |o: usize| {
+            linked.physicals.get(&o).copied().unwrap_or_else(|| unimplemented!("{}: the Rigidbody2D of a SliderJoint2D or FixedJoint2D below a HingeJointLimitAutofixBehaviour without a PhysicalBehaviour (the FixedJoint arena only knows physicals)", prefab.objects[o].name))
+        };
+        let mut stack = vec![host];
+        while let Some(o) = stack.pop() {
+            if !inst.objects[o].active {
+                continue;
+            }
+            stack.extend(prefab.objects[o].children.iter().rev());
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                let Component::Joint2D(j) = comp else { continue };
+                let list = match j.kind {
+                    JointKind::Hinge { .. } => {
+                        out.hinges.push(linked.hinges[&(o, c)]);
+                        continue;
+                    }
+                    JointKind::Slider { .. } => &mut out.sliders,
+                    JointKind::Fixed { .. } => &mut out.fixeds,
+                    _ => continue,
+                };
+                let state = inst.anchored.get(&(o, c)).cloned().unwrap_or_else(|| anchored_initial_state(j));
+                list.push(AutofixJoint {
+                    object: o,
+                    component: c,
+                    state: state.base,
+                    slider: state.slider,
+                    joint: inst.joints.get(&(o, c)).copied(),
+                    slot: state.slot,
+                    attached: physical(o),
+                    connected: joint_connected_object(prefab, o, c, j).map(physical),
+                    enabled: j.enabled,
+                });
+            }
+        }
+        out
+    }
+
     /// Queues the Start of each behaviour in `order` (`run_pending_starts`, or PersonBehaviour's before its first
     /// LateUpdate). Each PhysicalBehaviour's `hash_code` must be set by then: Random.InitState(GetHashCode()) takes
     /// Mono's object hash. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts only
@@ -669,13 +750,18 @@ impl Game {
                 "PersonBehaviour" => PendingStart::Person(linked.person.unwrap()),
                 "HingeJointLimitAutofixBehaviour" => match linked.person {
                     Some(p) => PendingStart::HingeJointLimitAutofix(p),
-                    // Without a limited hinge or slider, or a FixedJoint2D, below it neither a flip nor Start touches anything.
-                    None if !prefab.objects.iter().flat_map(|ob| &ob.components).any(|(_, c)| {
-                        matches!(c, Component::Joint2D(j) if matches!(j.kind, JointKind::Hinge { use_limits: true, .. } | JointKind::Slider { use_limits: true, .. } | JointKind::Fixed { .. }))
-                    }) => continue,
-                    None => PendingStart::HingeJointLimitAutofixItem(linked.physicals.get(&o).copied().ok_or_else(|| {
-                        *linked.nodes.get(&o).unwrap_or_else(|| unimplemented!("HingeJointLimitAutofixBehaviour on an object that is neither physical nor a Transform node"))
-                    })),
+                    None => {
+                        let joints = self.autofix_components(prefab, inst, linked, o);
+                        // Without a limited hinge or slider, or a FixedJoint2D, below it neither a flip nor Start touches anything.
+                        if !joints.hinges.iter().any(|&h| self.hinges[h].useLimits) && !joints.sliders.iter().any(|j| j.slider.as_ref().unwrap().use_limits) && joints.fixeds.is_empty() {
+                            continue;
+                        }
+                        let host = linked.physicals.get(&o).copied().ok_or_else(|| {
+                            *linked.nodes.get(&o).unwrap_or_else(|| unimplemented!("HingeJointLimitAutofixBehaviour on an object that is neither physical nor a Transform node"))
+                        });
+                        self.autofix_joints.push(joints);
+                        PendingStart::HingeJointLimitAutofixItem(host, self.autofix_joints.len() - 1)
+                    }
                 },
                 "CirculationBehaviour" => PendingStart::Circulation(limb()),
                 "PhysicalBehaviour" => PendingStart::Physical(linked.physicals[&o]),
@@ -898,8 +984,8 @@ mod tests {
         }
         check("hinge count".into(), want.hinges.len().to_string(), g.hinges.len().to_string());
         for (h, (a, b)) in want.hinges.iter().zip(&g.hinges).enumerate() {
-            let show = |x: &Hinge| format!("{} {:?} {} {:?} {} {} {} {}", x.useMotor, x.motor, x.useLimits, x.limits, x.breakForce, x.breakTorque, x.connected, x.enabled);
-            check(format!("hinge {h}"), show(a), show(b));
+            let show = |gm: &Game, x: &Hinge| format!("{} {:?} {} {:?} {} {} {:?} {}", x.useMotor, x.motor, x.useLimits, x.limits, x.breakForce, x.breakTorque, x.connected.map(|c| gm.limb_of_body(c)), x.enabled);
+            check(format!("hinge {h}"), show(&want, a), show(&g, b));
         }
         check("grip count".into(), want.grips.len().to_string(), g.grips.len().to_string());
         for (k, (a, b)) in want.grips.iter().zip(&g.grips).enumerate() {

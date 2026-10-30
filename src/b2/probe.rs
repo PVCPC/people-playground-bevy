@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 const SET: u32 = 0xbb4b90;
 const COMPUTE_MASS: u32 = 0xbb35a0;
+const CAPSULE_COMPUTE_MASS: u32 = 0xbb3390;
+const CAPSULE_COMPUTE_AABB: u32 = 0xbb2910;
+const CAPSULE_TEST_POINT: u32 = 0xbb5d40;
+const SET_AS_EDGE: u32 = 0xbb59e0;
 const COLLIDE_CIRCLES: u32 = 0xbaeff0;
 const COLLIDE_POLYGON_AND_CIRCLE: u32 = 0xbaf500;
 const COLLIDE_POLYGONS: u32 = 0xbaf8f0;
@@ -769,8 +773,60 @@ fn compare_curve(executable: &std::path::Path) -> Result<(), String> {
     report("AnimationCurve.Evaluate", mismatches, expected.len(), first)
 }
 
+fn capsule_bytes(capsule: &Capsule) -> Vec<u8> {
+    let mut b = vec![0; 0x20];
+    put(&mut b, 8, 4);
+    put(&mut b, 0xc, capsule.radius.to_bits());
+    put_vec(&mut b, 0x10, capsule.vertices[0]);
+    put_vec(&mut b, 0x18, capsule.vertices[1]);
+    b
+}
+
+/// b2CapsuleShape ComputeMass / ComputeAABB / TestPoint and b2PolygonShape::SetAsEdge (the capsule contacts' segment).
+fn compare_capsules(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_0ca9);
+    let mut cases = Vec::new();
+    let mut calls = Vec::new();
+    for i in 0..4096 {
+        let v1 = random.vec(0.8);
+        let v2 = if i % 7 == 0 { v1 + Vec2::new(0.0001, 0.0) } else { random.vec(0.8) };
+        let capsule = Capsule { radius: random.range(0.003, 0.5), vertices: [v1, v2] };
+        let xf = random_transform(&mut random, 0.6);
+        let p = random.vec(1.2);
+        let density = random.range(0.1, 3.0);
+        calls.push(call(CAPSULE_COMPUTE_MASS, vec![capsule_bytes(&capsule), vec![0; 20]], &["b0", "b1", &format!("f{}", density.to_bits())]));
+        calls.push(call(CAPSULE_COMPUTE_AABB, vec![capsule_bytes(&capsule), vec![0; 16], transform_bytes(&xf)], &["b0", "b1", "b2", "i0", "i1"]));
+        let mut pb = vec![0; 8];
+        put_vec(&mut pb, 0, p);
+        calls.push(call(CAPSULE_TEST_POINT, vec![capsule_bytes(&capsule), transform_bytes(&xf), pb], &["b0", "b1", "b2"]));
+        let (mut a, mut b) = (vec![0; 8], vec![0; 8]);
+        put_vec(&mut a, 0, v1);
+        put_vec(&mut b, 0, v2);
+        calls.push(call(SET_AS_EDGE, vec![vec![0; 160], a, b], &["b0", "b1", "b2"]));
+        cases.push((capsule, xf, p, density));
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, (capsule, xf, p, density)) in cases.iter().enumerate() {
+        let r = &replies[4 * i..4 * i + 4];
+        let m = capsule.compute_mass(*density);
+        let mass = ([m.mass, m.center.x, m.center.y, m.inertia, m.area].map(f32::to_bits), [0, 4, 8, 12, 16].map(|o| get(&unhex(&r[0].buffers[1]), o)));
+        let a = capsule.compute_aabb(xf);
+        let aabb = ([a.lower.x, a.lower.y, a.upper.x, a.upper.y].map(f32::to_bits), [0, 4, 8, 12].map(|o| get(&unhex(&r[1].buffers[1]), o)));
+        let inside = (capsule.test_point(xf, *p), r[2].ret & 0xff != 0);
+        let segment = (polygon_bits(&Polygon::segment(capsule.vertices[0], capsule.vertices[1], 0.0)), polygon_bits(&read_polygon(&unhex(&r[3].buffers[0]))));
+        if mass.0 != mass.1 || aabb.0 != aabb.1 || inside.0 != inside.1 || segment.0 != segment.1 {
+            bad += 1;
+            first.get_or_insert_with(|| format!("case {i} {capsule:?}: mass {:x?}/{:x?} aabb {:x?}/{:x?} point {:?} segment {:x?}/{:x?}", mass.1, mass.0, aabb.1, aabb.0, inside, segment.1, segment.0));
+        }
+    }
+    report("CAPSULE", bad, cases.len(), first)
+}
+
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
+    compare_capsules(executable)?;
     compare_manifolds(executable)?;
     compare_edge_manifolds(executable)?;
     compare_solver(executable)?;

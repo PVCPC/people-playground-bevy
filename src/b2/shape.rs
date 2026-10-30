@@ -29,6 +29,113 @@ pub struct Edge {
     pub has_v3: bool,
 }
 
+/// Unity's b2CapsuleShape (type 4): a segment rounded by `radius`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Capsule {
+    pub radius: f32,
+    pub vertices: [Vec2; 2],
+}
+
+impl Capsule {
+    /// b2CapsuleShape::ComputeMass (180bb3390): the end circles plus the rectangle between them.
+    pub fn compute_mass(&self, density: f32) -> MassData {
+        let [v1, v2] = self.vertices;
+        let (dx, dy) = (v2.x - v1.x, v2.y - v1.y);
+        let length = (dx * dx + dy * dy).sqrt();
+        let r = self.radius;
+        let circle_area = r * std::f32::consts::PI * r;
+        let rect_area = r * length + r * length;
+        let length_sq = length * length;
+        let (circle_mass, rect_mass) = (circle_area * density, rect_area * density);
+        let mass = circle_mass + rect_mass;
+        let center = Vec2::new((v1.x + v2.x) * 0.5, (v1.y + v2.y) * 0.5);
+        let inertia = circle_mass * (r * 0.5 * r + length_sq * 0.25) + (r * r + length_sq) * rect_mass / 12.0 + (center.x * center.x + center.y * center.y) * mass;
+        MassData { mass, center, inertia, area: circle_area + rect_area }
+    }
+
+    /// b2CapsuleShape::ComputeAABB (180bb2910): the ends through `xf`, widened by the whole radius.
+    pub fn compute_aabb(&self, xf: &super::math::Transform) -> super::broadphase::Aabb {
+        let (a, b) = (xf.apply(self.vertices[0]), xf.apply(self.vertices[1]));
+        let r = self.radius;
+        let lower = Vec2::new(if a.x < b.x { a.x } else { b.x }, if a.y < b.y { a.y } else { b.y });
+        let upper = Vec2::new(if a.x > b.x { a.x } else { b.x }, if a.y > b.y { a.y } else { b.y });
+        super::broadphase::Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(r + upper.x, r + upper.y) }
+    }
+
+    /// b2CapsuleShape::TestPoint (180bb5d40): within the radius of the segment.
+    pub fn test_point(&self, xf: &super::math::Transform, p: Vec2) -> bool {
+        let (dx, dy) = (p.x - xf.p.x, p.y - xf.p.y);
+        let (c, s) = (xf.q.c, xf.q.s);
+        let local = Vec2::new(c * dx + s * dy, c * dy - s * dx);
+        let near = nearest_point_on_segment(local, self.vertices[0], self.vertices[1]);
+        let (nx, ny) = (near.x - local.x, near.y - local.y);
+        self.radius * self.radius >= nx * nx + ny * ny
+    }
+
+    /// The rounded segment the capsule contacts collide as (b2PolygonShape::SetAsEdge with the capsule's radius).
+    pub fn segment(&self) -> Polygon {
+        Polygon::segment(self.vertices[0], self.vertices[1], self.radius)
+    }
+
+    /// The capsule as a lone edge (b2EdgeShape::Set, 180bb4b70: no neighbours).
+    pub fn edge(&self) -> Edge {
+        Edge { radius: self.radius, v1: self.vertices[0], v2: self.vertices[1], ..Edge::default() }
+    }
+}
+
+/// b2NearestPointOnLineSegment (180bb1780).
+pub fn nearest_point_on_segment(p: Vec2, a: Vec2, b: Vec2) -> Vec2 {
+    let (ex, ey) = (b.x - a.x, b.y - a.y);
+    let len2 = ex * ex + ey * ey;
+    if f32::from_bits(0x28800000) > len2 {
+        return a;
+    }
+    let t = (ex * (p.x - a.x) + ey * (p.y - a.y)) / len2;
+    let t = if t < 1.0 { t } else { 1.0 };
+    let t = if 0.0 > t { 0.0 } else { t };
+    Vec2::new(a.x + ex * t, a.y + ey * t)
+}
+
+/// CapsuleCollider2D::PrepareShapes (180c215f0): the box's side midpoints (offset +- half size) through the
+/// collider matrix (z = 0) give the world width and height and their directions; the radius is half the width
+/// (Vertical, 0) or height (Horizontal), the end caps that far in from the ends along the length, or 0.0001 apart
+/// around the middle when the length is not the longer side. None for a radius under 0.0025.
+pub fn capsule_collider(size: [f32; 2], direction: i32, offset: Vec2, m: &[f32; 16]) -> Option<Capsule> {
+    let apply = |x: f32, y: f32| Vec2::new(m[0] * x + m[4] * y + m[8] * 0.0 + m[12], m[1] * x + m[5] * y + m[9] * 0.0 + m[13]);
+    let (hx, hy) = (size[0] * 0.5, size[1] * 0.5);
+    let (ox, oy) = (offset.x, offset.y);
+    let (left, right, bottom, top) = (apply(ox - hx, oy), apply(ox + hx, oy), apply(ox, oy - hy), apply(ox, oy + hy));
+    let mut across = Vec2::new(right.x - left.x, right.y - left.y);
+    let mut width = (across.x * across.x + across.y * across.y).sqrt();
+    if f32::EPSILON > width {
+        width = 0.0;
+    } else {
+        let inv = 1.0 / width;
+        across = Vec2::new(across.x * inv, across.y * inv);
+    }
+    let mut up = Vec2::new(top.x - bottom.x, top.y - bottom.y);
+    let h = (up.x * up.x + up.y * up.y).sqrt();
+    let mut height = 0.0;
+    if !(f32::EPSILON > h) {
+        let inv = 1.0 / h;
+        height = h;
+        up = Vec2::new(up.x * inv, up.y * inv);
+    }
+    let min_radius_sq = f32::from_bits(0x36d1_b717);
+    let gap = f32::from_bits(0x38d1_b717);
+    let (radius, dir, start, end, length) = if direction == 0 {
+        (width * 0.5, up, bottom, top, if height > width { width } else { height - gap })
+    } else {
+        (height * 0.5, across, left, right, if width > height { height } else { width - gap })
+    };
+    if min_radius_sq > radius * radius {
+        return None;
+    }
+    let half = length * 0.5;
+    let step = Vec2::new(dir.x * half, dir.y * half);
+    Some(Capsule { radius, vertices: [Vec2::new(step.x + start.x, step.y + start.y), Vec2::new(end.x - step.x, end.y - step.y)] })
+}
+
 /// b2ChainShape as EdgeCollider2D makes it (CreateChain, never a loop): the vertices and the ghost vertices before
 /// the first and after the last.
 #[derive(Clone, Debug, PartialEq)]

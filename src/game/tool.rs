@@ -136,6 +136,7 @@ pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -
             circle.radius * circle.radius >= dy * dy + dx * dx
         }
         // b2ChainShape::TestPoint (180bb5de0): within the radius less b2_polygonRadius of any segment.
+        Shape::Capsule(capsule) => capsule.test_point(xf, p),
         Shape::Chain(chain) => {
             let (dx, dy) = (p.x - xf.p.x, p.y - xf.p.y);
             let local = V::new(c * dx + s * dy, c * dy - s * dx);
@@ -149,18 +150,7 @@ pub(super) fn test_point(shape: &Shape, xf: &crate::b2::math::Transform, p: V) -
     }
 }
 
-/// b2NearestPointOnLineSegment (180bb1780).
-fn nearest_point_on_segment(p: V, a: V, b: V) -> V {
-    let (ex, ey) = (b.x - a.x, b.y - a.y);
-    let len2 = ex * ex + ey * ey;
-    if f32::from_bits(0x28800000) > len2 {
-        return a;
-    }
-    let t = (ex * (p.x - a.x) + ey * (p.y - a.y)) / len2;
-    let t = if t < 1.0 { t } else { 1.0 };
-    let t = if 0.0 > t { 0.0 } else { t };
-    V::new(a.x + ex * t, a.y + ey * t)
-}
+use crate::b2::shape::nearest_point_on_segment;
 
 impl Game {
     /// Physics2D.OverlapPointNonAlloc(point, buffer[16], layerMask, minDepth, maxDepth) as the physicals hit:

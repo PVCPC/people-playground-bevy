@@ -13,7 +13,7 @@ use super::wheel_joint::{WheelDef, WheelJoint};
 use super::weld::{WeldDef, WeldJoint};
 use super::prismatic::{PrismaticDef, PrismaticJoint};
 use super::revolute::{JointBody, RevoluteDef, RevoluteJoint};
-use super::shape::{Chain, Circle, MassData, Polygon};
+use super::shape::{Capsule, Chain, Circle, MassData, Polygon};
 use super::solver::*;
 use super::toi::{time_of_impact, Sweep, ToiState};
 
@@ -65,6 +65,7 @@ pub enum Shape {
     Circle(Circle),
     Polygon(Polygon),
     Chain(Chain),
+    Capsule(Capsule),
 }
 
 /// A broadphase proxy's user data (Unity's b2FixtureProxy): the fixture and the shape child.
@@ -84,10 +85,12 @@ fn effective_radius(radius: f32) -> f32 {
 }
 
 impl Shape {
-    /// b2Shape::Type: circle 0, edge 1, polygon 2, chain 3, capsule 4.
-    fn type_index(&self) -> usize {
+    /// Which of a pair b2Contact::Create (180bbcce0) puts first, by its register table: a chain before a polygon
+    /// before a capsule before a circle.
+    fn contact_order(&self) -> usize {
         match self {
             Shape::Circle(_) => 0,
+            Shape::Capsule(_) => 1,
             Shape::Polygon(_) => 2,
             Shape::Chain(_) => 3,
         }
@@ -106,6 +109,7 @@ impl Shape {
             Shape::Circle(c) => c.radius,
             Shape::Polygon(p) => p.radius,
             Shape::Chain(c) => c.radius,
+            Shape::Capsule(c) => c.radius,
         }
     }
 
@@ -131,6 +135,7 @@ impl Shape {
                 let r = effective_radius(polygon.radius);
                 Aabb { lower: Vec2::new(lower.x - r, lower.y - r), upper: Vec2::new(upper.x + r, upper.y + r) }
             }
+            Shape::Capsule(capsule) => capsule.compute_aabb(xf),
             // A b2CapsuleShape of the segment with the effective radius, through b2CapsuleShape::ComputeAABB (180bb2910).
             Shape::Chain(chain) => {
                 let (a, b) = (xf.apply(chain.vertices[child]), xf.apply(chain.vertices[child + 1]));
@@ -153,6 +158,7 @@ impl Shape {
             Shape::Polygon(p) => p.compute_mass(density),
             // b2ChainShape::ComputeMass (180bb34e0)
             Shape::Chain(_) => MassData::default(),
+            Shape::Capsule(c) => c.compute_mass(density),
         }
     }
 
@@ -168,6 +174,7 @@ impl Shape {
             Shape::Circle(c) => DistanceProxy { vertices: std::slice::from_ref(&c.p), radius: c.radius },
             Shape::Polygon(p) => DistanceProxy { vertices: &p.vertices[..p.count], radius: p.radius },
             Shape::Chain(c) => DistanceProxy { vertices: &c.vertices[child..child + 2], radius: c.radius },
+            Shape::Capsule(c) => DistanceProxy { vertices: &c.vertices, radius: c.radius },
         }
     }
 }
@@ -1163,10 +1170,9 @@ impl World {
         self.on_contact_create(c);
     }
 
-    /// b2Contact::Create (180bbcce0) and the b2Contact constructor (180bbc9f0); polygon-circle puts the polygon first,
-    /// a chain goes before either.
+    /// b2Contact::Create (180bbcce0) and the b2Contact constructor (180bbc9f0), the pair in `contact_order`.
     fn create_contact(&mut self, fa: FixtureId, ia: usize, fb: FixtureId, ib: usize) -> ContactId {
-        let (fa, ia, fb, ib) = if self.fixture(fa).shape.type_index() < self.fixture(fb).shape.type_index() { (fb, ib, fa, ia) } else { (fa, ia, fb, ib) };
+        let (fa, ia, fb, ib) = if self.fixture(fa).shape.contact_order() < self.fixture(fb).shape.contact_order() { (fb, ib, fa, ia) } else { (fa, ia, fb, ib) };
         let (a, b) = (self.fixture(fa), self.fixture(fb));
         let contact = Contact {
             flags: CONTACT_ENABLED,
@@ -1948,7 +1954,19 @@ fn evaluate(manifold: &mut Manifold, a: &Shape, child_a: usize, xf_a: &Transform
         }
         // b2ChainAndCircleContact::Evaluate (180bbd360)
         (Shape::Chain(a), Shape::Circle(b)) => collide_edge_and_circle(manifold, &a.child_edge(child_a), xf_a, b, xf_b),
+        // b2ChainAndCapsuleContact::Evaluate (180bbdb90)
+        (Shape::Chain(a), Shape::Capsule(b)) => {
+            let segment = Polygon::segment(a.vertices[child_a], a.vertices[child_a + 1], a.radius);
+            collide_radial_polygons(manifold, &segment, xf_a, &b.segment(), xf_b)
+        }
         (_, Shape::Chain(_)) => unreachable!("create_contact puts the chain first"),
+        // b2PolygonAndCapsuleContact::Evaluate (180bbd5c0) and b2CapsuleContact::Evaluate (180bbda70): rounded segments.
+        (Shape::Polygon(a), Shape::Capsule(b)) => collide_radial_polygons(manifold, a, xf_a, &b.segment(), xf_b),
+        (Shape::Capsule(a), Shape::Capsule(b)) => collide_radial_polygons(manifold, &a.segment(), xf_a, &b.segment(), xf_b),
+        // b2CapsuleAndCircleContact::Evaluate (180bbd2a0)
+        (Shape::Capsule(a), Shape::Circle(b)) => collide_edge_and_circle(manifold, &a.edge(), xf_a, b, xf_b),
+        (Shape::Capsule(_), Shape::Polygon(_)) => unreachable!("create_contact puts the polygon first"),
+        (Shape::Circle(_), Shape::Capsule(_)) => unreachable!("create_contact puts the capsule first"),
         (Shape::Polygon(a), Shape::Polygon(b)) if a.radius <= globals().polygon_radius && b.radius <= globals().polygon_radius => collide_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Polygon(b)) => collide_radial_polygons(manifold, a, xf_a, b, xf_b),
         (Shape::Polygon(a), Shape::Circle(b)) => collide_polygon_and_circle(manifold, a, xf_a, b, xf_b),

@@ -8,7 +8,7 @@ use super::*;
 use crate::assets::components::{ColliderShape, Joint2D as Joint2DData, JointKind as JointData, Rigidbody2D as RigidbodyData};
 use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
 use crate::b2::revolute::RevoluteDef;
-use crate::b2::shape::{box_collider_polygon, edge_collider_chain, polygon_collider_polygons, Circle, ColliderMatrix};
+use crate::b2::shape::{box_collider_polygon, capsule_collider, edge_collider_chain, polygon_collider_polygons, Circle, ColliderMatrix};
 use crate::b2::prismatic::SliderJoint2d;
 use crate::b2::wheel_joint::WheelJoint2d;
 use crate::b2::weld::{check_bodies, BodyFrame, Connected, FixedJoint2d};
@@ -124,8 +124,38 @@ fn anchored_base(j: &Joint2DData, damping_ratio: f32, frequency: f32) -> FixedJo
     }
 }
 
+/// The native state a FixedJoint2D, SliderJoint2D, SpringJoint2D, DistanceJoint2D or WheelJoint2D component has before its
+/// first Create: the serialized fields.
+pub(super) fn anchored_initial_state(j: &Joint2DData) -> AnchoredState {
+    let (base, slider, spring, distance, wheel) = match j.kind {
+        JointData::Fixed { damping_ratio, frequency } => (anchored_base(j, damping_ratio, frequency), None, None, None, None),
+        JointData::Wheel { damping_ratio, frequency, angle, use_motor, motor_speed, max_motor_torque } => (
+            anchored_base(j, 0.0, 0.0),
+            None,
+            None,
+            None,
+            Some(WheelJoint2d { damping_ratio, frequency, angle, use_motor, motor_speed, max_motor_torque }),
+        ),
+        JointData::Distance { auto_configure_distance, distance, max_distance_only } => {
+            (anchored_base(j, 0.0, 0.0), None, None, Some(DistanceState { auto_configure_distance, distance, max_distance_only }), None)
+        }
+        JointData::Slider { auto_configure_angle, angle, use_motor, motor_speed, max_motor_force, use_limits, lower, upper } => (
+            anchored_base(j, 0.0, 0.0),
+            Some(SliderJoint2d { angle, motor_speed, max_motor_torque: max_motor_force, lower, upper, use_motor, use_limits, auto_configure_angle }),
+            None,
+            None,
+            None,
+        ),
+        JointData::Spring { auto_configure_distance, distance, damping_ratio, frequency } => {
+            (anchored_base(j, 0.0, 0.0), None, Some(SpringState { auto_configure_distance, distance, damping_ratio, frequency }), None, None)
+        }
+        _ => unreachable!(),
+    };
+    AnchoredState { base, slider, spring, distance, wheel, slot: None }
+}
+
 /// The prefab object a Joint2D's connectedBody points at.
-fn joint_connected_object(prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) -> Option<usize> {
+pub(super) fn joint_connected_object(prefab: &Prefab, o: usize, c: usize, j: &Joint2DData) -> Option<usize> {
     (!j.connected_body.is_null()).then(|| {
         let r = prefab.objects[o].components[c].0;
         let target = ObjRef { file: r.file, path_id: j.connected_body.path_id };
@@ -752,8 +782,9 @@ impl Game {
         let matrix = ColliderMatrix([m[0], m[1], m[4], m[5], m[8], m[9], m[12], m[13]]);
         let shapes: Vec<Shape> = match &col.shape {
             ColliderShape::Box { tiling, auto_tiling, size, edge_radius } => {
-                if *auto_tiling || tiling.draw_mode != 0 {
-                    unimplemented!("BoxCollider2D auto-tiling");
+                // ColliderTilingExtension::IsTilingOn (180bfd370): auto-tiling over a sprite drawn sliced or tiled.
+                if *auto_tiling && tiling.draw_mode != 0 {
+                    unimplemented!("BoxCollider2D auto-tiling (ScheduleGenerateBoxTilingShape)");
                 }
                 box_collider_polygon(V::new(col.offset[0], col.offset[1]), V::new(size[0], size[1]), *edge_radius, &matrix).map(Shape::Polygon).into_iter().collect()
             }
@@ -776,7 +807,7 @@ impl Game {
             ColliderShape::Edge { edge_radius, points, adjacent_start, adjacent_end } => {
                 edge_collider_chain(points, &m, V::new(col.offset[0], col.offset[1]), *edge_radius, *adjacent_start, *adjacent_end).map(Shape::Chain).into_iter().collect()
             }
-            other => unimplemented!("Collider2D::PrepareShapes for {other:?}"),
+            ColliderShape::Capsule { size, direction } => capsule_collider(*size, *direction, V::new(col.offset[0], col.offset[1]), &m).map(Shape::Capsule).into_iter().collect(),
         };
         if shapes.is_empty() {
             return;
@@ -920,13 +951,20 @@ impl Game {
         // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
         let st = inst.hinges.get_mut(&(o, c)).unwrap();
         let slot = *st.slot.get_or_insert_with(|| {
-            self.anchored_joints.push(AnchoredJoint { break_force: j.break_force, break_torque: j.break_torque, joint: None });
+            self.anchored_joints.push(AnchoredJoint { break_force: j.break_force, break_torque: j.break_torque, joint: None, hinge: None });
             self.anchored_joints.len() - 1
         });
         // The world is playing.
         st.auto_configuration_complete = true;
-        self.anchored_joints[slot].joint = Some(id);
-        self.add_break_limits_update(BreakJoint::Anchored(slot), j.break_force, j.break_torque);
+        // A hinge a script links (`Game::hinges`) keeps its place in the list as BreakJoint::Hinge.
+        let key = match self.anchored_joints[slot].hinge {
+            Some(h) => BreakJoint::Hinge(h),
+            None => {
+                self.anchored_joints[slot].joint = Some(id);
+                BreakJoint::Anchored(slot)
+            }
+        };
+        self.add_break_limits_update(key, j.break_force, j.break_torque);
     }
 
     /// FixedJoint2D::Create (180c04160), SliderJoint2D::Create (180c04400), SpringJoint2D::Create (180bfd060) and
@@ -950,33 +988,7 @@ impl Game {
             None => Some(self.world.ground_body()),
         };
         let (Some(a), Some(b)) = (body_a, body_b) else { unimplemented!("Joint2D on an object without a created Rigidbody2D") };
-        let AnchoredState { mut base, mut slider, spring, mut distance, wheel, mut slot } = inst.anchored.remove(&(o, c)).unwrap_or_else(|| {
-            let (base, slider, spring, distance, wheel) = match j.kind {
-                JointData::Fixed { damping_ratio, frequency } => (anchored_base(j, damping_ratio, frequency), None, None, None, None),
-                JointData::Wheel { damping_ratio, frequency, angle, use_motor, motor_speed, max_motor_torque } => (
-                    anchored_base(j, 0.0, 0.0),
-                    None,
-                    None,
-                    None,
-                    Some(WheelJoint2d { damping_ratio, frequency, angle, use_motor, motor_speed, max_motor_torque }),
-                ),
-                JointData::Distance { auto_configure_distance, distance, max_distance_only } => {
-                    (anchored_base(j, 0.0, 0.0), None, None, Some(DistanceState { auto_configure_distance, distance, max_distance_only }), None)
-                }
-                JointData::Slider { auto_configure_angle, angle, use_motor, motor_speed, max_motor_force, use_limits, lower, upper } => (
-                    anchored_base(j, 0.0, 0.0),
-                    Some(SliderJoint2d { angle, motor_speed, max_motor_torque: max_motor_force, lower, upper, use_motor, use_limits, auto_configure_angle }),
-                    None,
-                    None,
-                    None,
-                ),
-                JointData::Spring { auto_configure_distance, distance, damping_ratio, frequency } => {
-                    (anchored_base(j, 0.0, 0.0), None, Some(SpringState { auto_configure_distance, distance, damping_ratio, frequency }), None, None)
-                }
-                _ => unreachable!(),
-            };
-            AnchoredState { base, slider, spring, distance, wheel, slot: None }
-        });
+        let AnchoredState { mut base, mut slider, spring, mut distance, wheel, mut slot } = inst.anchored.remove(&(o, c)).unwrap_or_else(|| anchored_initial_state(j));
         let mut spring = spring;
         let frame = |g: &Self, id: BodyId| {
             let bd = g.world.body(id);
@@ -1049,7 +1061,7 @@ impl Game {
             inst.joints.insert((o, c), id);
             // FinalizeCreateJoint: AddBreakLimitsUpdate (to the back of the list, or off it when both are infinite).
             let slot = *slot.get_or_insert_with(|| {
-                self.anchored_joints.push(AnchoredJoint { break_force: base.break_force, break_torque: base.break_torque, joint: None });
+                self.anchored_joints.push(AnchoredJoint { break_force: base.break_force, break_torque: base.break_torque, joint: None, hinge: None });
                 self.anchored_joints.len() - 1
             });
             self.anchored_joints[slot].joint = Some(id);
@@ -1101,7 +1113,10 @@ impl Game {
         let body = inst.bodies[&o];
         for (_, id) in self.world.body(body).joints.clone().into_iter().rev() {
             let Some(&(jo, jc)) = inst.joints.iter().find(|(_, j)| **j == id).map(|(k, _)| k) else {
-                unimplemented!("RecreateJoints: a joint outside the instance");
+                // A Fixed/SliderJoint2D HingeJointLimitAutofixBehaviour took over from the instance.
+                let f = self.fixed_joints.iter().position(|f| f.joint == Some(id)).unwrap_or_else(|| unimplemented!("RecreateJoints: a joint outside the instance"));
+                self.fixed_joint_recreate(f);
+                continue;
             };
             let Component::Joint2D(j) = &prefab.objects[jo].components[jc].1 else { unreachable!() };
             if matches!(j.kind, JointData::Fixed { .. } | JointData::Slider { .. } | JointData::Spring { .. } | JointData::Distance { .. } | JointData::Wheel { .. }) {

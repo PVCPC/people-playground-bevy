@@ -630,8 +630,8 @@ pub struct Hinge {
     pub limits: [f32; 2],
     pub breakForce: f32,
     pub breakTorque: f32,
-    /// The limb whose body is the connected body.
-    pub connected: usize,
+    /// connectedBody: the Rigidbody2D's b2 body (None: the scene's ground body).
+    pub connected: Option<BodyId>,
     pub anchor: [f32; 2],
     pub connectedAnchor: [f32; 2],
     pub enabled: bool,
@@ -760,6 +760,8 @@ pub struct AnchoredJoint {
     pub break_torque: f32,
     /// m_Joint (+0x58)
     pub joint: Option<crate::b2::world::JointId>,
+    /// The `Game::hinges` entry that took a spawned hinge's slot over: its break limit is `BreakJoint::Hinge` from then on.
+    pub hinge: Option<usize>,
 }
 
 /// A Transform as the scripts read it: world position and rotation, local scale, and the hierarchy's stored
@@ -807,6 +809,9 @@ pub struct Game {
     pub splats: Vec<FancyBloodSplat>,
     /// Behaviours instantiated since the last delayed-Start pass, in Awake order.
     pub pending_starts: Vec<misc::PendingStart>,
+    /// The joints below each pending HingeJointLimitAutofixBehaviour host (`PendingStart::HingeJointLimitAutofixItem`'s
+    /// index), kept current by `refresh_autofix_joints` until its Start.
+    pub autofix_joints: Vec<misc::AutofixJoints>,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
     pub blood_puffs: Vec<misc::BloodPuff>,
     pub blood_puff_pool: Option<misc::ObjectPool>,

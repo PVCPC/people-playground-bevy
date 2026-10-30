@@ -200,6 +200,7 @@ impl Game {
         for mut inst in std::mem::take(&mut self.unsynced) {
             let prefab = inst.prefab.clone();
             self.sync_transforms(&mut inst, &prefab);
+            self.refresh_autofix_joints(&inst);
         }
     }
 
@@ -533,7 +534,7 @@ impl Game {
 
     /// Joint2D::ReCreate (180c05570): Cleanup, then Create when the GameObject is active and the component enabled.
     /// The break-limit entry stays; Create's AddBreakLimitsUpdate moves it to the back.
-    fn fixed_joint_recreate(&mut self, f: usize) {
+    pub(super) fn fixed_joint_recreate(&mut self, f: usize) {
         self.fixed_joint_cleanup(f, false);
         self.fixed_joint_create_if_active(f);
     }
@@ -567,6 +568,7 @@ impl Game {
     /// is refused with a log; the rewrite has one scene. PhysicsManager2D::AutoSyncTransforms runs in between.)
     pub fn fixed_joint_set_connected_body(&mut self, f: usize, connected: Option<usize>) {
         self.fixed_joints[f].connected = connected;
+        self.sync_pending();
         self.fixed_joint_cleanup(f, true);
         self.fixed_joint_create_if_active(f);
     }

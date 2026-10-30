@@ -1,6 +1,7 @@
 //! LimbBehaviour
 use super::physical::{dot2, get_average_impulse_remove_outliers, get_contacts, get_first_valid_contact, get_min_impulse};
 use super::{d, mathf, person::pose_state, script, Game};
+use crate::b2::world::BodyId;
 use crate::b2::contacts2d::ScriptCollision;
 
 /// LimbBehaviour.BodyPart
@@ -1178,9 +1179,20 @@ impl Game {
         }
     }
 
+    /// connectedBody.GetComponent<LimbBehaviour>() (a Rigidbody2D's body belongs to the one limb that owns it).
+    pub fn limb_of_body(&self, b: BodyId) -> Option<usize> {
+        (0..self.limbs.len()).find(|&l| self.physicals[self.limbs[l].PhysicalBehaviour].rigidbody.body == b)
+    }
+
+    /// `limb.Joint.connectedBody == other.PhysicalBehaviour.rigidbody`
+    fn hinge_connected_to(&self, h: usize, other: usize) -> bool {
+        self.hinges[h].connected == Some(self.physicals[self.limbs[other].PhysicalBehaviour].rigidbody.body)
+    }
+
     /// LimbBehaviour.OnJointBreak2D (joint == Joint)
     fn limb_on_joint_break(&mut self, l: usize, h: usize) {
-        let component = self.hinges[h].connected;
+        // connectedBody.GetComponent<LimbBehaviour>(); a limb is also the only owner of a ConnectedNodeBehaviour here.
+        let component = self.hinges[h].connected.and_then(|b| self.limb_of_body(b));
         self.circulation_on_joint_break(l);
         if self.limbs[l].IsLethalToBreak {
             self.limbs[l].Health = 0.0;
@@ -1189,11 +1201,12 @@ impl Game {
             let person = self.limbs[l].Person;
             self.add_pain(person, 15.0);
         }
-        // The connected body always has a ConnectedNodeBehaviour (nodes are indexed by limb).
-        self.node_set_to_null(component, l);
-        self.node_set_to_null(l, component);
-        if let Some(i) = self.limbs[l].ConnectedLimbs.iter().position(|&x| x == component) {
-            self.limbs[l].ConnectedLimbs.remove(i);
+        if let Some(component) = component {
+            self.node_set_to_null(component, l);
+            self.node_set_to_null(l, component);
+            if let Some(i) = self.limbs[l].ConnectedLimbs.iter().position(|&x| x == component) {
+                self.limbs[l].ConnectedLimbs.remove(i);
+            }
         }
         let p = self.limbs[l].PhysicalBehaviour;
         if !self.prefs.GorelessMode
@@ -1218,7 +1231,7 @@ impl Game {
     }
 
     /// LimbBehaviour.SynchroniseDismemberment(connectedLimb) (IsDismembered is true here)
-    fn synchronise_dismemberment(&mut self, l: usize, connected: usize) {
+    fn synchronise_dismemberment(&mut self, l: usize, connected: Option<usize>) {
         // Destroy(Joint): the joint is already being destroyed by the break.
         self.limbs[l].HasJoint = false;
         let remove_first = |v: &mut Vec<usize>, x: usize| {
@@ -1232,7 +1245,7 @@ impl Game {
             let attached = self.limbs[o].HasJoint && {
                 let oh = self.limbs[o].Joint.expect("MissingReferenceException: HasJoint without a Joint");
                 assert!(!self.hinges[oh].destroyed, "MissingReferenceException: connected limb's Joint was destroyed");
-                self.hinges[oh].connected == l
+                self.hinge_connected_to(oh, l)
             };
             if !attached {
                 remove_first(&mut self.limbs[o].ConnectedLimbs, l);
@@ -1240,7 +1253,9 @@ impl Game {
             }
             i += 1;
         }
-        remove_first(&mut self.limbs[connected].ConnectedLimbs, l);
+        if let Some(connected) = connected {
+            remove_first(&mut self.limbs[connected].ConnectedLimbs, l);
+        }
         if let Some(src) = self.circulations[l].Source {
             remove_first(&mut self.limbs[l].ConnectedLimbs, src);
             remove_first(&mut self.limbs[src].ConnectedLimbs, l);
@@ -1347,7 +1362,7 @@ impl Game {
             let other = self.limbs[l].ConnectedLimbs[i];
             if self.node_is_connected_to(l, other) && self.limbs[other].HasJoint {
                 let h = self.limbs[other].Joint.unwrap();
-                if self.hinges[h].connected == l {
+                if self.hinge_connected_to(h, l) {
                     self.set_hinge_break_force(h, 0.0);
                 }
             }

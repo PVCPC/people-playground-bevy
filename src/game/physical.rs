@@ -180,6 +180,8 @@ script! {
         sprite_bounds: Option<([f32; 3], [f32; 3])> = None,
         /// For drawing: the spriteRenderer's Sprite, color and sorting order.
         sprite: Option<(crate::assets::db::ObjRef, [f32; 4], i16)> = None,
+        /// For drawing: the spriteRenderer's flipX/flipY, drawMode (Simple 0, Sliced 1, Tiled 2) and size.
+        sprite_draw: ([bool; 2], i32, [f32; 2]) = ([false; 2], 0, [0.0; 2]),
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).

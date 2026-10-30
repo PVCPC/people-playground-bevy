@@ -1,6 +1,9 @@
 //! The small per-limb scripts: ConnectedNodeBehaviour, SkinMaterialHandler, GForceMeasureBehaviour,
 //! GripBehaviour, BleedingParticleBehaviour and FancyBloodSplatController.
-use super::{d, mathf, script, Field, Game};
+use super::{d, mathf, script, BreakJoint, Field, Game};
+use crate::b2::prismatic::SliderJoint2d;
+use crate::b2::weld::FixedJoint2d;
+use crate::b2::world::JointId;
 
 /// FixedIntervalDistributor
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -358,6 +361,32 @@ pub struct ObjectPool {
     pub inactivityTimer: f32,
 }
 
+/// A SliderJoint2D or FixedJoint2D below a HingeJointLimitAutofixBehaviour's host, as the spawn left it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutofixJoint {
+    /// The component's object and index in its prefab.
+    pub object: usize,
+    pub component: usize,
+    pub state: FixedJoint2d,
+    pub slider: Option<SliderJoint2d>,
+    pub joint: Option<JointId>,
+    /// The slot in `Game.anchored_joints` the break-limit walk reads.
+    pub slot: Option<usize>,
+    /// The physicals owning the attached and connected Rigidbody2D (None: the scene's ground body).
+    pub attached: usize,
+    pub connected: Option<usize>,
+    pub enabled: bool,
+}
+
+/// What `GetComponentsInChildren` of HingeJoint2D, SliderJoint2D and FixedJoint2D finds below the host (the host and
+/// its active descendants, depth first): the `Game::hinges` indices and the other two kinds' state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AutofixJoints {
+    pub hinges: Vec<usize>,
+    pub sliders: Vec<AutofixJoint>,
+    pub fixeds: Vec<AutofixJoint>,
+}
+
 /// A behaviour whose Start is still due.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PendingStart {
@@ -367,7 +396,7 @@ pub enum PendingStart {
     Person(usize),
     HingeJointLimitAutofix(usize),
     /// The same behaviour on an item that is no Person: the host's physical (Ok) or Transform node (Err).
-    HingeJointLimitAutofixItem(Result<usize, usize>),
+    HingeJointLimitAutofixItem(Result<usize, usize>, usize),
     Circulation(usize),
     Physical(usize),
     Limb(usize),
@@ -647,6 +676,86 @@ impl Game {
     /// The delayed Start of every object instantiated since the last pass. Unity's player loop runs it
     /// at FixedUpdate.ScriptRunDelayedFixedFrameRate (before each step's FixedUpdates) and
     /// Update.ScriptRunDelayedDynamicFrameRate (before Update), whichever comes first after the Instantiate.
+    /// After `inst`'s SyncTransforms recreated its joints: the snapshots of its sliders and FixedJoint2Ds that are waiting
+    /// for HingeJointLimitAutofixBehaviour.Start follow.
+    pub fn refresh_autofix_joints(&mut self, inst: &super::spawn::Instance) {
+        for joints in &mut self.autofix_joints {
+            for a in joints.sliders.iter_mut().chain(joints.fixeds.iter_mut()) {
+                let key = (a.object, a.component);
+                if inst.bodies.get(&a.object) != Some(&self.physicals[a.attached].rigidbody.body) {
+                    continue;
+                }
+                if let Some(st) = inst.anchored.get(&key) {
+                    (a.state, a.slider, a.slot) = (st.base.clone(), st.slider.clone(), st.slot);
+                    a.joint = inst.joints.get(&key).copied();
+                }
+            }
+        }
+    }
+
+    /// HingeJointLimitAutofixBehaviour.FixHinges: each limited hinge's limits mirrored.
+    pub fn fix_hinges(&mut self, hinges: &[usize]) {
+        for &h in hinges {
+            if self.hinges[h].useLimits {
+                let [min, max] = self.hinges[h].limits;
+                self.hinges[h].set_limits(&mut self.world, 0.0 - max, 0.0 - min);
+            }
+        }
+    }
+
+    /// The Fixed/Slider arena entry for a prefab joint: from here on its break limit is `BreakJoint::Fixed`, in the same
+    /// place of the list, and the component setters apply.
+    fn adopt_prefab_joint(&mut self, a: &AutofixJoint) -> usize {
+        let f = self.fixed_joints.len();
+        self.fixed_joints.push(super::simulate::FixedJoint {
+            state: a.state.clone(),
+            slider: a.slider.clone(),
+            joint: a.joint,
+            attached: a.attached,
+            connected: a.connected,
+            active: true,
+            enabled: a.enabled,
+            destroyed: false,
+        });
+        // The instance, if its SyncTransforms is still due, no longer owns the joint.
+        let body = self.physicals[a.attached].rigidbody.body;
+        if let Some(inst) = self.unsynced.iter_mut().find(|i| i.bodies.get(&a.object) == Some(&body)) {
+            inst.joints.remove(&(a.object, a.component));
+            inst.anchored.remove(&(a.object, a.component));
+        }
+        if let Some(slot) = a.slot {
+            self.anchored_joints[slot].joint = None;
+            for k in self.joint_break_limits.iter_mut().filter(|k| **k == BreakJoint::Anchored(slot)) {
+                *k = BreakJoint::Fixed(f);
+            }
+        }
+        f
+    }
+
+    /// HingeJointLimitAutofixBehaviour.FixSlider: each limited slider's translation limits mirrored.
+    pub fn fix_sliders(&mut self, sliders: &[AutofixJoint]) {
+        let adopted: Vec<usize> = sliders.iter().map(|a| self.adopt_prefab_joint(a)).collect();
+        for f in adopted {
+            let s = self.fixed_joints[f].slider.as_ref().unwrap();
+            if s.use_limits {
+                let (min, max) = (s.lower, s.upper);
+                self.slider_joint_set_limits(f, 0.0 - max, 0.0 - min);
+            }
+        }
+    }
+
+    /// HingeJointLimitAutofixBehaviour.FixFixed: each FixedJoint2D's connectedBody set to null and back, which makes the
+    /// native joint twice.
+    pub fn fix_fixed(&mut self, fixeds: &[AutofixJoint]) {
+        // Adopted before the first setter: its AutoSyncTransforms recreates every joint of the instance.
+        let adopted: Vec<usize> = fixeds.iter().map(|a| self.adopt_prefab_joint(a)).collect();
+        for f in adopted {
+            let connected = self.fixed_joints[f].connected;
+            self.fixed_joint_set_connected_body(f, None);
+            self.fixed_joint_set_connected_body(f, connected);
+        }
+    }
+
     pub fn run_pending_starts(&mut self) {
         for start in std::mem::take(&mut self.pending_starts) {
             match start {
@@ -665,13 +774,16 @@ impl Game {
                 PendingStart::Person(p) => self.person_start(p),
                 PendingStart::HingeJointLimitAutofix(p) => self.hinge_joint_limit_autofix_start(p),
                 // Start: IsFlipped = false, and only a mirrored host (localScale.x not above zero) fixes anything.
-                PendingStart::HingeJointLimitAutofixItem(host) => {
+                PendingStart::HingeJointLimitAutofixItem(host, joints) => {
+                    let joints = std::mem::take(&mut self.autofix_joints[joints]);
                     let x = match host {
                         Ok(p) => self.physicals[p].transform.localScale[0],
                         Err(n) => self.transform_nodes[n].trs.s[0],
                     };
                     if !(x > 0.0) {
-                        unimplemented!("HingeJointLimitAutofixBehaviour.Start on a mirrored item: FixHinges, FixSlider and FixFixed");
+                        self.fix_hinges(&joints.hinges);
+                        self.fix_sliders(&joints.sliders);
+                        self.fix_fixed(&joints.fixeds);
                     }
                 }
                 PendingStart::Circulation(l) => self.circulation_start(l),

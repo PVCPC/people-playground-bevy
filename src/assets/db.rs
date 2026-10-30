@@ -328,6 +328,37 @@ mod tests {
         }
     }
 
+    /// Non-trigger colliders on objects without a PhysicalBehaviour, per catalog item (`-- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn catalog_bare_colliders() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut db = AssetDb::open(&game).unwrap();
+        let catalog = db.find_scripts("CatalogData").unwrap()[0];
+        let (_, _, catalog_data) = db.mono(catalog).unwrap().unwrap();
+        for item in catalog_data.get("Items").and_then(Value::array).unwrap().to_vec() {
+            let asset = db.resolve(catalog.file, item.pptr().unwrap()).unwrap();
+            let (_, _, spawnable) = db.mono(asset).unwrap().unwrap();
+            let Some(prefab) = spawnable.get("Prefab").and_then(Value::pptr).and_then(|p| db.resolve(asset.file, p)) else { continue };
+            let p = db.prefab(prefab).unwrap();
+            let has = |o: usize, class: &str| p.objects[o].components.iter().any(|(_, c)| matches!(c, Component::Script { class: k, .. } if k == class));
+            for o in 0..p.objects.len() {
+                if has(o, "PhysicalBehaviour") {
+                    continue;
+                }
+                for (_, c) in &p.objects[o].components {
+                    let Component::Collider2D(col) = c else { continue };
+                    if col.is_trigger {
+                        continue;
+                    }
+                    let rb = p.objects[o].components.iter().any(|(_, c)| matches!(c, Component::Rigidbody2D(_)));
+                    let parent = p.objects[o].parent.map_or("-".into(), |u| format!("{}{}", p.objects[u].name, if has(u, "PhysicalBehaviour") { "[PB]" } else { "" }));
+                    println!("BARE {} | {} layer {} active {} rb {rb} | parent {parent} | {:?}", p.objects[0].name, p.objects[o].name, p.objects[o].layer, p.objects[o].active, std::mem::discriminant(&col.shape));
+                }
+            }
+        }
+    }
+
     /// The game's catalog (CatalogData.Items) resolves, and every spawnable prefab's tree reads completely.
     #[test]
     fn catalog_prefabs_load() {

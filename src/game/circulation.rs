@@ -729,7 +729,7 @@ impl Game {
     pub fn create_dismemberment_blood_particle(&mut self, l: usize) {
         if !self.limbs[l].IsAndroid && self.limbs[l].HasJoint {
             let h = self.limbs[l].Joint.expect("MissingReferenceException: HasJoint without a Joint");
-            let parent = self.hinges[h].connected;
+            let parent = self.hinges[h].connected.and_then(|b| self.limb_of_body(b)).unwrap_or_else(|| unimplemented!("CirculationBehaviour.CreateDismembermentBloodParticle: a connectedBody that is not a limb"));
             let pp = self.limbs[parent].PhysicalBehaviour;
             let anchor = self.hinges[h].connectedAnchor;
             let position = self.transform_point3(pp, [anchor[0], anchor[1], 0.0]);
