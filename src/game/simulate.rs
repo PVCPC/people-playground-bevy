@@ -309,13 +309,8 @@ impl Game {
             let prefab = inst.prefab.clone();
             self.sync_transforms(&mut inst, &prefab);
             self.refresh_autofix_joints(&inst);
-            // A WaterBehaviour's or ExistByChance's later GameObject.SetActive calls and a Rigidbody2D's later bodyType changes need the clone.
-            if prefab.objects.iter().any(|o| o.components.iter().any(|(_, c)| match c {
-                crate::assets::db::Component::Script { class, .. } => class == "WaterBehaviour" || class == "ExistByChance",
-                c => matches!(c, crate::assets::db::Component::Rigidbody2D(_)),
-            })) {
-                self.retained.push(inst);
-            }
+            // Later SetActive, Destroy, SetParent and bodyType changes need the clone.
+            self.retained.push(inst);
         }
     }
 
@@ -525,20 +520,56 @@ impl Game {
     }
 
     /// GameObject.SendMessage of a collision message to a physical object's GameObject, in component order
-    /// (PhysicalBehaviour, then LimbBehaviour). Collision messages reach disabled behaviours too.
+    /// (PhysicalBehaviour, then LimbBehaviour; a DestroyableBehaviour where it sits). Collision messages reach
+    /// disabled behaviours too.
     fn send_collision_message(&mut self, p: usize, m: Message, c: &ScriptCollision) {
         let limb = self.limbs.iter().position(|l| l.PhysicalBehaviour == p);
+        let destroyable = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p);
+        let explosive = self.explosives.iter().position(|x| x.physical == Some(p));
+        // The other scripts that take collisions, before and after the PhysicalBehaviour, in component order.
+        let act_on_collide = self.act_on_collides.iter().position(|x| x.physical == Some(p));
+        let side = |g: &Self, after: bool| -> Vec<(usize, super::acts::CollisionScript)> {
+            use super::acts::CollisionScript as S;
+            let mut v = Vec::new();
+            if let Some(x) = destroyable.filter(|&x| g.destroyables[x].after_physical == after) {
+                v.push((g.destroyables[x].index, S::Destroyable(x)));
+            }
+            if let Some(e) = explosive.filter(|&e| g.explosives[e].after_physical == after) {
+                v.push((g.explosives[e].index, S::Explosive(e)));
+            }
+            if let Some(a) = act_on_collide.filter(|&a| g.act_on_collides[a].after_physical == after) {
+                v.push((g.act_on_collides[a].index, S::ActOnCollide(a)));
+            }
+            if let Some(s) = g.sticky_grenades.iter().position(|s| s.physical == Some(p) && s.after_physical == after) {
+                v.push((g.sticky_grenades[s].index, S::Sticky(s)));
+            }
+            v.sort_by_key(|&(i, _)| i);
+            v
+        };
+        let (before, after) = (side(self, false), side(self, true));
         match m {
             Message::CollisionEnter => {
+                for (_, s) in before {
+                    self.collision_enter_script(s, c);
+                }
                 self.physical_on_collision_enter(p, c);
                 if let Some(l) = limb {
                     self.limb_on_collision_enter(l, c);
                 }
+                for (_, s) in after {
+                    self.collision_enter_script(s, c);
+                }
             }
             Message::CollisionStay => {
+                for (_, s) in before {
+                    self.collision_stay_script(s, c);
+                }
                 self.physical_on_collision_stay(p, c);
                 if let Some(l) = limb {
                     self.limb_on_collision_stay(l, c);
+                }
+                for (_, s) in after {
+                    self.collision_stay_script(s, c);
                 }
             }
             Message::CollisionExit => self.physical_on_collision_exit(p, c),

@@ -299,6 +299,8 @@ impl DecalDescriptor {
 #[derive(Clone, Debug)]
 pub struct JointBreakSound {
     pub joints: Vec<BreakJoint>,
+    /// OnBreak's ExplosiveBehaviour.ForceImmediateExplosion targets (`Game::explosives`).
+    pub explosives: Vec<usize>,
     pub enabled: bool,
     /// Clips.Length
     pub clips: usize,
@@ -417,8 +419,29 @@ pub enum PendingStart {
     MapLight(usize),
     Water(usize),
     Machinery(usize),
+    Destroyable(usize),
+    FireMap(usize),
+    /// DetachFromParentOnStart.Start: its component id and DestroyIfParentDestroyed.
+    DetachFromParent(i32, bool),
+    /// NoChildrenCollide.Start: its component id.
+    NoChildrenCollide(i32),
+    /// InstantiateObjectBehaviour.Start with InstantiateOnStart: its component id.
+    InstantiateObject(i32),
+    /// ExplosionSoundBehviour.Start with StartWhenAwake: Play(Delay). The Near count when it has an AudioSource
+    /// (else Play returns at once), DistantSound, Delay.
+    ExplosionSoundPlay(i32, Option<usize>, i64, f32),
+    /// RandomForceAtStart.Start: the Rigidbody2D's component id, PositionalVelocityStrength, RotationalVelocityStrength.
+    RandomForce(i32, f32, f32),
+    /// DoAtTimeOnce.Start with StartSequenceOnStart.
+    DoAtTimeOnce(usize),
     /// ExistByChance.Start: the component's instance id and its Chance.
     ExistByChance(i32, f32),
+    Explosive(usize),
+    /// NoCollide.Start: the component's instance id.
+    NoCollide(i32),
+    /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
+    ExistInDetailView(i32),
+    IgnoreParentSize(i32),
     RandomSprite(usize),
     /// BoundingBoxBehaviour with its serialized box.
     BoundingBox(super::Bounds),
@@ -727,8 +750,11 @@ impl Game {
         for s in 0..self.joint_break_sounds.len() {
             let sound = &self.joint_break_sounds[s];
             if sound.enabled && sound.joints.contains(&j) {
-                let clips = sound.clips;
+                let (clips, explosives) = (sound.clips, sound.explosives.clone());
                 self.pick_random(clips);
+                for e in explosives {
+                    self.explosive_force_immediate(e);
+                }
             }
         }
     }
@@ -828,7 +854,35 @@ impl Game {
                 }
                 PendingStart::Water(w) => self.water_start(w),
                 PendingStart::Machinery(m) => self.machinery_start(m),
+                PendingStart::Destroyable(x) => self.destroyable_start(x),
+                PendingStart::FireMap(f) => self.fire_map_start(f),
+                PendingStart::DetachFromParent(id, destroy_with_parent) => self.detach_from_parent_on_start(id, destroy_with_parent),
+                PendingStart::NoChildrenCollide(id) => self.no_children_collide_start(id),
+                PendingStart::InstantiateObject(id) => self.instantiate_object(id, true),
+                PendingStart::ExplosionSoundPlay(id, near, distant, delay) => {
+                    if let Some(n) = near {
+                        // audioSource.clip = Near.PickRandom(); PlayDelayed is audio.
+                        self.pick_random(n);
+                        if self.prefs.DistantSoundEffects && distant != 0 {
+                            self.start_wait(id, delay, super::destroyable::Step::DistantSound(distant));
+                        }
+                    }
+                }
+                PendingStart::RandomForce(rb, positional, rotational) => {
+                    let owner = self.rigidbody_owner(rb).expect("RandomForceAtStart: a Rigidbody2D outside the arenas");
+                    let r = self.owner_rigidbody(owner).clone();
+                    let v = self.random.inside_unit_circle();
+                    r.add_force_impulse(&mut self.world, [v[0] * positional, v[1] * positional]);
+                    let t = self.random.range(-1.0, 1.0) * rotational;
+                    r.add_torque_impulse(&mut self.world, t);
+                    // Object.Destroy(this): it has no other message.
+                }
+                PendingStart::DoAtTimeOnce(d) => self.do_at_time_once_next(d, 0),
                 PendingStart::ExistByChance(id, chance) => self.exist_by_chance_start(id, chance),
+                PendingStart::Explosive(e) => self.explosive_start(e),
+                PendingStart::NoCollide(id) => self.no_collide_start(id),
+                PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
+                PendingStart::IgnoreParentSize(id) => self.ignore_parent_size_start(id),
                 PendingStart::RandomSprite(r) => self.random_sprite_set_to_index(r),
                 PendingStart::Limb(l) => self.limb_start(l),
                 PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),

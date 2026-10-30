@@ -9,6 +9,7 @@ pub mod distance_joint;
 pub mod math;
 pub mod prismatic;
 pub mod probe;
+pub mod raycast;
 pub mod revolute;
 pub mod rope_joint;
 pub mod settings;

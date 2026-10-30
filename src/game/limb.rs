@@ -1451,9 +1451,21 @@ impl Game {
         due.extend(self.tool_due_destroys(now).into_iter().map(|t| (t, 2, 0)));
         due.extend(self.person_due_destroys(now).into_iter().map(|(t, p)| (t, 3, p)));
         due.extend(self.frozen_in_ice_due_destroys(now).into_iter().map(|(t, i)| (t, 4, i)));
+        due.extend(self.object_due_destroys(now).into_iter().map(|(t, id)| (t, 5, id as usize)));
+        if dynamic {
+            due.extend(self.coroutines.iter().filter(|c| c.at <= now).map(|c| (c.at, 6, c.seq as usize)));
+        }
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
-            if kind == 4 {
+            if kind == 6 {
+                // Gone if its GameObject was destroyed or deactivated earlier in this pass.
+                if let Some(i) = self.coroutines.iter().position(|c| c.seq == l as u64) {
+                    let c = self.coroutines.remove(i);
+                    self.resume_coroutine(c);
+                }
+            } else if kind == 5 {
+                self.run_object_destroy(l as i32);
+            } else if kind == 4 {
                 self.frozen_in_ice_run_destroy(l);
             } else if kind == 3 {
                 self.person_run_destroy(l);

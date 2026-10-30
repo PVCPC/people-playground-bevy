@@ -175,6 +175,8 @@ script! {
         in_world: bool = true,
         /// Set when the oracle loads a component it has no data for.
         has_fire_map: bool = false,
+        /// Its LocalFirePropagationMap (fire_maps); None in a recording.
+        fire_map: Option<usize> = None,
         /// The DecalControllerBehaviours PhysicalBehaviour.Decal added, one per descriptor, in add order.
         decal_controllers: Vec<super::misc::DecalController> = Vec::new(),
         /// spriteRenderer's local AABB (center, extents); None when no sprite data was loaded.
@@ -623,10 +625,13 @@ impl Game {
     }
 
     /// PhysicalBehaviour.Ignite(bool, Vector2)
-    pub fn ignite_at(&mut self, p: usize, ignore_flammability: bool, _position: [f32; 2]) {
+    pub fn ignite_at(&mut self, p: usize, ignore_flammability: bool, position: [f32; 2]) {
         self.ignite_internal(p, ignore_flammability);
-        // ponytail: LocalFirePropagationMap.IgniteAt; humans and the map have none, add with burnable props.
-        assert!(!self.physicals[p].has_fire_map, "LocalFirePropagationMap is not rewritten yet");
+        match self.physicals[p].fire_map {
+            Some(f) if self.physicals[p].OnFire => self.fire_map_ignite_at(f, position),
+            None if self.physicals[p].has_fire_map => unimplemented!("a recorded LocalFirePropagationMap (its Points are not recorded)"),
+            _ => {}
+        }
     }
 
     pub fn extinguish(&mut self, p: usize) {
@@ -735,7 +740,11 @@ impl Game {
     /// PhysicalBehaviour.Ignite(bool)
     pub fn ignite(&mut self, p: usize, ignore_flammability: bool) {
         self.ignite_internal(p, ignore_flammability);
-        assert!(!self.physicals[p].has_fire_map, "LocalFirePropagationMap is not rewritten yet");
+        match self.physicals[p].fire_map {
+            Some(f) if self.physicals[p].OnFire => self.fire_map_ignite_random(f),
+            None if self.physicals[p].has_fire_map => unimplemented!("a recorded LocalFirePropagationMap (its Points are not recorded)"),
+            _ => {}
+        }
     }
 
     /// PhysicalBehaviour.ManagedUpdate
@@ -798,10 +807,14 @@ impl Game {
             return;
         }
         if ph.dirtyFire {
-            assert!(!(ph.has_fire_map && ph.burnIntensity > 0.01), "fire propagation emission is not rewritten yet");
+            if ph.has_fire_map && ph.burnIntensity > 0.01 {
+                let f = ph.fire_map.unwrap_or_else(|| unimplemented!("a recorded LocalFirePropagationMap (its Points are not recorded)"));
+                self.fire_map_emission(p, f);
+            }
         } else if ph.burnIntensity > 0.05 {
             ph.dirtyFire = true;
         }
+        let ph = &mut self.physicals[p];
         if !ph.dirtyBubble && ph.Wetness as f64 > 0.01 {
             ph.dirtyBubble = true;
         }
@@ -1329,18 +1342,23 @@ impl Game {
     /// Collider2D::SetEnabled(false) (180c15670), for each collider in turn: Collider2D::Cleanup (180c0d940) with
     /// ColliderCleanupOperation 2 destroys the shapes last first, resets the body's mass and, with
     /// Physics2D.callbacksOnDisable off, drops the collider's contact records without callbacks.
-    fn collider_disable(&mut self, p: usize) {
+    pub(super) fn collider_disable(&mut self, p: usize) {
         let body = self.physicals[p].rigidbody.body;
         for collider in self.physicals[p].all_colliders.clone() {
-            let shapes: Vec<_> = self.world.body(body).fixtures.iter().copied().filter(|&f| self.world.fixture(f).collider.id == collider).collect();
-            for &f in shapes.iter().rev() {
-                self.world.destroy_fixture(body, f);
-            }
-            if !shapes.is_empty() {
-                self.world.reset_mass_data(body);
-            }
-            self.world.contacts2d.destroy_contacts(collider);
+            self.collider_disable_one(collider, body);
         }
+    }
+
+    /// Collider2D::SetEnabled(false) of one collider whose fixtures sit on `body`.
+    pub(super) fn collider_disable_one(&mut self, collider: i32, body: crate::b2::world::BodyId) {
+        let shapes: Vec<_> = self.world.body(body).fixtures.iter().copied().filter(|&f| self.world.fixture(f).collider.id == collider).collect();
+        for &f in shapes.iter().rev() {
+            self.world.destroy_fixture(body, f);
+        }
+        if !shapes.is_empty() {
+            self.world.reset_mass_data(body);
+        }
+        self.world.contacts2d.destroy_contacts(collider);
     }
 
     /// GameObject.SetActive(false) on a physical object, component by component.

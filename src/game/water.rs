@@ -337,15 +337,18 @@ impl Game {
         let prefab = inst.prefab.clone();
         if active {
             for (d, k) in self.set_active(inst, o, true) {
-                let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+                let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
                 let id = inst.objects[d].components[k];
+                // Behaviour::AddToManager with the OnEnable.
+                if let (Some(&(order, b)), true) = (self.behaviour_of.get(&id), *enabled) {
+                    self.behaviours.add(order, b);
+                }
                 match class.as_str() {
                     "PhysicalBehaviour" => {
                         let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
                         self.physicals[p].active = true;
                     }
-                    // No OnEnable.
-                    "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" | "PoliceBoxBehaviour" | "ExistByChance" => {}
+                    c if !super::declares(c, "OnEnable") => {}
                     _ => unimplemented!("{class}.OnEnable"),
                 }
             }
@@ -354,6 +357,12 @@ impl Game {
         for (d, k) in self.set_active(inst, o, false) {
             let Component::Script { class, enabled, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
             let id = inst.objects[d].components[k];
+            // Deactivation stops its coroutines.
+            self.coroutines.retain(|c| c.owner != id);
+            // Behaviour::RemoveFromManager with the OnDisable.
+            if let Some(&(_, b)) = self.behaviour_of.get(&id) {
+                self.behaviours.remove(b);
+            }
             match class.as_str() {
                 "PhysicalBehaviour" => {
                     let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
@@ -362,8 +371,7 @@ impl Game {
                         self.physical_on_disable(p);
                     }
                 }
-                // No OnDisable.
-                "AudioSourceTimeScaleBehaviour" | "WaterSoundBehaviour" | "WaterImpactBehaviour" | "PoliceBoxBehaviour" | "ExistByChance" => {}
+                c if !super::declares(c, "OnDisable") => {}
                 _ => unimplemented!("{class}.OnDisable"),
             }
         }

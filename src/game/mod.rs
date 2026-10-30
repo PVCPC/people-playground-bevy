@@ -5,8 +5,12 @@
 
 use std::collections::HashMap;
 pub mod circulation;
+pub mod acts;
 pub mod dump;
+pub mod explosion;
 pub mod lifecycle;
+pub mod destroyable;
+pub mod fire;
 pub mod limb;
 pub mod machinery;
 pub mod link;
@@ -366,6 +370,7 @@ pub struct Prefs {
     pub GridSnap: f32,
     pub PhysicsIterations: i32,
     pub ShowTutorial: bool,
+    pub DistantSoundEffects: bool,
 }
 
 /// CollisionQuality.Dynamic
@@ -392,6 +397,7 @@ impl Default for Prefs {
             GridSnap: 0.25,
             PhysicsIterations: 32,
             ShowTutorial: true,
+            DistantSoundEffects: true,
         }
     }
 }
@@ -439,6 +445,7 @@ impl Prefs {
                 "GridSnap" => p.GridSnap = float()?,
                 "PhysicsIterations" => p.PhysicsIterations = int()?,
                 "ShowTutorial" => p.ShowTutorial = bool()?,
+                "DistantSoundEffects" => p.DistantSoundEffects = bool()?,
                 _ => {}
             }
         }
@@ -589,10 +596,10 @@ impl Rigidbody {
     pub fn mass(&self, w: &World) -> f32 {
         self.detached.unwrap_or_else(|| w.body(self.body).rigidbody).mass
     }
-    /// Rigidbody2D.AddForce(force, ForceMode2D.Impulse): b2Body::ApplyLinearImpulse at the world centre, waking the body.
-    // ponytail: assumed from Box2D; the native Rigidbody2D::AddForce is not disassembled yet.
+    /// Rigidbody2D::AddForce (180c1bf80) with ForceMode2D.Impulse: a Dynamic Rigidbody2D's body wakes and its
+    /// velocity gains impulse times the inverse mass.
     pub fn add_force_impulse(&self, w: &mut World, impulse: [f32; 2]) {
-        if self.detached.is_some() {
+        if self.detached.is_some() || self.bodyType != 0 {
             return;
         }
         let b = w.body_mut(self.body);
@@ -603,9 +610,38 @@ impl Rigidbody {
             b.flags |= BODY_AWAKE;
             b.sleep_time = 0.0;
         }
-        b.linear_velocity = V::new(b.linear_velocity.x + b.inv_mass * impulse[0], b.linear_velocity.y + b.inv_mass * impulse[1]);
-        let r = [b.sweep.c.x - b.sweep.c.x, b.sweep.c.y - b.sweep.c.y];
-        b.angular_velocity += b.inv_i * (r[0] * impulse[1] - r[1] * impulse[0]);
+        b.linear_velocity = V::new(impulse[0] * b.inv_mass + b.linear_velocity.x, impulse[1] * b.inv_mass + b.linear_velocity.y);
+    }
+
+    /// Rigidbody2D::AddTorque (180c1c320) with ForceMode2D.Impulse: a Dynamic Rigidbody2D's body wakes and its
+    /// angular velocity gains the impulse times the inverse inertia.
+    pub fn add_torque_impulse(&self, w: &mut World, impulse: f32) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        let b = w.body_mut(self.body);
+        if b.kind != BodyType::Dynamic {
+            return;
+        }
+        if b.flags & BODY_AWAKE == 0 {
+            b.flags |= BODY_AWAKE;
+            b.sleep_time = 0.0;
+        }
+        b.angular_velocity = impulse * b.inv_i + b.angular_velocity;
+    }
+    /// Rigidbody2D::AddForce (180c1bf80) with ForceMode2D.Force: a dynamic Rigidbody2D that has a body.
+    pub fn add_force(&self, w: &mut World, force: [f32; 2]) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        w.body_mut(self.body).apply_force_to_center(V::new(force[0], force[1]));
+    }
+    /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Impulse.
+    pub fn add_impulse_at_position(&self, w: &mut World, impulse: [f32; 2], point: [f32; 2]) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        w.body_mut(self.body).apply_impulse_at(V::new(impulse[0], impulse[1]), V::new(point[0], point[1]));
     }
     /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Force: a dynamic Rigidbody2D that has a body.
     pub fn add_force_at_position(&self, w: &mut World, force: [f32; 2], point: [f32; 2]) {
@@ -878,8 +914,13 @@ pub enum Behaviour {
     Bleeding(usize),
     Machinery(usize),
     Lava(usize),
+    Destroyable(usize),
     Spawner(usize),
     HeatRect(usize),
+    Explosive(usize),
+    DeleteAfter(usize),
+    FireMap(usize),
+    PointToVelocity(usize),
 }
 
 impl Behaviour {
@@ -895,10 +936,20 @@ impl Behaviour {
             Behaviour::Bleeding(_) => "BleedingParticleBehaviour",
             Behaviour::Machinery(_) => "DamagableMachineryBehaviour",
             Behaviour::Lava(_) => "LavaBehaviour",
+            Behaviour::Destroyable(_) => "DestroyableBehaviour",
             Behaviour::Spawner(_) => "RandomPrefabSpawnerBehaviour",
             Behaviour::HeatRect(_) => "TemperatureTargetRectangleBehaviour",
+            Behaviour::Explosive(_) => "ExplosiveBehaviour",
+            Behaviour::DeleteAfter(_) => "DeleteAfterTime",
+            Behaviour::PointToVelocity(_) => "PointToVelocityBehaviour",
+            Behaviour::FireMap(_) => "LocalFirePropagationMap",
         }
     }
+}
+
+/// Whether a MonoBehaviour class declares or inherits the Unity message (lifecycle.rs).
+pub fn declares(class: &str, message: &str) -> bool {
+    lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == class).is_some_and(|(_, m)| m.contains(&message))
 }
 
 /// The passes of Unity's FixedBehaviourManager, BehaviourManager and LateBehaviourManager.
@@ -930,9 +981,8 @@ impl Behaviours {
 
     /// MonoBehaviour::AddToManager: into each manager whose message the class declares.
     pub fn add(&mut self, order: i32, b: Behaviour) {
-        let messages = lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == b.class()).unwrap().1;
         for (list, m) in [(&mut self.fixed, "FixedUpdate"), (&mut self.update, "Update"), (&mut self.late, "LateUpdate")] {
-            if messages.contains(&m) {
+            if declares(b.class(), m) {
                 let at = list.partition_point(|&(o, _)| o <= order);
                 list.insert(at, (order, b));
             }
@@ -983,6 +1033,32 @@ pub struct Game {
     pub spawners: Vec<scenery::Spawner>,
     pub heat_rects: Vec<scenery::HeatRect>,
     pub random_sprites: Vec<misc::RandomSprite>,
+    pub destroyables: Vec<destroyable::Destroyable>,
+    pub fire_maps: Vec<fire::FireMap>,
+    pub explosives: Vec<explosion::Explosive>,
+    pub act_on_collides: Vec<acts::ActOnCollide>,
+    pub no_collides: Vec<acts::NoCollide>,
+    pub sticky_grenades: Vec<acts::StickyGrenade>,
+    pub point_to_velocities: Vec<acts::PointToVelocity>,
+    pub delete_afters: Vec<explosion::DeleteAfter>,
+    /// Explode coroutines past WaitForSeconds, waiting for the end of the frame: (explosive, coroutine sequence).
+    pub explosive_end_of_frame_queue: Vec<(usize, u64)>,
+    pub coroutine_seq: u64,
+    /// The components of destroyed GameObjects (they read null).
+    pub destroyed_components: std::collections::HashSet<i32>,
+    pub act_on_destroy: HashMap<i32, destroyable::ActOnDestroy>,
+    pub dwacds: Vec<destroyable::DestroyWhenAllChildrenDestroyed>,
+    /// level1's DistantSoundBehaviour clip counts, by SoundType - 1 (SmallExplosion .. LargeFirearm).
+    pub distant_sounds: [usize; 6],
+    /// Coroutines waiting in WaitForSeconds, resumed by the dynamic delayed-call pass.
+    pub coroutines: Vec<destroyable::Coroutine>,
+    pub do_at_time_onces: Vec<destroyable::DoAtTimeOnce>,
+    /// InstantiateObjectBehaviour by component id: Prefab and fields.
+    pub instantiate_objects: HashMap<i32, (Option<crate::assets::db::ObjRef>, destroyable::InstantiateObject)>,
+    /// Object.Destroy calls queued for the delayed-call pass: (time, a component id on the object).
+    pub object_destroys: Vec<(f64, i32)>,
+    /// The manager entry of each registered script component (by instance id), for SetActive.
+    pub behaviour_of: HashMap<i32, (i32, Behaviour)>,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
     pub blood_puffs: Vec<misc::BloodPuff>,
     pub blood_puff_pool: Option<misc::ObjectPool>,

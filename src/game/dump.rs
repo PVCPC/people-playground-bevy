@@ -888,6 +888,12 @@ impl Game {
                 (Phase::Fixed, B::HeatRect(h)) => self.heat_rect_fixed_update(h),
                 (Phase::Update, B::Spawner(s)) => self.spawner_update(s),
                 (Phase::Update, B::Machinery(m)) => self.machinery_update(m),
+                (Phase::Update, B::Destroyable(x)) => self.destroyable_update(x),
+                (Phase::Fixed, B::Explosive(e)) => self.explosive_fixed_update(e),
+                (Phase::Fixed, B::PointToVelocity(i)) => self.point_to_velocity_fixed_update(i),
+                (Phase::Update, B::DeleteAfter(i)) => self.delete_after_update(i),
+                (_, B::FireMap(f)) if { let p = &self.physicals[self.fire_maps[f].physical]; !p.active || p.destroyed } => {}
+                (Phase::Fixed, B::FireMap(f)) => self.fire_map_fixed_update(f),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),
@@ -946,6 +952,7 @@ impl Game {
         self.catalog_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
         self.map_light_coroutines();
+        self.explosive_coroutines();
         self.gore_string_delayed_calls(true);
         // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
         // Global's ManagedLateUpdate walks PhysicalObjectsInWorld, which a spawned PhysicalBehaviour joins in Start.
@@ -1549,6 +1556,7 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
             ("US", "UE") => {
                 g.update_scripts();
                 g.render_callbacks(&cur)?;
+                g.end_of_frame_calls();
             }
             // PreUpdate's Physics2DUpdate at the frame's time.
             ("FE", "US") => {
@@ -1605,6 +1613,7 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
         if update {
             g.update_scripts();
             g.render_callbacks(&pair[1])?;
+            g.end_of_frame_calls();
         } else if physics {
             g.simulate_physics();
             diffs = compare_physics(&mut g, &pair[0], &pair[1])?;

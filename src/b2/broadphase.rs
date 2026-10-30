@@ -29,7 +29,7 @@ impl Aabb {
         !(aabb.lower.x < self.lower.x || aabb.lower.y < self.lower.y || self.upper.x < aabb.upper.x || self.upper.y < aabb.upper.y)
     }
 
-    fn overlaps(&self, node: &Aabb) -> bool {
+    pub(super) fn overlaps(&self, node: &Aabb) -> bool {
         self.lower.x - node.upper.x <= 0.0 && self.lower.y - node.upper.y <= 0.0 && node.lower.x - self.upper.x <= 0.0 && node.lower.y - self.upper.y <= 0.0
     }
 }

@@ -232,7 +232,7 @@ impl Game {
     /// range on the Transform's z, each collider once, then a stable sort by z. The callers run PhysicsQuery2D's
     /// AutoSyncTransforms (Physics2DSettings.autoSyncTransforms is on) before querying.
     /// The hits as (the collider's physical, or None for a GameObject without one; the Collider2D id).
-    fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<(Option<usize>, i32)> {
+    pub(super) fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<(Option<usize>, i32)> {
         let mut hits: Vec<(Option<usize>, i32, f32)> = Vec::new();
         for (f, child) in fixtures {
             let fx = self.world.fixture(f);

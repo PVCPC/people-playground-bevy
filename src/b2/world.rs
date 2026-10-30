@@ -73,7 +73,7 @@ fn proxy_key(f: FixtureId, child: usize) -> usize {
     f << 32 | child
 }
 
-fn proxy_owner(key: usize) -> (FixtureId, usize) {
+pub(super) fn proxy_owner(key: usize) -> (FixtureId, usize) {
     (key >> 32, key & 0xffff_ffff)
 }
 
@@ -304,6 +304,17 @@ impl Body {
         self.force = self.force + force;
         let r = point - self.sweep.c;
         self.torque += r.x * force.y - r.y * force.x;
+    }
+
+    /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Impulse: dynamic bodies only, waking the body.
+    pub fn apply_impulse_at(&mut self, impulse: Vec2, point: Vec2) {
+        if self.kind != BodyType::Dynamic {
+            return;
+        }
+        self.wake_up();
+        self.linear_velocity = Vec2::new(impulse.x * self.inv_mass + self.linear_velocity.x, impulse.y * self.inv_mass + self.linear_velocity.y);
+        let (dx, dy) = (point.x - self.sweep.c.x, point.y - self.sweep.c.y);
+        self.angular_velocity = (impulse.y * dx - impulse.x * dy) * self.inv_i + self.angular_velocity;
     }
 
     /// Rigidbody2D::AddForce (180c1bf80) with ForceMode2D.Force: dynamic bodies only, waking the body.
@@ -655,6 +666,12 @@ impl World {
         self.bodies[id].as_mut().unwrap()
     }
 
+    /// Whether the fixture still exists (a disabled Collider2D destroyed it).
+    pub(crate) fn fixture_alive(&self, id: FixtureId) -> bool {
+        self.fixtures[id].is_some()
+    }
+
+    #[track_caller]
     pub(crate) fn fixture(&self, id: FixtureId) -> &Fixture {
         self.fixtures[id].as_ref().unwrap()
     }

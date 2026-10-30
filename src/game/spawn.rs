@@ -279,8 +279,33 @@ impl Instance {
     }
 
     /// The object's descendants in hierarchy (pre-) order.
-    fn descendants(&self, o: usize) -> Vec<usize> {
-        (o + 1..self.objects.len()).take_while(|&d| self.is_descendant(d, o)).collect()
+    pub(super) fn descendants(&self, o: usize) -> Vec<usize> {
+        // The prefab's depth-first order bounds them; SetParent(null) may have taken some out.
+        let prefab_below = |d: usize| {
+            let mut p = self.prefab.objects[d].parent;
+            while let Some(i) = p {
+                if i == o {
+                    return true;
+                }
+                p = self.prefab.objects[i].parent;
+            }
+            false
+        };
+        (o + 1..self.objects.len()).take_while(|&d| prefab_below(d)).filter(|&d| self.is_descendant(d, o)).collect()
+    }
+
+    /// Transform.SetParent(null) keeping the world pose (1807f4c00): SetGlobalMatrixLossy (1800d9010) of the
+    /// world position and rotation and the inverse world rotation times CalculateGlobalRS (the lossy scale), which
+    /// marks the object's and its children's global T, R and S.
+    pub fn set_parent_null(&mut self, o: usize) {
+        let (t, q, s) = (self.position(o), self.rotation(o), self.lossy_scale(o));
+        let below = self.descendants(o);
+        let x = &mut self.objects[o];
+        x.parent = None;
+        x.trs = Trs { t: [t[0], t[1], t[2], 0.0], q, s: [s[0], s[1], s[2], 0.0] };
+        for d in std::iter::once(o).chain(below) {
+            self.changed[d] |= self.interest[d] & (GLOBAL_T | GLOBAL_R | GLOBAL_S);
+        }
     }
 
     fn is_descendant(&self, d: usize, o: usize) -> bool {
@@ -567,7 +592,8 @@ impl Game {
     fn collider2d_deactivate(&mut self, inst: &mut Instance, o: usize, c: usize) {
         let id = inst.objects[o].components[c];
         self.world.ignored.retain(|&(a, b)| a != id && b != id);
-        if let Some(fixtures) = inst.fixtures.remove(&(o, c)).filter(|f| !f.is_empty()) {
+        // A collider disabled earlier (Collider2D.enabled = false) has no fixtures left.
+        if let Some(fixtures) = inst.fixtures.remove(&(o, c)).map(|f| f.into_iter().filter(|&f| self.world.fixture_alive(f)).collect::<Vec<_>>()).filter(|f| !f.is_empty()) {
             let body = self.world.fixture(fixtures[0]).body;
             for &f in fixtures.iter().rev() {
                 self.world.destroy_fixture(body, f);
@@ -588,8 +614,17 @@ impl Game {
         if inst.descendants(o).iter().any(|d| inst.bodies.contains_key(d)) {
             unimplemented!("Rigidbody2D::Cleanup: CheckForDrivenByParentRigidbody on a child Rigidbody2D");
         }
+        // GetAttachedColliders (180c1f350): the fixtures' colliders sorted by address and deduplicated; on the
+        // inactive GameObject each gets Collider2D::Cleanup with Deactivate's arguments, which its own Deactivate
+        // repeats later on an empty collider.
+        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.first().is_some_and(|&f| self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        match attached[..] {
+            [] => {}
+            [(co, cc)] => self.collider2d_deactivate(inst, co, cc),
+            _ => unimplemented!("{}: Rigidbody2D::Cleanup of several attached colliders (heap-address order)", prefab.objects[o].name),
+        }
         if !self.world.body(body).fixtures.is_empty() {
-            unimplemented!("{}: Rigidbody2D::Cleanup with colliders still attached", prefab.objects[o].name);
+            unimplemented!("{}: Rigidbody2D::Cleanup with another instance's colliders attached", prefab.objects[o].name);
         }
         if !self.world.body(body).joints.is_empty() {
             unimplemented!("{}: Rigidbody2D::Cleanup with joints", prefab.objects[o].name);

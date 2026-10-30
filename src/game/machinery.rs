@@ -93,6 +93,15 @@ impl Game {
         }
     }
 
+    /// DamagableMachineryBehaviour.OnFragmentHit
+    pub fn machinery_on_fragment_hit(&mut self, m: usize, force: f32) {
+        let mc = &mut self.machinery[m];
+        if !mc.Indestructible {
+            mc.Health -= force * mc.ExplosionDamageMultiplier * 250.0;
+            self.machinery_act_on_damage(m);
+        }
+    }
+
     /// DamagableMachineryBehaviour.ActOnDamage
     fn machinery_act_on_damage(&mut self, m: usize) {
         let mc = &self.machinery[m];

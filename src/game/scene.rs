@@ -250,6 +250,12 @@ impl Game {
                     found[1] = true;
                     (g.positionIterations, g.velocityIterations) = (g.prefs.PhysicsIterations, g.prefs.PhysicsIterations);
                 }
+                // Awake only sets Instance; Play draws from these.
+                "DistantSoundBehaviour" => {
+                    for (i, name) in ["SmallDistantExplosions", "LargeDistantExplosions", "LargerDistantExplosions", "SmallDistantFirearms", "MediumDistantFirearms", "LargeDistantFirearms"].iter().enumerate() {
+                        g.distant_sounds[i] = v.get(name).and_then(Value::array).ok_or_else(|| format!("DistantSoundBehaviour.{name}"))?.len();
+                    }
+                }
                 // Awake only sets Instance.
                 "AmbientTemperatureGridBehaviour" => {
                     found[2] = true;
