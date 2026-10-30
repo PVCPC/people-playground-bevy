@@ -62,14 +62,9 @@ fn vector2_angle(from: [f32; 2], to: [f32; 2]) -> f32 {
 impl Game {
     // ---- IgnoreCollisionStackController -------------------------------------------------------------------------
 
-    /// Collider2D != null: the object behind the instance id is not destroyed.
-    fn collider_alive(&self, c: i32) -> bool {
-        self.physical_of_collider(c).is_some()
-    }
-
     /// IgnoreCollisionStackController.IgnoreCollisionSubstituteMethod: a counted Physics2D.IgnoreCollision.
     pub fn ignore_collision_substitute(&mut self, a: i32, b: i32, ignore: bool) {
-        if !(self.collider_alive(a) && self.collider_alive(b)) {
+        if !(self.collider_exists(a) && self.collider_exists(b)) {
             return;
         }
         let key = (a.min(b), a.max(b));
@@ -105,7 +100,7 @@ impl Game {
     /// Penetration.GetPoint: Joint.connectedBody.transform.TransformPoint(Joint.connectedAnchor).
     pub fn penetration_point(&self, pen: usize) -> [f32; 2] {
         let j = &self.fixed_joints[self.penetration_arena[pen].Joint.expect("Penetration.GetPoint: destroyed Joint2D")];
-        let body = j.connected.expect("Penetration.GetPoint: connectedBody is null");
+        let Some(super::BodyOwner::Physical(body)) = j.connected else { panic!("Penetration.GetPoint: connectedBody is null or not its victim") };
         let v = self.transform_point3(body, [j.state.connected_anchor.x, j.state.connected_anchor.y, 0.0]);
         [v[0], v[1]]
     }
@@ -260,7 +255,7 @@ impl Game {
         self.fixed_joint_set_break_force(f, f32::INFINITY);
         self.fixed_joint_set_break_torque(f, f32::INFINITY);
         self.fixed_joint_set_connected_anchor(f, self.penetration_arena[pen].CurrentConnectedAnchor);
-        self.fixed_joint_set_connected_body(f, Some(other));
+        self.fixed_joint_set_connected_body(f, Some(super::BodyOwner::Physical(other)));
         self.fixed_joint_set_enable_collision(f, false);
         self.slider_joint_set_use_motor(f, true);
         let props = &self.properties[self.physicals[p].Properties];
@@ -293,7 +288,7 @@ impl Game {
     fn undo_penetration_no_collision(&mut self, pen: usize) {
         let b = self.physicals[self.penetration_arena[pen].Stabber].colliders[0];
         for rc in self.penetration_arena[pen].RelevantColliders.clone() {
-            if self.collider_alive(rc) {
+            if self.collider_exists(rc) {
                 self.ignore_collision_substitute(rc, b, false);
             }
         }
@@ -380,7 +375,7 @@ impl Game {
 
     /// PhysicalBehaviour.OnJointBreak2D for a broken SliderJoint2D (`joint`, a `fixed_joints` index) on its object.
     pub fn physical_on_joint_break_slider(&mut self, joint: usize) {
-        let p = self.fixed_joints[joint].attached;
+        let super::BodyOwner::Physical(p) = self.fixed_joints[joint].attached else { unreachable!("OnJointBreak2D reaches a PhysicalBehaviour") };
         for i in 0..self.physicals[p].penetrations.len() {
             let pen = self.physicals[p].penetrations[i];
             if self.penetration_arena[pen].Joint == Some(joint) && !self.fixed_joints[joint].destroyed {
@@ -735,7 +730,7 @@ mod tests {
         assert!(new != old && g.fixed_joints[old].destroyed);
         let s = g.fixed_joints[new].slider.as_ref().unwrap();
         assert_eq!((s.max_motor_torque, s.angle, s.lower, s.upper), (45.0, 0.0, -0.4, 0.1));
-        assert_eq!(g.fixed_joints[new].connected, Some(1));
+        assert_eq!(g.fixed_joints[new].connected, Some(super::super::BodyOwner::Physical(1)));
         assert_eq!(g.fixed_joints[new].state.connected_anchor, Vec2::new(0.1, 0.0));
         assert_eq!(g.world.joints.iter().flatten().count(), 1);
     }

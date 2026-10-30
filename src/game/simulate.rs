@@ -46,6 +46,31 @@ fn slerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     r.map(|c| c / len)
 }
 
+/// PhysicsManager2D::Update's pose between the last two steps.
+fn interpolated_pose(m: MovementState, t: f32) -> ([f32; 3], [f32; 4]) {
+    let (prev, body) = (m.previous, m.body);
+    let s = 1.0 - t;
+    ([t * body.0[0] + s * prev.0[0], t * body.0[1] + s * prev.0[1], prev.0[2]], slerp(prev.1, body.1, t))
+}
+
+/// The write-back pose of a body: its x/y at the Transform's z, and the rotation's z turn replaced by the body angle.
+fn written_pose(b: &crate::b2::world::Body, z: f32, rotation: [f32; 4]) -> ([f32; 3], [f32; 4]) {
+    let (x, y, a) = (b.xf.p.x, b.xf.p.y, b.sweep.a);
+    if !x.is_finite() || !y.is_finite() || !a.is_finite() {
+        unimplemented!("Rigidbody2D::CorrectBodyState");
+    }
+    let mut cur = rotation;
+    if cur[3] < 0.0 {
+        cur = cur.map(|c| -c);
+    }
+    let h = atan2f(cur[2], cur[3]);
+    let turn = (h + h) * 0.5;
+    let undo = [-0.0, -0.0, -sinf(turn), cosf(turn)];
+    let half = a * 0.5;
+    let body = [0.0, 0.0, sinf(half), cosf(half)];
+    ([x, y, z], qmul(qmul(body, undo), cur))
+}
+
 impl Game {
     /// PhysicsManager2D::Simulate after the FixedUpdate scripts.
     // ponytail: the MovePosition/MoveRotation half of SetupMovementStates does nothing here: no rewritten script
@@ -56,10 +81,10 @@ impl Game {
         self.last_simulation = (self.time.fixedTimeAsDouble, dt);
         // SetupMovementStatesJobData::Job (180bf2680): each listed body's last pose becomes the one to interpolate
         // from; a non-interpolating one leaves the list.
-        for p in &mut self.physicals {
-            let m = &mut p.rigidbody.movement;
+        for rb in self.physicals.iter_mut().map(|p| &mut p.rigidbody).chain(self.node_rigidbodies.iter_mut().map(|n| &mut n.rigidbody)) {
+            let m = &mut rb.movement;
             if m.listed {
-                m.interpolating = p.rigidbody.interpolation != 0;
+                m.interpolating = rb.interpolation != 0;
                 if m.interpolating {
                     m.previous = m.body;
                 } else {
@@ -72,8 +97,8 @@ impl Game {
         self.tool_write_back();
         // After a Rigidbody2D joined or changed, the list is rebuilt from every non-static body.
         if self.rigidbody_hierarchy_changed {
-            for p in &mut self.physicals {
-                p.rigidbody.movement.listed = p.rigidbody.bodyType != 2 && p.rigidbody.detached.is_none();
+            for rb in self.physicals.iter_mut().map(|p| &mut p.rigidbody).chain(self.node_rigidbodies.iter_mut().map(|n| &mut n.rigidbody)) {
+                rb.movement.listed = rb.bodyType != 2 && rb.detached.is_none();
             }
             self.rigidbody_hierarchy_changed = false;
         }
@@ -108,31 +133,114 @@ impl Game {
                 && ph.rigidbody.bodyType == 1
                 && self.world.body(parent).flags & BODY_AWAKE != 0
             {
-                unimplemented!("Rigidbody2D write-back: a kinematic body following its parent's Transform");
-            }
-            let (x, y, a) = (b.xf.p.x, b.xf.p.y, b.sweep.a);
-            if !x.is_finite() || !y.is_finite() || !a.is_finite() {
-                unimplemented!("Rigidbody2D::CorrectBodyState");
+                let (body, pose) = (ph.rigidbody.body, (ph.transform.position, ph.transform.rotation));
+                self.follow_transform(body, pose);
+                let m = &mut self.physicals[p].rigidbody.movement;
+                (m.current, m.body) = (pose, pose);
+                continue;
             }
             let chain = self.parent_chain(p);
             let t = &mut self.physicals[p].transform;
-            let mut cur = t.rotation;
-            if cur[3] < 0.0 {
-                cur = cur.map(|c| -c);
-            }
-            let h = atan2f(cur[2], cur[3]);
-            let turn = (h + h) * 0.5;
-            let undo = [-0.0, -0.0, -sinf(turn), cosf(turn)];
-            let half = a * 0.5;
-            let body = [0.0, 0.0, sinf(half), cosf(half)];
+            let pose = written_pose(b, t.position[2], t.rotation);
             // Transform::SetPositionAndRotation stores it local to the parent; Transform.position/rotation read
             // it back.
-            let pose = ([x, y, t.position[2]], qmul(qmul(body, undo), cur));
             let (local, world) = transform::set_world(&chain, pose.0, pose.1);
             (t.position, t.rotation, t.local) = (world.0, world.1, Some(local));
             let m = &mut self.physicals[p].rigidbody.movement;
             (m.current, m.body) = (pose, pose);
             self.refresh_nested(p);
+        }
+        // The bodies without a PhysicalBehaviour parent no other body, so going after every physical keeps each
+        // parent ahead of its children as the depth lists do.
+        for k in 0..self.node_rigidbodies.len() {
+            let nb = &self.node_rigidbodies[k];
+            if nb.rigidbody.detached.is_some() {
+                continue;
+            }
+            let b = self.world.body(nb.rigidbody.body);
+            if b.user.is_none() {
+                continue;
+            }
+            if nb.driven_by.is_none() && b.flags & BODY_AWAKE == 0 && !(nb.rigidbody.bodyType == 2 && self.transform_nodes[nb.node].parent.is_some()) {
+                continue;
+            }
+            let node = nb.node;
+            if let Some(parent) = nb.driven_by
+                && nb.rigidbody.bodyType == 1
+                && self.world.body(parent).flags & BODY_AWAKE != 0
+            {
+                let (body, pose) = (nb.rigidbody.body, self.node_world(node));
+                self.follow_transform(body, pose);
+                let m = &mut self.node_rigidbodies[k].rigidbody.movement;
+                (m.current, m.body) = (pose, pose);
+                continue;
+            }
+            let (position, rotation) = self.node_world(node);
+            let pose = written_pose(b, position[2], rotation);
+            self.set_node_world(node, pose);
+            self.node_rigidbodies[k].rigidbody.movement.current = pose;
+            self.node_rigidbodies[k].rigidbody.movement.body = pose;
+        }
+    }
+
+    /// Simulate's write-back for a kinematic body below an awake parent body: the body goes to its Transform (x/y,
+    /// and the z turn of the rotation with w made non-negative) and is woken; the Transform keeps its pose.
+    fn follow_transform(&mut self, body: BodyId, (position, rotation): ([f32; 3], [f32; 4])) {
+        let (mut z, mut w) = (rotation[2], rotation[3]);
+        if 0.0 > w {
+            (z, w) = (-z, -w);
+        }
+        let h = atan2f(z, w);
+        self.world.set_transform(body, Vec2::new(position[0], position[1]), h + h);
+        self.world.body_mut(body).wake();
+    }
+
+    /// A node's Transform ancestors, direct parent first.
+    fn node_parent_chain(&self, n: usize) -> Vec<transform::Trs> {
+        let mut chain = Vec::new();
+        let mut up = self.transform_nodes[n].parent;
+        while let Some(i) = up {
+            chain.push(self.node_trs(i));
+            up = self.transform_nodes[i].parent;
+        }
+        chain
+    }
+
+    /// Transform.position/rotation of a node.
+    pub(crate) fn node_world(&self, n: usize) -> ([f32; 3], [f32; 4]) {
+        let trs = self.node_trs(n);
+        let (mut v, mut r) = ([trs.t[0], trs.t[1], trs.t[2], 0.0], trs.q);
+        for p in &self.node_parent_chain(n) {
+            (v, r) = (transform::global_position(p, v), transform::global_rotation(p, r));
+        }
+        ([v[0], v[1], v[2]], r)
+    }
+
+    /// Transform::SetPositionAndRotation on a node: its local pose.
+    fn set_node_world(&mut self, n: usize, pose: ([f32; 3], [f32; 4])) {
+        let (local, _) = transform::set_world(&self.node_parent_chain(n), pose.0, pose.1);
+        let trs = &mut self.transform_nodes[n].trs;
+        (trs.t[0], trs.t[1], trs.t[2], trs.q) = (local.0[0], local.0[1], local.0[2], local.1);
+    }
+
+    /// The b2 body of a Rigidbody2D's owner.
+    pub(crate) fn owner_body(&self, o: BodyOwner) -> BodyId {
+        match o {
+            BodyOwner::Physical(p) => self.physicals[p].rigidbody.body,
+            BodyOwner::Node(k) => self.node_rigidbodies[k].rigidbody.body,
+        }
+    }
+
+    /// Transform.lossyScale of a Rigidbody2D's owner.
+    fn owner_lossy_scale(&self, o: BodyOwner) -> [f32; 3] {
+        match o {
+            BodyOwner::Physical(p) => self.lossy_scale(p),
+            BodyOwner::Node(k) => {
+                let n = self.node_rigidbodies[k].node;
+                let mut nodes = vec![self.node_trs(n)];
+                nodes.extend(self.node_parent_chain(n));
+                transform::lossy_scale(&nodes, self.node_world(n).1)
+            }
         }
     }
 
@@ -238,16 +346,25 @@ impl Game {
             // RigidbodyInterpolation2D.Extrapolate is never set by the game (prefabs and Global.CurrentInterpolationMode
             // only use None and Interpolate).
             assert_eq!(rb.interpolation, 1, "Rigidbody2D extrapolation");
-            let m = rb.movement;
-            let (prev, body) = (m.previous, m.body);
-            let s = 1.0 - t;
-            let pose = ([t * body.0[0] + s * prev.0[0], t * body.0[1] + s * prev.0[1], prev.0[2]], slerp(prev.1, body.1, t));
+            let pose = interpolated_pose(rb.movement, t);
             let chain = self.parent_chain(p);
             let ph = &mut self.physicals[p];
             ph.rigidbody.movement.current = pose;
             let (local, world) = transform::set_world(&chain, pose.0, pose.1);
             (ph.transform.position, ph.transform.rotation, ph.transform.local) = (world.0, world.1, Some(local));
             self.refresh_nested(p);
+        }
+        for k in 0..self.node_rigidbodies.len() {
+            let nb = &self.node_rigidbodies[k];
+            let rb = &nb.rigidbody;
+            if !rb.interpolating() || self.world.body(rb.body).flags & BODY_AWAKE == 0 || rb.bodyType == 1 && nb.driven_by.is_some() {
+                continue;
+            }
+            assert_eq!(rb.interpolation, 1, "Rigidbody2D extrapolation");
+            let pose = interpolated_pose(rb.movement, t);
+            let node = nb.node;
+            self.node_rigidbodies[k].rigidbody.movement.current = pose;
+            self.set_node_world(node, pose);
         }
     }
 
@@ -350,7 +467,7 @@ impl Game {
                         // SendMessage("OnJointBreak2D") to the joint's GameObject: PhysicalBehaviour's only compares
                         // `penetration.Joint` (a SliderJoint2D) with it, and no other rewritten script sits on a piece
                         // (a stabber's other scripts compare against their own joints too).
-                        if self.fixed_joints[f].slider.is_some() {
+                        if self.fixed_joints[f].slider.is_some() && matches!(self.fixed_joints[f].attached, BodyOwner::Physical(_)) {
                             self.physical_on_joint_break_slider(f);
                         }
                         // DestroyObjectHighLevel then removes the component.
@@ -433,9 +550,9 @@ pub struct FixedJoint {
     pub slider: Option<SliderJoint2d>,
     /// m_Joint (+0x58)
     pub joint: Option<JointId>,
-    /// The physical whose Rigidbody2D is body A, and the connectedBody's (None: the scene's ground body).
-    pub attached: usize,
-    pub connected: Option<usize>,
+    /// The owner of the Rigidbody2D that is body A, and the connectedBody's (None: the scene's ground body).
+    pub attached: BodyOwner,
+    pub connected: Option<BodyOwner>,
     /// GameObject.activeInHierarchy and Behaviour.enabled: Create only runs when both hold.
     pub active: bool,
     pub enabled: bool,
@@ -460,13 +577,13 @@ impl Game {
 
     fn fixed_ends(&self, f: usize) -> Ends {
         let j = &self.fixed_joints[f];
-        let scale = |p: usize| {
-            let s = self.lossy_scale(p);
+        let scale = |o: BodyOwner| {
+            let s = self.owner_lossy_scale(o);
             Vec2::new(s[0], s[1])
         };
         Ends {
-            body_a: self.physicals[j.attached].rigidbody.body,
-            body_b: j.connected.map(|c| self.physicals[c].rigidbody.body),
+            body_a: self.owner_body(j.attached),
+            body_b: j.connected.map(|c| self.owner_body(c)),
             scale_a: scale(j.attached),
             scale_b: j.connected.map_or(Vec2::new(1.0, 1.0), scale),
         }
@@ -476,7 +593,7 @@ impl Game {
     /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
     pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -487,7 +604,7 @@ impl Game {
         let f = self.fixed_joints.len();
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
-        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), joint: None, attached, connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -578,7 +695,7 @@ impl Game {
     /// Joint2D::SetConnectedBody (180c05a20): the new body is stored, then Cleanup(destroyed = true) forgets the
     /// stored reference angle and Create runs again whether or not a b2 joint existed. (A body of another scene
     /// is refused with a log; the rewrite has one scene. PhysicsManager2D::AutoSyncTransforms runs in between.)
-    pub fn fixed_joint_set_connected_body(&mut self, f: usize, connected: Option<usize>) {
+    pub fn fixed_joint_set_connected_body(&mut self, f: usize, connected: Option<BodyOwner>) {
         self.fixed_joints[f].connected = connected;
         self.sync_pending();
         self.fixed_joint_cleanup(f, true);
@@ -736,7 +853,7 @@ mod tests {
         let (def, a, b) = weld(&g, f);
         assert_eq!((a, b), (g.physicals[0].rigidbody.body, g.world.ground_body()));
         assert_eq!(def.reference_angle, 0.0 - 0.0);
-        g.fixed_joint_set_connected_body(f, Some(1));
+        g.fixed_joint_set_connected_body(f, Some(BodyOwner::Physical(1)));
         let (def, _, b) = weld(&g, f);
         assert_eq!(b, g.physicals[1].rigidbody.body);
         // The reference angle is connected minus attached; the forgotten one is derived again.
@@ -749,7 +866,7 @@ mod tests {
     fn recreate_keeps_live_reference_angle_and_reconfigures_anchor() {
         let mut g = fixture();
         let f = g.add_fixed_joint_component(0);
-        g.fixed_joint_set_connected_body(f, Some(1));
+        g.fixed_joint_set_connected_body(f, Some(BodyOwner::Physical(1)));
         g.world.body_mut(g.physicals[1].rigidbody.body).sweep.a = 2.0;
         g.fixed_joint_set_anchor(f, [0.5, 0.0]);
         let (def, _, _) = weld(&g, f);
@@ -758,7 +875,7 @@ mod tests {
         // Auto-configure ran again: the connected anchor is the world point in body B's frame.
         assert_eq!(g.fixed_joints[f].state.connected_anchor, def.local_anchor_b);
         // Re-selecting the connected body forgets it.
-        g.fixed_joint_set_connected_body(f, Some(1));
+        g.fixed_joint_set_connected_body(f, Some(BodyOwner::Physical(1)));
         assert_eq!(weld(&g, f).0.reference_angle, 2.0 - 0.0);
     }
 
@@ -766,7 +883,7 @@ mod tests {
     fn same_body_is_refused_without_a_joint() {
         let mut g = fixture();
         let f = g.add_fixed_joint_component(0);
-        g.fixed_joint_set_connected_body(f, Some(0));
+        g.fixed_joint_set_connected_body(f, Some(BodyOwner::Physical(0)));
         assert!(g.fixed_joints[f].joint.is_none());
         assert_eq!(g.world.joints.iter().flatten().count(), 0);
         assert!(!g.fixed_joints[f].state.anchor_configured);
@@ -775,7 +892,7 @@ mod tests {
         assert!(g.fixed_joints[f].joint.is_none());
         // An inactive object creates nothing either.
         g.fixed_joints[f].active = false;
-        g.fixed_joint_set_connected_body(f, Some(1));
+        g.fixed_joint_set_connected_body(f, Some(BodyOwner::Physical(1)));
         assert!(g.fixed_joints[f].joint.is_none());
     }
 

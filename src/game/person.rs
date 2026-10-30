@@ -283,8 +283,8 @@ impl Game {
             // An empty Collision2D exit to each collider still in the stay buffer (SendMessage skips inactive
             // objects, and a destroyed collider reads null).
             for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {
-                if pair.Active && !self.physicals[pair.Coll].destroyed && self.physicals[pair.Coll].active {
-                    self.physical_on_collision_exit(pair.Coll, &crate::b2::contacts2d::ScriptCollision::default());
+                if pair.Active && self.collider_alive(pair.Coll) {
+                    self.send_empty_collision_exit(pair.Coll);
                 }
             }
             // InvokeOnItemRemoved: the modding event only.

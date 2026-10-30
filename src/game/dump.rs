@@ -451,7 +451,7 @@ impl Game {
                 let name = coll.trim_start_matches('@').rsplit_once('#').unwrap().0;
                 let other = phys_names.iter().position(|n| n == name).ok_or_else(|| format!("collider {name}"))?;
                 let active = fields.iter().find(|(k, _)| k == "Active").unwrap().1 == "1";
-                g.physicals[i].onCollisionStayBuffer[slot] = Some(ColliderBoolPair { Active: active, Coll: other });
+                g.physicals[i].onCollisionStayBuffer[slot] = Some(ColliderBoolPair { Active: active, Coll: g.physicals[other].colliders[0] });
             }
         }
 
@@ -913,6 +913,7 @@ impl Game {
         self.MousePosition = self.input.mouse;
         // The BloodPuff pool (made at runtime: after the scene's behaviours).
         self.blood_puff_pool_update();
+        self.splash_pool_update();
         // Execution order 1050, above every spawnable script's.
         self.catalog_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
@@ -943,6 +944,7 @@ impl Game {
             self.chunksUpToDate = false;
         }
         self.blood_puff_particles_update();
+        self.splash_particles_update();
         // The Starts still due after the LateUpdate phase (a Person spawned this frame), before the render.
         self.run_pending_starts();
     }
@@ -1277,7 +1279,7 @@ fn compare_stabs(g: &Game, s: &Snapshot) -> Vec<String> {
         let connected = name(r.get("connected").unwrap_or("null"));
         let Some(f) = (0..g.fixed_joints.len()).find(|&f| {
             let j = &g.fixed_joints[f];
-            !j.destroyed && j.slider.is_some() && g.physicals[j.attached].name == r.name && j.connected.is_some_and(|c| g.physicals[c].name == connected)
+            !j.destroyed && j.slider.is_some() && matches!(j.attached, BodyOwner::Physical(a) if g.physicals[a].name == r.name) && matches!(j.connected, Some(BodyOwner::Physical(c)) if g.physicals[c].name == connected)
         }) else {
             out.push(format!("SliderJoint2D {} -> {connected}: ours missing", r.name));
             continue;

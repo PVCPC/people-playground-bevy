@@ -354,7 +354,7 @@ impl Body {
     }
 
     /// The wake Contact::Update and ContactManager::Destroy inline: static bodies are put to sleep instead.
-    fn wake(&mut self) {
+    pub(crate) fn wake(&mut self) {
         self.sleep_time = 0.0;
         if self.kind == BodyType::Static {
             self.flags &= !BODY_AWAKE;

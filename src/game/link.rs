@@ -45,6 +45,8 @@ pub struct Linked {
     pub map_lights: HashMap<usize, usize>,
     /// Game::waters index by object.
     pub waters: HashMap<usize, usize>,
+    /// Game::node_rigidbodies index by object.
+    pub node_rigidbodies: HashMap<usize, usize>,
     /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
     pub parent_audio: Option<usize>,
 }
@@ -228,6 +230,15 @@ impl Game {
                 p = inst.objects[t].parent;
             }
         }
+        // A Rigidbody2D without a PhysicalBehaviour: its own Transform is a node its body writes.
+        let bare_bodies: Vec<usize> = (0..n).filter(|&o| script(prefab, o, "PhysicalBehaviour").is_none() && prefab.objects[o].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_)))).collect();
+        for &o in &bare_bodies {
+            if !l.arenas.node.contains_key(&o) {
+                l.arenas.node.insert(o, self.transform_nodes.len());
+                let transform = prefab.objects[o].components.iter().position(|(_, c)| matches!(c, Component::Transform(_))).ok_or("an object without a Transform")?;
+                self.transform_nodes.push(TransformNode { id: inst.objects[o].components[transform], trs: inst.objects[o].trs, parent: None });
+            }
+        }
         for (&o, &i) in &l.arenas.node {
             self.transform_nodes[i].parent = inst.objects[o].parent.map(|t| l.arenas.node[&t]);
         }
@@ -261,28 +272,64 @@ impl Game {
             let p = *l.arenas.physical.get(&t).ok_or_else(|| format!("{}: a body under a Rigidbody2D without a PhysicalBehaviour", prefab.objects[t].name))?;
             self.node_bodies.insert(l.arenas.node[&t], p);
         }
-        // Colliders without a PhysicalBehaviour on their GameObject: the Transforms down from the nearest physical
-        // or node.
+        let mut node_rigidbodies = HashMap::new();
+        for &o in &bare_bodies {
+            let Some(Component::Rigidbody2D(rb)) = prefab.objects[o].components.iter().map(|(_, x)| x).find(|x| matches!(x, Component::Rigidbody2D(_))) else { unreachable!() };
+            // An inactive object's Rigidbody2D has no body (m_Body null) until it is activated.
+            let (body, detached) = match inst.bodies.get(&o) {
+                Some(&body) => (body, None),
+                None if !inst.objects[o].active => (usize::MAX, Some(crate::b2::world::RigidbodyMass { use_auto_mass: rb.use_auto_mass, mass: rb.mass, inertia: None, center_of_mass: None })),
+                None => unreachable!("an active Rigidbody2D without a body"),
+            };
+            let rigidbody = Rigidbody { body, bodyType: rb.body_type, collisionDetectionMode: rb.collision_detection, interpolation: rb.interpolate, movement: MovementState::default(), detached };
+            self.rigidbody_hierarchy_changed |= detached.is_none() && rb.body_type != 2;
+            let mut driven_by = None;
+            if rb.body_type != 2 && detached.is_none() {
+                let mut up = inst.objects[o].parent;
+                while let Some(t) = up {
+                    if prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(_))) {
+                        driven_by = Some(*inst.bodies.get(&t).ok_or_else(|| format!("{}: driven by a Rigidbody2D without a body", prefab.objects[o].name))?);
+                        break;
+                    }
+                    up = inst.objects[t].parent;
+                }
+            }
+            node_rigidbodies.insert(o, self.node_rigidbodies.len());
+            self.node_rigidbodies.push(NodeBody { node: l.arenas.node[&o], rigidbody, driven_by });
+        }
+        // Colliders and sprites without a PhysicalBehaviour on their GameObject: the Transforms down from the
+        // nearest physical or node.
+        let anchor_of = |o: usize| {
+            let (mut chain, mut up) = (Vec::new(), Some(o));
+            let anchor = loop {
+                let Some(t) = up else { break BareAnchor::Root };
+                if let Some(&p) = l.arenas.physical.get(&t) {
+                    break BareAnchor::Physical(p);
+                }
+                if let Some(&i) = l.arenas.node.get(&t) {
+                    break BareAnchor::Node(i);
+                }
+                chain.push(inst.objects[t].trs);
+                up = inst.objects[t].parent;
+            };
+            (anchor, chain)
+        };
         for o in (0..n).filter(|&o| !l.arenas.physical.contains_key(&o)) {
             for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
-                if !matches!(comp, Component::Collider2D(_)) {
-                    continue;
+                match comp {
+                    Component::Collider2D(_) => {
+                        let (anchor, chain) = anchor_of(o);
+                        let scripts = prefab.objects[o].components.iter().filter_map(|(_, x)| if let Component::Script { class, .. } = x { Some(class.clone()) } else { None }).collect();
+                        self.bare_colliders.insert(inst.objects[o].components[c], BareCollider { anchor, chain, scripts, active_self: prefab.objects[o].active });
+                    }
+                    Component::SpriteRenderer(r) => {
+                        let Some(sprite) = db.resolve(file, r.sprite) else { continue };
+                        let (anchor, chain) = anchor_of(o);
+                        let visible = inst.objects[o].active && r.enabled;
+                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size), visible });
+                    }
+                    _ => {}
                 }
-                let (mut chain, mut moves, mut up) = (Vec::new(), false, Some(o));
-                let anchor = loop {
-                    let Some(t) = up else { break BareAnchor::Root };
-                    if let Some(&p) = l.arenas.physical.get(&t) {
-                        break BareAnchor::Physical(p);
-                    }
-                    if let Some(&i) = l.arenas.node.get(&t) {
-                        break BareAnchor::Node(i);
-                    }
-                    moves |= prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Rigidbody2D(rb) if rb.body_type != 2));
-                    chain.push(inst.objects[t].trs);
-                    up = inst.objects[t].parent;
-                };
-                let scripts = prefab.objects[o].components.iter().any(|(_, x)| matches!(x, Component::Script { .. }));
-                self.bare_colliders.insert(inst.objects[o].components[c], BareCollider { anchor, chain, moves, scripts });
             }
         }
         for class in ["CirculationBehaviour", "ConnectedNodeBehaviour", "SkinMaterialHandler"] {
@@ -509,6 +556,9 @@ impl Game {
             for x in array(v, "ObjectsToBeActiveIfWater")? {
                 w.objects_to_be_active.push(l.object(x)?.ok_or("a null ObjectsToBeActiveIfWater entry")?);
             }
+            if let Some(r) = field(v, "Splash")?.pptr().and_then(|pp| db.resolve(file, pp)) {
+                w.splash_pool = Some(self.splash_pool_for(db, r)?);
+            }
             w.waterSizzles = db.resources_in("Audio/water_sizzle", 83)?.len();
             waters.insert(o, self.waters.len());
             self.waters.push(w);
@@ -583,7 +633,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, node_rigidbodies, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -750,8 +800,9 @@ impl Game {
     /// descendants, depth first, each object's components in order (disabled components included).
     fn autofix_components(&self, prefab: &Prefab, inst: &Instance, linked: &Linked, host: usize) -> AutofixJoints {
         let mut out = AutofixJoints::default();
-        let physical = |o: usize| {
-            linked.physicals.get(&o).copied().unwrap_or_else(|| unimplemented!("{}: the Rigidbody2D of a SliderJoint2D or FixedJoint2D below a HingeJointLimitAutofixBehaviour without a PhysicalBehaviour (the FixedJoint arena only knows physicals)", prefab.objects[o].name))
+        let physical = |o: usize| match linked.physicals.get(&o) {
+            Some(&p) => BodyOwner::Physical(p),
+            None => BodyOwner::Node(linked.node_rigidbodies[&o]),
         };
         let mut stack = vec![host];
         while let Some(o) = stack.pop() {

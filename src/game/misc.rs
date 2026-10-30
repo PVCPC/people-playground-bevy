@@ -373,8 +373,8 @@ pub struct AutofixJoint {
     /// The slot in `Game.anchored_joints` the break-limit walk reads.
     pub slot: Option<usize>,
     /// The physicals owning the attached and connected Rigidbody2D (None: the scene's ground body).
-    pub attached: usize,
-    pub connected: Option<usize>,
+    pub attached: super::BodyOwner,
+    pub connected: Option<super::BodyOwner>,
     pub enabled: bool,
 }
 
@@ -414,6 +414,8 @@ pub enum PendingStart {
     BloodExplosionSound,
     /// A new BloodPuff's ExplosionSoundBehviour (eight Near clips).
     BloodPuffSound,
+    /// A new pooled clone's ExplosionSoundBehviour.Start: Play draws one of its `Near` clips (the count).
+    ExplosionSound(usize),
     /// ExistifUnderwater.Start of a new BloodPuff's Extra decal emitter (Invert: off under water).
     BloodPuffEmitterWater(usize),
     /// SerialiseInstructions.Start: the number of SerialisableIdentity components it adds (their Regenerate
@@ -680,10 +682,11 @@ impl Game {
     /// After `inst`'s SyncTransforms recreated its joints: the snapshots of its sliders and FixedJoint2Ds that are waiting
     /// for HingeJointLimitAutofixBehaviour.Start follow.
     pub fn refresh_autofix_joints(&mut self, inst: &super::spawn::Instance) {
-        for joints in &mut self.autofix_joints {
+        let mut all = std::mem::take(&mut self.autofix_joints);
+        for joints in &mut all {
             for a in joints.sliders.iter_mut().chain(joints.fixeds.iter_mut()) {
                 let key = (a.object, a.component);
-                if inst.bodies.get(&a.object) != Some(&self.physicals[a.attached].rigidbody.body) {
+                if inst.bodies.get(&a.object) != Some(&self.owner_body(a.attached)) {
                     continue;
                 }
                 if let Some(st) = inst.anchored.get(&key) {
@@ -692,6 +695,7 @@ impl Game {
                 }
             }
         }
+        self.autofix_joints = all;
     }
 
     /// HingeJointLimitAutofixBehaviour.FixHinges: each limited hinge's limits mirrored.
@@ -719,7 +723,7 @@ impl Game {
             destroyed: false,
         });
         // The instance, if its SyncTransforms is still due, no longer owns the joint.
-        let body = self.physicals[a.attached].rigidbody.body;
+        let body = self.owner_body(a.attached);
         if let Some(inst) = self.unsynced.iter_mut().find(|i| i.bodies.get(&a.object) == Some(&body)) {
             inst.joints.remove(&(a.object, a.component));
             inst.anchored.remove(&(a.object, a.component));
@@ -771,6 +775,9 @@ impl Game {
                 }
                 PendingStart::BloodPuffSound => {
                     self.pick_random(8);
+                }
+                PendingStart::ExplosionSound(n) => {
+                    self.pick_random(n);
                 }
                 PendingStart::Person(p) => self.person_start(p),
                 PendingStart::HingeJointLimitAutofix(p) => self.hinge_joint_limit_autofix_start(p),
@@ -1016,7 +1023,7 @@ impl Game {
                         let ty = self.decal_descriptor(&self.splats[s].Decal.clone());
                         self.physical_decal(hit, ty, position, size, colour);
                     }
-                    None if self.bare_colliders[&collider].scripts => unimplemented!("SendMessage Decal to the scripts of a collider without a PhysicalBehaviour"),
+                    None if self.bare_colliders[&collider].receives(&["DecalControllerBehaviour", "DecalRenderer", "DecalRendererController"]) => unimplemented!("SendMessage Decal to the scripts of a collider without a PhysicalBehaviour"),
                     None => {}
                 }
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;

@@ -222,35 +222,58 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
 /// pixels so their borders keep their texel size).
 struct ObjectSprite(usize, f32);
 
-/// A sprite from the game's data for each non-limb physical object without one; textures decoded once.
+/// A SpriteRenderer on an object without a PhysicalBehaviour (`Game.renderers`), and the same scale.
+#[derive(Component)]
+struct RendererSprite(usize, f32);
+
+type Textures = std::collections::HashMap<(usize, i64), Handle<Image>>;
+
+/// A sprite from the game's data for each non-limb physical object and each other SpriteRenderer without one;
+/// textures decoded once.
 fn object_sprites(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     play: Res<Play>,
-    mut done: Local<usize>,
-    mut textures: Local<std::collections::HashMap<(usize, i64), Handle<Image>>>,
+    mut done: Local<(usize, usize)>,
+    mut textures: Local<Textures>,
 ) {
     let g = &play.game;
     let Some(db) = g.assets.as_deref() else { return };
     let limbs: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
-    for p in *done..g.physicals.len() {
+    for p in done.0..g.physicals.len() {
         let Some((r, color, order)) = g.physicals[p].sprite else { continue };
         if limbs.contains(&p) {
             continue;
         }
+        let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
+        // ponytail: sorting order only; sorting layers (TagManager order) when two layers overlap wrongly.
+        commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+    }
+    for i in done.1..g.renderers.len() {
+        let (r, color, order) = g.renderers[i].sprite;
+        let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.renderers[i].draw) else { continue };
+        commands.spawn((RendererSprite(i, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+    }
+    *done = (g.physicals.len(), g.renderers.len());
+}
+
+/// The Bevy sprite for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
+/// the scale from its units to the world.
+fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, textures: &mut Textures, r: crate::assets::db::ObjRef, color: [f32; 4], draw: ([bool; 2], i32, [f32; 2])) -> Option<(Sprite, Anchor, f32)> {
+    {
         let s = match crate::assets::components::Sprite::read(db.data(r)) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("{}: {e}", g.physicals[p].name);
-                continue;
+                eprintln!("sprite {r:?}: {e}");
+                return None;
             }
         };
-        let Some(t) = db.resolve(r.file, s.texture) else { continue };
+        let t = db.resolve(r.file, s.texture)?;
         let handle = match textures.get(&(t.file, t.path_id)) {
             Some(h) => h.clone(),
             None => {
                 let tex = crate::assets::components::Texture2D::read(db.data(t));
-                let Ok((tex, rgba)) = tex.and_then(|tex| tex.rgba(&db.data_dir).map(|px| (tex, px))) else { continue };
+                let Ok((tex, rgba)) = tex.and_then(|tex| tex.rgba(&db.data_dir).map(|px| (tex, px))) else { return None };
                 // Unity's rows run bottom first; an Image's top first.
                 let row = tex.width as usize * 4;
                 let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
@@ -273,7 +296,7 @@ fn object_sprites(
         sprite.rect = Some(Rect::new(x, height - y - h, x + w, height - y));
         sprite.custom_size = Some(Vec2::new(w, h) / s.pixels_to_units);
         sprite.color = Color::srgba(color[0], color[1], color[2], color[3]);
-        let ([flip_x, flip_y], draw_mode, size) = g.physicals[p].sprite_draw;
+        let ([flip_x, flip_y], draw_mode, size) = draw;
         (sprite.flip_x, sprite.flip_y) = (flip_x, flip_y);
         let pivot = Vec2::from_array(s.pivot) * Vec2::new(s.rect[2], s.rect[3]) - Vec2::from_array(s.texture_rect_offset);
         let mut anchor = Anchor(pivot / Vec2::new(w, h) - Vec2::splat(0.5));
@@ -289,10 +312,8 @@ fn object_sprites(
             anchor = Anchor(Vec2::from_array(s.pivot) - Vec2::splat(0.5));
             scale = 1.0 / s.pixels_to_units;
         }
-        // ponytail: sorting order only; sorting layers (TagManager order) when two layers overlap wrongly.
-        commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+        Some((sprite, anchor, scale))
     }
-    *done = g.physicals.len();
 }
 
 /// A sprite for each limb without one: the starting people's, then the ones spawned since.
@@ -314,6 +335,7 @@ fn draw(
     play: Res<Play>,
     mut sprites: Query<(&LimbSprite, &mut Transform, &mut Visibility)>,
     mut objects: Query<(&ObjectSprite, &mut Transform, &mut Visibility), Without<LimbSprite>>,
+    mut renderers: Query<(&RendererSprite, &mut Transform, &mut Visibility), (Without<LimbSprite>, Without<ObjectSprite>)>,
     mut hud: Single<&mut Text, With<Hud>>,
     mut gizmos: Gizmos,
 ) {
@@ -337,6 +359,17 @@ fn draw(
         let z = transform.translation.z;
         *transform = Transform::from_xyz(x, y, z).with_rotation(Quat::from_xyzw(qx, qy, qz, qw)).with_scale(Vec3::new(s[0] * k, s[1] * k, 1.0));
         *visibility = if p.active && !p.isDisintegrated { Visibility::Inherited } else { Visibility::Hidden };
+    }
+    for (&RendererSprite(i, k), mut transform, mut visibility) in &mut renderers {
+        let r = &g.renderers[i];
+        let ([x, y, _], [qx, qy, qz, qw], s) = g.anchored_world(r.anchor, &r.chain);
+        let z = transform.translation.z;
+        *transform = Transform::from_xyz(x, y, z).with_rotation(Quat::from_xyzw(qx, qy, qz, qw)).with_scale(Vec3::new(s[0] * k, s[1] * k, 1.0));
+        let shown = match r.anchor {
+            crate::game::BareAnchor::Physical(p) => g.physicals[p].active && !g.physicals[p].isDisintegrated,
+            _ => true,
+        };
+        *visibility = if r.visible && shown { Visibility::Inherited } else { Visibility::Hidden };
     }
     // Everything else (sprite-less map parts and props) as collider outlines.
     let mut limb_bodies: Vec<_> = g.limbs.iter().map(|l| g.physicals[l.PhysicalBehaviour].rigidbody.body).collect();

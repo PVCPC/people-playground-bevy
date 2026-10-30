@@ -1,7 +1,11 @@
 //! WaterBehaviour and WaterBehaviourManager: the water volumes (their trigger collider, buoyancy and drag on
 //! every physical object, the temperature states) and the IsUnderWater flag they keep.
+use super::misc::{ObjectPool, PendingStart, SlotSet};
 use super::{d, mathf, script, Game};
-use crate::assets::db::Component;
+use crate::assets::db::{AssetDb, Component, ObjRef, Prefab};
+use crate::assets::mono::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
 use crate::b2::{math::Vec2 as V, world::FixtureId};
 use crate::unity::transform::{global_position, Trs};
 
@@ -34,12 +38,214 @@ script! {
         objects_to_be_active: Vec<usize> = Vec::new(),
         /// waterSizzles.Length (Resources.LoadAll<AudioClip>("Audio/water_sizzle")).
         waterSizzles: usize = 0,
+        /// The pool of its Splash prefab (`Game::splash_pools`); None when Splash is null.
+        splash_pool: Option<usize> = None,
+        /// wasFrozen and frozenInIce (a HashSet<PhysicalBehaviour>, in slot order), as `physicals` indices.
+        was_frozen: bool = false,
+        frozen_in_ice: SlotSet<usize> = SlotSet::default(),
         /// currentlyInWater[0..currentlyInWaterCount), as `physicals` indices.
         currentlyInWater: Vec<usize> = Vec::new(),
     }
 }
 
+/// A FrozenInIceBehaviour a water added to a physical object.
+#[derive(Clone, Debug)]
+pub struct FrozenInIce {
+    pub physical: usize,
+    /// The SkinMaterialHandler on the same object (its limb) and the ShouldRot it had.
+    pub skin: Option<usize>,
+    pub shouldRotOriginal: bool,
+    /// A pending Object.Destroy(component): the DelayedCallManager time it runs at.
+    pub destroy_at: Option<f64>,
+    pub destroyed: bool,
+}
+
+/// TagManager's custom tag "Poolable" (tags[8]).
+const POOLABLE_TAG: u16 = 20008;
+
+/// A Splash clone of an ObjectPoolBehaviour: gameObject.activeSelf and the root ParticleSystem's time.
+#[derive(Clone, Debug)]
+pub struct SplashItem {
+    pub active: bool,
+    /// The root ParticleSystem (lengthInSec 5, not looping, one burst at 0 whose particles and sub-emitter particles
+    /// live at most 2 s) stops when its time reaches 5 s (stopAction Callback: PoolableParticleSystemHelper returns the
+    /// clone). The clock is a double, as BloodPuff's.
+    pub particle_time: f64,
+    /// Destroyed by ObjectPoolBehaviour.Clear.
+    pub destroyed: bool,
+}
+
+/// The ObjectPoolBehaviour PoolGenerator makes for a Splash prefab (once it is first requested), and what the prefab
+/// holds that the simulation reads.
+#[derive(Clone, Debug)]
+pub struct SplashPool {
+    pub source: ObjRef,
+    pub prefab: Arc<Prefab>,
+    pub original_ids: Arc<HashMap<ObjRef, i32>>,
+    /// The prefab root's tag is Poolable.
+    pub poolable: bool,
+    /// ExplosionSoundBehviour.Play's `Near.PickRandom()` draw: Near.Length, when the behaviour is enabled and has an
+    /// AudioSource.
+    pub sound: Option<usize>,
+    /// GetComponentsInChildren<ParticleSystem>().Count: each gets a Random.Range in DoSplash.
+    pub particle_systems: usize,
+    /// PoolGenerator.Ensure ran.
+    pub ensured: bool,
+    pub pool: ObjectPool,
+    pub items: Vec<SplashItem>,
+}
+
+/// PoolGenerator.PoolSize
+const POOL_SIZE: usize = 256;
+/// ParticleSystem class id.
+const PARTICLE_SYSTEM: i32 = 198;
+/// AudioSource class id.
+const AUDIO_SOURCE: i32 = 82;
+
 impl Game {
+    /// The pool of the Splash prefab `source`, read from the data the first time a water names it.
+    pub fn splash_pool_for(&mut self, db: &mut AssetDb, source: ObjRef) -> Result<usize, String> {
+        if let Some(i) = self.splash_pools.iter().position(|p| p.source == source) {
+            return Ok(i);
+        }
+        let prefab = db.prefab(source)?;
+        let root = &prefab.objects[0];
+        let sound = root.components.iter().find_map(|(_, c)| match c {
+            Component::Script { class, enabled, fields, .. } if class == "ExplosionSoundBehviour" => {
+                let source_set = fields.get("audioSource").and_then(Value::pptr).is_some_and(|p| !p.is_null());
+                let has_source = source_set || root.components.iter().any(|(_, c)| matches!(c, Component::Other(AUDIO_SOURCE)));
+                // DistantSound (SoundType.None = 0) is checked in Play too.
+                assert!(fields.get("DistantSound").and_then(Value::i64) == Some(0), "ExplosionSoundBehviour.DistantSound");
+                (*enabled && has_source).then(|| fields.get("Near").and_then(Value::array).expect("Near").len())
+            }
+            _ => None,
+        });
+        let particle_systems = prefab.objects.iter().enumerate().filter(|(o, _)| self.prefab_object_active(&prefab, *o)).map(|(_, ob)| ob.components.iter().filter(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))).count()).sum();
+        self.splash_pools.push(SplashPool {
+            source,
+            poolable: root.tag == POOLABLE_TAG,
+            sound,
+            particle_systems,
+            original_ids: Arc::new(db.resource_load_order()?),
+            prefab: Arc::new(prefab),
+            ensured: false,
+            pool: ObjectPool::default(),
+            items: Vec::new(),
+        });
+        Ok(self.splash_pools.len() - 1)
+    }
+
+    /// activeInHierarchy of a prefab object.
+    fn prefab_object_active(&self, prefab: &Prefab, mut o: usize) -> bool {
+        loop {
+            if !prefab.objects[o].active {
+                return false;
+            }
+            match prefab.objects[o].parent {
+                Some(p) => o = p,
+                None => return true,
+            }
+        }
+    }
+
+    /// PoolGenerator.RequestPrefab(Splash, position): ObjectPoolBehaviour.Request, returning the item.
+    fn splash_request(&mut self, s: usize) -> Option<usize> {
+        if !self.splash_pools[s].ensured {
+            // Ensure: new GameObject(name + " pool").AddComponent<ObjectPoolBehaviour>() takes the GameObject's,
+            // its Transform's and the behaviour's instance ids.
+            for _ in 0..3 {
+                self.allocate_instance_id();
+            }
+            self.splash_pools[s].ensured = true;
+        }
+        let pool = &mut self.splash_pools[s];
+        pool.pool.inactivityTimer = 0.0;
+        let first = pool.pool.available.iter().next().copied();
+        if let Some(i) = first {
+            pool.pool.available.remove_where(|&x| x == i);
+            // SetActive(true) replays the particle systems (playOnAwake); OnPoolableReinitialised is
+            // ExplosionSoundBehviour.Start (Play).
+            pool.items[i].active = true;
+            pool.items[i].particle_time = 0.0;
+            let sound = pool.sound;
+            if let Some(n) = sound {
+                self.pick_random(n);
+            }
+            return Some(i);
+        }
+        if pool.pool.created.len() >= POOL_SIZE {
+            return None;
+        }
+        // Instantiate(Prefab, position, identity); the position and rotation only place the particles and the sound.
+        let (prefab, ids, sound) = (pool.prefab.clone(), pool.original_ids.clone(), pool.sound);
+        self.instantiate_native(&prefab, [0.0; 3], [0.0, 0.0, 0.0, 1.0], &ids);
+        let pool = &mut self.splash_pools[s];
+        pool.items.push(SplashItem { active: true, particle_time: 0.0, destroyed: false });
+        let i = pool.items.len() - 1;
+        pool.pool.created.push(i);
+        // Start of the clone's ExplosionSoundBehviour (Play).
+        if let Some(n) = sound {
+            self.pending_starts.push(PendingStart::ExplosionSound(n));
+        }
+        Some(i)
+    }
+
+    /// WaterBehaviour.DoSplash after its gates: the pooled Splash and the Random.Range(1f, 1.4f) of each of its
+    /// ParticleSystems (their start size). The clone's position (Trigger.bounds.ClosestPoint), rotation, AudioSource
+    /// volume and the particle modules are presentation only.
+    fn water_splash(&mut self, w: usize) {
+        let Some(s) = self.waters[w].splash_pool else { unimplemented!("WaterBehaviour.DoSplash with a null Splash (NullReferenceException)") };
+        if !self.splash_pools[s].poolable {
+            unimplemented!("WaterBehaviour.DoSplash: Object.Instantiate of a Splash prefab that is not tagged Poolable");
+        }
+        // Trigger.bounds starts with the AutoSyncTransforms.
+        self.sync_pending();
+        if self.splash_request(s).is_none() {
+            return;
+        }
+        for _ in 0..self.splash_pools[s].particle_systems {
+            self.random.range(1.0, 1.4);
+        }
+    }
+
+    /// ObjectPoolBehaviour.Update of the Splash pools: Clear after 300 s with every object back.
+    pub fn splash_pool_update(&mut self) {
+        let dt = self.time.deltaTime;
+        for pool in &mut self.splash_pools {
+            if pool.pool.created.is_empty() {
+                continue;
+            }
+            pool.pool.inactivityTimer += dt;
+            if pool.pool.inactivityTimer > 300.0 && pool.pool.available.iter().count() == pool.pool.created.len() {
+                for &i in &pool.pool.created {
+                    pool.items[i].destroyed = true;
+                }
+                pool.pool.created.clear();
+                pool.pool.available.clear();
+                pool.pool.inactivityTimer = 0.0;
+            }
+        }
+    }
+
+    /// The particle systems' update after LateUpdate: a Splash whose root system ran its 5 s stops, and
+    /// PoolableParticleSystemHelper.OnParticleSystemStopped returns it to the pool.
+    pub fn splash_particles_update(&mut self) {
+        let dt = self.time.deltaTime;
+        for pool in &mut self.splash_pools {
+            for i in 0..pool.items.len() {
+                let item = &mut pool.items[i];
+                if !item.active || item.destroyed {
+                    continue;
+                }
+                item.particle_time += dt as f64;
+                if item.particle_time >= 5.0 {
+                    item.active = false;
+                    pool.pool.available.add(i);
+                }
+            }
+        }
+    }
+
     /// WaterBehaviour.IsEvaporated
     fn water_is_evaporated(&self, w: usize) -> bool {
         self.AmbientTemperature > (d(self.waters[w].BoilingPointCelsius) + 100.0).f()
@@ -144,16 +350,134 @@ impl Game {
         }
     }
 
-    /// WaterBehaviour.UpdateTemperatureState. SetFrozen is the only thing that sets wasFrozen and fills
-    /// frozenInIce, so the unfreezing loop has nothing to do.
+    /// FreezeStackController.RequestFreeze(a): the first request makes the Rigidbody2D static.
+    fn freeze_request(&mut self, p: usize) {
+        if self.physicals[p].destroyed {
+            return;
+        }
+        if let Some(n) = self.freeze_stack.get_mut(&p) {
+            *n += 1;
+            return;
+        }
+        self.freeze_stack.insert(p, 1);
+        self.rigidbody_set_body_type(p, 2);
+    }
+
+    /// FreezeStackController.RequestUnfreeze(a): the last release makes the Rigidbody2D dynamic again.
+    fn freeze_request_unfreeze(&mut self, p: usize) {
+        if self.physicals[p].destroyed {
+            return;
+        }
+        let Some(n) = self.freeze_stack.get_mut(&p) else { return };
+        *n -= 1;
+        if *n <= 0 {
+            self.freeze_stack.remove(&p);
+            self.rigidbody_set_body_type(p, 0);
+        }
+    }
+
+    /// Rigidbody2D.bodyType = t (0 Dynamic, 2 Static).
+    fn rigidbody_set_body_type(&mut self, p: usize, body_type: i32) {
+        unimplemented!("{}: Rigidbody2D.bodyType = {body_type} (Rigidbody2D::SetBodyType: b2Body::SetType's body-list move and contact destruction, FlagAllColliderContactsForRecreate, RecalculateContacts, CheckForDrivenByParentRigidbody)", self.physicals[p].name);
+    }
+
+    /// physical.gameObject.AddComponent<FrozenInIceBehaviour>(): its Awake takes the SkinMaterialHandler's ShouldRot.
+    fn frozen_in_ice_add(&mut self, p: usize) {
+        self.allocate_instance_id();
+        let skin = self.limbs.iter().position(|l| l.PhysicalBehaviour == p);
+        let mut f = FrozenInIce { physical: p, skin, shouldRotOriginal: false, destroy_at: None, destroyed: false };
+        if let Some(l) = skin {
+            f.shouldRotOriginal = self.skins[l].ShouldRot;
+            self.skins[l].ShouldRot = false;
+        }
+        self.frozen_in_ice.push(f);
+    }
+
+    /// `item.TryGetComponent<FrozenInIceBehaviour>(out c)` then Object.Destroy(c) and RequestUnfreeze(item.rigidbody).
+    fn frozen_in_ice_release(&mut self, p: usize) {
+        if let Some(i) = self.frozen_in_ice.iter().position(|f| f.physical == p && !f.destroyed) {
+            // DestroyObjectDelayed: queued at min(fixedTimeAsDouble, the frame's time); a second Destroy finds it queued.
+            let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+            self.frozen_in_ice[i].destroy_at.get_or_insert(at);
+            self.freeze_request_unfreeze(p);
+        }
+    }
+
+    /// The FrozenInIceBehaviours' queued destroys due by now, as (time, index).
+    pub fn frozen_in_ice_due_destroys(&self, now: f64) -> Vec<(f64, usize)> {
+        (0..self.frozen_in_ice.len()).filter_map(|i| self.frozen_in_ice[i].destroy_at.filter(|&at| at <= now).map(|at| (at, i))).collect()
+    }
+
+    /// FrozenInIceBehaviour.OnDestroy: the skin gets its ShouldRot back.
+    pub fn frozen_in_ice_run_destroy(&mut self, i: usize) {
+        let f = &mut self.frozen_in_ice[i];
+        f.destroy_at = None;
+        f.destroyed = true;
+        let (p, skin, rot) = (f.physical, f.skin, f.shouldRotOriginal);
+        if let Some(l) = skin.filter(|_| !self.physicals[p].destroyed) {
+            self.skins[l].ShouldRot = rot;
+        }
+    }
+
+    /// WaterBehaviour.SetFrozen
+    fn water_set_frozen(&mut self, w: usize) {
+        let sound = self.waters[w].boiling_sound;
+        self.water_set_active(w, sound, false);
+        self.waters[w].was_frozen = true;
+        // LayerMask.GetMask("Bounds") (layer 11); Ignore is empty.
+        for p in 0..self.physicals.len() {
+            let ph = &self.physicals[p];
+            if !ph.in_world || ph.destroyed {
+                continue;
+            }
+            let go = self.world.body(ph.rigidbody.body).user.expect("a physical's Rigidbody2D").game_object;
+            if self.world.layers[&go] == 11 || self.waters[w].frozen_in_ice.iter().any(|&x| x == p) {
+                continue;
+            }
+            let grid = ph.LocalColliderGridPoints.clone().unwrap_or_else(|| unimplemented!("NullReferenceException: LocalColliderGridPoints of {}", ph.name));
+            let mut num = 0;
+            for local in &grid {
+                let point = self.transform_point3(p, [local[0], local[1], 0.0]);
+                if self.water_is_point_inside(w, [point[0], point[1]]) {
+                    num += 1;
+                    if num as f32 / grid.len() as f32 >= 0.05 {
+                        let rb = self.physicals[p].rigidbody.clone();
+                        rb.set_velocity(&mut self.world, [0.0, 0.0]);
+                        rb.set_angular_velocity(&mut self.world, 0.0);
+                        self.freeze_request(p);
+                        self.waters[w].frozen_in_ice.add(p);
+                        self.frozen_in_ice_add(p);
+                        let ph = &mut self.physicals[p];
+                        ph.Temperature = mathf::min(ph.Temperature, self.AmbientTemperature);
+                        break;
+                    }
+                }
+            }
+        }
+        self.water_update_objects_to_be_active(w, false);
+        // SpriteRenderer.enabled = true (rendering).
+        let ice = self.waters[w].ice_object;
+        self.water_set_active(w, ice, true);
+    }
+
+    /// WaterBehaviour.UpdateTemperatureState
     pub fn water_update_temperature_state(&mut self, w: usize) {
         let ice = self.waters[w].ice_object;
         self.water_set_active(w, ice, false);
         if self.water_is_frozen(w) {
-            // BoilingWaterSound off, then each physical in the water gets FreezeStackController.RequestFreeze and a
-            // FrozenInIceBehaviour, the objects go off and Ice.gameObject.SetActive(true).
-            unimplemented!("WaterBehaviour.SetFrozen (FreezeStackController, FrozenInIceBehaviour, GameObject.SetActive(true))");
+            self.water_set_frozen(w);
+            return;
         }
+        if self.waters[w].was_frozen {
+            let items: Vec<usize> = self.waters[w].frozen_in_ice.iter().copied().collect();
+            for p in items {
+                if !self.physicals[p].destroyed {
+                    self.frozen_in_ice_release(p);
+                }
+            }
+        }
+        self.waters[w].was_frozen = false;
+        self.waters[w].frozen_in_ice.clear();
         let sound = self.waters[w].boiling_sound;
         if self.water_is_evaporated(w) {
             // SetEvaporated
@@ -185,10 +509,7 @@ impl Game {
         if ph.rigidbody.velocity(&self.world)[1].abs() < 0.75 {
             return;
         }
-        // Splash.CompareTag("Poolable") ? PoolGenerator.Instance.RequestPrefab(Splash, ...) : Object.Instantiate(...),
-        // then the clone's rotation, AudioSource volume and each ParticleSystem's shape radius and start size
-        // (Random.Range(1f, 1.4f)) and speed.
-        unimplemented!("WaterBehaviour.DoSplash: the Splash prefab (PoolGenerator.RequestPrefab / Object.Instantiate, ParticleSystem modules)");
+        self.water_splash(w);
     }
 
     /// WaterBehaviour.GetDragFactor
@@ -211,7 +532,35 @@ impl Game {
     fn water_fixed_update(&mut self, w: usize) {
         self.waters[w].currentlyInWater.clear();
         if self.water_is_frozen(w) {
-            unimplemented!("WaterBehaviour.ManagedFixedUpdate while frozen (Ice.Temperature, frozenInIce)");
+            let ice = self.waters[w].ice;
+            self.physicals[ice].Temperature = self.AmbientTemperature;
+            let even = self.time.frameCount % 2 == 0;
+            let items: Vec<usize> = self.waters[w].frozen_in_ice.iter().copied().collect();
+            for p in items {
+                if self.physicals[p].destroyed {
+                    continue;
+                }
+                if self.physicals[p].OnFire {
+                    self.extinguish(p);
+                }
+                self.physicals[p].Wetness = 1.0;
+                if !even {
+                    continue;
+                }
+                let grid = self.physicals[p].LocalColliderGridPoints.clone().unwrap_or_else(|| unimplemented!("NullReferenceException: LocalColliderGridPoints"));
+                let mut inside = false;
+                for local in &grid {
+                    let point = self.transform_point3(p, [local[0], local[1], 0.0]);
+                    if self.water_is_point_inside(w, [point[0], point[1]]) {
+                        inside = true;
+                        break;
+                    }
+                }
+                if !inside {
+                    self.frozen_in_ice_release(p);
+                }
+            }
+            return;
         }
         if self.water_is_evaporated(w) {
             return;

@@ -769,15 +769,52 @@ pub enum BareAnchor {
 }
 
 /// A Collider2D's GameObject without a PhysicalBehaviour: its local TRS and those of its ancestors up to the nearest
-/// physical or transform node (object first). None of them is ever moved by the rewritten scripts.
+/// physical or transform node (object first). Every Rigidbody2D's object is one of those, so nothing in the chain
+/// moves.
 #[derive(Clone, Debug)]
 pub struct BareCollider {
     pub anchor: BareAnchor,
     pub chain: Vec<crate::unity::transform::Trs>,
-    /// A Rigidbody2D in the chain moves the Transforms with its body.
-    pub moves: bool,
-    /// The GameObject has MonoBehaviours (SendMessage receivers).
-    pub scripts: bool,
+    /// The GameObject's MonoBehaviour classes (SendMessage receivers).
+    pub scripts: Vec<String>,
+    /// GameObject.activeSelf.
+    pub active_self: bool,
+}
+
+impl BareCollider {
+    /// Whether SendMessage(message) finds a receiver among its scripts (the classes declaring the method).
+    pub fn receives(&self, receivers: &[&str]) -> bool {
+        self.scripts.iter().any(|s| receivers.contains(&s.as_str()))
+    }
+}
+
+/// A Rigidbody2D on a GameObject without a PhysicalBehaviour (FoliageBehaviour leaves, grenade pins, the Tank's
+/// hinge): its Transform is `transform_nodes[node]`, whose local pose the body writes.
+#[derive(Clone, Debug)]
+pub struct NodeBody {
+    pub node: usize,
+    pub rigidbody: Rigidbody,
+    /// CheckForDrivenByParentRigidbody: the nearest ancestor Rigidbody2D's body.
+    pub driven_by: Option<usize>,
+}
+
+/// A SpriteRenderer on a GameObject without a PhysicalBehaviour: where its Transform hangs, and what it draws.
+#[derive(Clone, Debug)]
+pub struct Renderer {
+    pub anchor: BareAnchor,
+    pub chain: Vec<crate::unity::transform::Trs>,
+    pub sprite: (crate::assets::db::ObjRef, [f32; 4], i16),
+    /// flipX/flipY, drawMode, size.
+    pub draw: ([bool; 2], i32, [f32; 2]),
+    /// GameObject.activeInHierarchy and Renderer.enabled at instantiation.
+    pub visible: bool,
+}
+
+/// The object owning a Rigidbody2D: a physical, or a `node_rigidbodies` entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BodyOwner {
+    Physical(usize),
+    Node(usize),
 }
 
 /// A Joint2D in PhysicsScene2D.m_JointBreakLimits: a hinge, a limb's gore-string SpringJoint2D, a FixedJoint2D, or
@@ -860,6 +897,11 @@ pub struct Game {
     pub waters: Vec<water::Water>,
     /// WaterBehaviour.waters: indices into `waters`, in Awake order.
     pub water_list: Vec<usize>,
+    /// FreezeStackController.stack: the physical objects' Rigidbody2Ds with their request counts.
+    pub freeze_stack: std::collections::HashMap<usize, i32>,
+    pub frozen_in_ice: Vec<water::FrozenInIce>,
+    /// The pools of the Splash prefabs the waters name.
+    pub splash_pools: Vec<water::SplashPool>,
     /// Global.main.DynamicSqrdVelocityThreshold
     pub DynamicSqrdVelocityThreshold: f32,
     /// Global.main.CameraControlBehaviour.BoundingBox
@@ -892,6 +934,10 @@ pub struct Game {
     pub node_bodies: std::collections::HashMap<usize, usize>,
     /// Colliders on GameObjects without a PhysicalBehaviour, by Collider2D id: their Transforms for the queries.
     pub bare_colliders: std::collections::HashMap<i32, BareCollider>,
+    /// Rigidbody2Ds on GameObjects without a PhysicalBehaviour.
+    pub node_rigidbodies: Vec<NodeBody>,
+    /// SpriteRenderers on GameObjects without a PhysicalBehaviour (drawing only).
+    pub renderers: Vec<Renderer>,
     /// The DecalDescriptor assets in use (DecalController.descriptor indexes it).
     pub decal_descriptors: Vec<misc::DecalDescriptor>,
     /// Instances whose Transform changes (an Awake's or the catalog's scale) wait for Physics2D's next

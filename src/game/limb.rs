@@ -1448,9 +1448,12 @@ impl Game {
         }
         due.extend(self.tool_due_destroys(now).into_iter().map(|t| (t, 2, 0)));
         due.extend(self.person_due_destroys(now).into_iter().map(|(t, p)| (t, 3, p)));
+        due.extend(self.frozen_in_ice_due_destroys(now).into_iter().map(|(t, i)| (t, 4, i)));
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
-            if kind == 3 {
+            if kind == 4 {
+                self.frozen_in_ice_run_destroy(l);
+            } else if kind == 3 {
                 self.person_run_destroy(l);
             } else if kind == 2 {
                 self.tool_run_destroy(t);

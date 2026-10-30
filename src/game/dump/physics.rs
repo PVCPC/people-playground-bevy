@@ -420,6 +420,7 @@ fn collision_record(r: &Record, bodies: &HashMap<String, BodyId>, fixtures: &Has
         is_trigger: flags[1] != 0,
         flag_for_recreate: flags[2] != 0,
         swapped: flags[3] != 0,
+        rigidbody_ids: [None; 2],
     })
 }
 

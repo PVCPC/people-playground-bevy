@@ -235,30 +235,30 @@ impl Game {
 
     /// Transform.position of a bare collider's GameObject: its local position through its chain, then the anchor's.
     pub(super) fn bare_position(&self, collider: i32) -> [f32; 3] {
-        use crate::unity::transform::global_position;
         let Some(b) = self.bare_colliders.get(&collider) else { panic!("collider {collider} is neither a physical's nor bare") };
-        if b.moves {
-            unimplemented!("Transform of a collider under a Rigidbody2D without a PhysicalBehaviour");
-        }
-        let mut v = b.chain[0].t;
-        v[3] = 0.0;
-        for n in &b.chain[1..] {
-            v = global_position(n, v);
-        }
-        match b.anchor {
-            super::BareAnchor::Physical(p) => {
-                for n in self.local_chain(p).iter().rev() {
-                    v = global_position(n, v);
-                }
-            }
+        self.anchored_world(b.anchor, &b.chain).0
+    }
+
+    /// Transform.position, rotation and the product of the local scales of an object `chain` (object first) below
+    /// `anchor`.
+    pub fn anchored_world(&self, anchor: super::BareAnchor, chain: &[crate::unity::transform::Trs]) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        use crate::unity::transform::{global_position, global_rotation, Trs};
+        let mut nodes: Vec<Trs> = chain.to_vec();
+        match anchor {
+            super::BareAnchor::Physical(p) => nodes.extend(self.local_chain(p).into_iter().rev()),
             super::BareAnchor::Node(mut i) => loop {
-                v = global_position(&self.node_trs(i), v);
+                nodes.push(self.node_trs(i));
                 let Some(up) = self.transform_nodes[i].parent else { break };
                 i = up;
             },
             super::BareAnchor::Root => {}
         }
-        [v[0], v[1], v[2]]
+        let (mut v, mut r, mut s) = ([0.0; 4], [0.0, 0.0, 0.0, 1.0], [1.0f32; 3]);
+        for n in &nodes {
+            (v, r) = (global_position(n, v), global_rotation(n, r));
+            s = [s[0] * n.s[0], s[1] * n.s[1], s[2] * n.s[2]];
+        }
+        ([v[0], v[1], v[2]], r, s)
     }
 
 

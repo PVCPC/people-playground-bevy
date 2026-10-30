@@ -52,6 +52,9 @@ pub struct Collision2D {
     pub flag_for_recreate: bool,
     /// The b2Contact's fixture A belongs to collider B.
     pub swapped: bool,
+    /// The Rigidbody2D instance ids of A and B, taken when the report was made: the component outlives its b2 body
+    /// (a disintegrated limb) until the callbacks have all run.
+    pub rigidbody_ids: [Option<i32>; 2],
 }
 
 pub type CollisionId = usize;
@@ -226,6 +229,7 @@ impl World {
                 is_trigger: trigger,
                 flag_for_recreate: false,
                 swapped,
+                rigidbody_ids: [None; 2],
             };
             if !trigger {
                 r.manifolds.push(manifold);
@@ -375,7 +379,13 @@ impl World {
             collider_b: r.collider_b,
             rigidbody_a: other_object(r.rigidbody_a, r.collider_a),
             rigidbody_b: other_object(r.rigidbody_b, r.collider_b),
-            collision: if trigger { None } else { Some(r.clone()) },
+            collision: if trigger {
+                None
+            } else {
+                let mut c = r.clone();
+                c.rigidbody_ids = [r.rigidbody_a, r.rigidbody_b].map(|b| b.and_then(|b| self.body(b).user).map(|u| u.id));
+                Some(c)
+            },
         }
     }
 
@@ -464,10 +474,10 @@ impl World {
     /// PhysicsManager2D::ConvertCollision2DToScripting (180beb220) with PopulateContacts (180bf53c0): the
     /// Collision2D seen from `receiving`; collider B's view negates the normal and relative velocities.
     pub fn script_collision(&self, r: &Collision2D, receiving: i32) -> ScriptCollision {
-        let rb = |b: Option<BodyId>| b.and_then(|b| self.body(b).user).map(|u| u.id);
+        let rb = |i: usize, b: Option<BodyId>| r.rigidbody_ids[i].or_else(|| b.and_then(|b| self.body(b).user).map(|u| u.id));
         let flip = receiving == r.collider_b.id && receiving != r.collider_a.id;
         let (collider, other_collider, rigidbody, other_rigidbody) =
-            if flip { (r.collider_a.id, r.collider_b.id, rb(r.rigidbody_a), rb(r.rigidbody_b)) } else { (r.collider_b.id, r.collider_a.id, rb(r.rigidbody_b), rb(r.rigidbody_a)) };
+            if flip { (r.collider_a.id, r.collider_b.id, rb(0, r.rigidbody_a), rb(1, r.rigidbody_b)) } else { (r.collider_b.id, r.collider_a.id, rb(1, r.rigidbody_b), rb(0, r.rigidbody_a)) };
         let side = |v: Vec2| if flip { negate(v) } else { v };
         let mut contacts = Vec::new();
         for m in &r.manifolds {

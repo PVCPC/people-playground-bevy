@@ -1,5 +1,5 @@
 //! PhysicalBehaviour and the Utils energy/temperature helpers.
-use super::{d, mathf, script, Game, Pose, Rigidbody};
+use super::{d, mathf, script, BareAnchor, Game, Pose, Rigidbody};
 use crate::unity::Random;
 use crate::b2::contacts2d::{ContactPoint2D, ScriptCollision};
 use crate::b2::world::BodyType;
@@ -60,11 +60,11 @@ pub struct StartIds {
     pub outlineSpriteRenderer: i32,
 }
 
-/// PhysicalBehaviour.ColliderBoolPair; the collider is identified by its PhysicalBehaviour.
+/// PhysicalBehaviour.ColliderBoolPair; Coll is the Collider2D's instance id.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColliderBoolPair {
     pub Active: bool,
-    pub Coll: usize,
+    pub Coll: i32,
 }
 
 script! {
@@ -271,7 +271,12 @@ impl Game {
         }
         let body = self.physicals[p].rigidbody.body;
         if self.physicals[p].rigidbody.bodyType == 0 && self.physicals[p].LocalColliderGridPoints.as_ref().map_or(true, |g| g.is_empty()) {
-            unimplemented!("PhysicalBehaviour.BakeColliderGridPoints");
+            // The AutoSyncTransforms the first non-trigger collider's bounds starts with.
+            if self.physicals[p].collider_defs.iter().any(|c| !c.is_trigger) {
+                self.sync_pending();
+            }
+            let baked = self.physical_bake_collider_grid_points(p);
+            self.physicals[p].LocalColliderGridPoints = Some(baked);
         }
         if self.physicals[p].prefab_decal_controllers != 0 {
             unimplemented!("PhysicalBehaviour.Start: decalControllers.AddRange(prefab DecalControllerBehaviours)");
@@ -542,7 +547,34 @@ impl Game {
     }
 
     fn buffer_entry_live(&self, pair: &Option<ColliderBoolPair>) -> Option<ColliderBoolPair> {
-        pair.filter(|c| c.Active && self.physicals[c.Coll].active)
+        pair.filter(|c| c.Active && self.collider_alive(c.Coll))
+    }
+
+    /// Collider2D != null: the object behind the instance id is not destroyed (a bare collider goes with its anchor
+    /// physical's object).
+    pub(super) fn collider_exists(&self, c: i32) -> bool {
+        match self.physicals.iter().position(|p| p.all_colliders.contains(&c)) {
+            Some(p) => !self.physicals[p].destroyed,
+            None => !matches!(self.bare_colliders[&c].anchor, BareAnchor::Physical(p) if self.physicals[p].destroyed),
+        }
+    }
+
+    /// `(bool)collider && collider.gameObject.activeSelf`.
+    pub(super) fn collider_alive(&self, c: i32) -> bool {
+        self.collider_exists(c)
+            && match self.physical_of_collider(c) {
+                Some(p) => self.physicals[p].active,
+                None => self.bare_colliders[&c].active_self,
+            }
+    }
+
+    /// SendMessage("OnCollisionExit2D", new Collision2D()) to a collider's GameObject.
+    pub(super) fn send_empty_collision_exit(&mut self, c: i32) {
+        match self.physical_of_collider(c) {
+            Some(v) => self.physical_on_collision_exit(v, &ScriptCollision::default()),
+            None if self.bare_colliders[&c].receives(&["TorchBehaviour"]) => unimplemented!("TorchBehaviour.OnCollisionExit2D"),
+            None => {}
+        }
     }
 
     /// PhysicalBehaviour.IsTouchingSomething
@@ -856,11 +888,13 @@ impl Game {
             if !pair.Active {
                 continue;
             }
-            if !self.physicals[pair.Coll].active {
+            if !self.collider_alive(pair.Coll) {
                 self.physicals[p].onCollisionStayBuffer[i].as_mut().unwrap().Active = false;
                 continue;
             }
-            let v = pair.Coll;
+            // PhysicalObjectsInWorldByTransform.TryGetValue(coll.transform): the loop stops at the first collider
+            // whose own object is no listed physical.
+            let Some(v) = self.physical_of_collider(pair.Coll).filter(|&v| self.physicals[v].in_world) else { break };
             if self.physicals[p].SimulateTemperature && self.physicals[v].SimulateTemperature {
                 self.average_temperature(p, v, 0.01);
             }
@@ -1099,9 +1133,8 @@ impl Game {
             return;
         }
         if c.rigidbody.is_some() {
-            let incoming = self.collision_physical(c);
             for pair in self.physicals[p].onCollisionStayBuffer.iter_mut().flatten() {
-                if Some(pair.Coll) == incoming {
+                if pair.Coll == c.collider {
                     pair.Active = false;
                 }
             }
@@ -1118,9 +1151,7 @@ impl Game {
         let value = self.collision_physical(c);
         if value != Some(p) {
             if let Some(index) = self.try_get_free_collision_buffer_index(p) {
-                // ColliderBoolPair keeps the PhysicalBehaviour index; a collider without one has no slot.
-                let Some(v) = value else { unimplemented!("ColliderBoolPair for a collider without a PhysicalBehaviour") };
-                self.physicals[p].onCollisionStayBuffer[index] = Some(ColliderBoolPair { Active: true, Coll: v });
+                self.physicals[p].onCollisionStayBuffer[index] = Some(ColliderBoolPair { Active: true, Coll: c.collider });
             }
         }
         let mut buffer = self.physical_contact_buffer;
@@ -1335,8 +1366,8 @@ impl Game {
     /// (SendMessage skips inactive objects; collision messages reach disabled behaviours).
     pub fn physical_on_disable(&mut self, p: usize) {
         for pair in self.physicals[p].onCollisionStayBuffer.into_iter().flatten() {
-            if pair.Active && self.physicals[pair.Coll].active {
-                self.physical_on_collision_exit(pair.Coll, &ScriptCollision::default());
+            if pair.Active && self.collider_alive(pair.Coll) {
+                self.send_empty_collision_exit(pair.Coll);
             }
         }
     }
