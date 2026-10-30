@@ -3,7 +3,9 @@
 
 pub mod rt;
 pub mod cosmetic_rotation_behaviour;
+pub mod deformation_behaviour;
 pub mod disable_when_wet;
+pub mod emit_particles_on_shake_behaviour;
 pub mod fan_behaviour;
 pub mod fire_sound_emitter;
 pub mod guide_temperature_behaviour;
@@ -17,7 +19,9 @@ use crate::game::{Game, Phase};
 #[derive(Clone, Debug)]
 pub struct Translated {
     pub cosmetic_rotation_behaviour: Vec<cosmetic_rotation_behaviour::CosmeticRotationBehaviour>,
+    pub deformation_behaviour: Vec<deformation_behaviour::DeformationBehaviour>,
     pub disable_when_wet: Vec<disable_when_wet::DisableWhenWet>,
+    pub emit_particles_on_shake_behaviour: Vec<emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour>,
     pub fan_behaviour: Vec<fan_behaviour::FanBehaviour>,
     pub fan_behaviour__buffer: Vec<i32>,
     pub fire_sound_emitter: Vec<fire_sound_emitter::FireSoundEmitter>,
@@ -34,7 +38,9 @@ impl Default for Translated {
         Self {
             collision_scripts: Vec::new(),
             cosmetic_rotation_behaviour: Vec::new(),
+            deformation_behaviour: Vec::new(),
             disable_when_wet: Vec::new(),
+            emit_particles_on_shake_behaviour: Vec::new(),
             fan_behaviour: Vec::new(),
             fan_behaviour__buffer: vec![0; 128],
             fire_sound_emitter: Vec::new(),
@@ -50,7 +56,9 @@ impl Default for Translated {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TBehaviour {
     CosmeticRotationBehaviour(usize),
+    DeformationBehaviour(usize),
     DisableWhenWet(usize),
+    EmitParticlesOnShakeBehaviour(usize),
     FanBehaviour(usize),
     FireSoundEmitter(usize),
     GuideTemperatureBehaviour(usize),
@@ -59,13 +67,15 @@ pub enum TBehaviour {
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DisableWhenWet", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "SirenBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "JackOLaternBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => "CosmeticRotationBehaviour",
+            TBehaviour::DeformationBehaviour(_) => "DeformationBehaviour",
             TBehaviour::DisableWhenWet(_) => "DisableWhenWet",
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => "EmitParticlesOnShakeBehaviour",
             TBehaviour::FanBehaviour(_) => "FanBehaviour",
             TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
             TBehaviour::GuideTemperatureBehaviour(_) => "GuideTemperatureBehaviour",
@@ -79,7 +89,9 @@ impl TBehaviour {
     pub fn managed(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => true,
+            TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => true,
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => true,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => true,
             TBehaviour::GuideTemperatureBehaviour(_) => true,
@@ -93,7 +105,9 @@ impl TBehaviour {
     pub fn has_start(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -107,7 +121,9 @@ impl TBehaviour {
     pub fn has_use(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -121,7 +137,9 @@ impl TBehaviour {
     pub fn has_collision(self) -> bool {
         match self {
             TBehaviour::CosmeticRotationBehaviour(_) => false,
+            TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
+            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => false,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -172,7 +190,9 @@ pub enum LinkVal {
 pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
     match class {
         "CosmeticRotationBehaviour" => &[],
+        "DeformationBehaviour" => &[],
         "DisableWhenWet" => &[("PhysicalBehaviour", LinkKind::Physical), ("ToDisable", LinkKind::Prefab)],
+        "EmitParticlesOnShakeBehaviour" => &[],
         "FanBehaviour" => &[("HelicopterAudioSource", LinkKind::Present), ("FirstBladeRenderer", LinkKind::Present), ("SecondBladeRenderer", LinkKind::Present), ("Blades", LinkKind::Script("CosmeticRotationBehaviour")), ("Audio", LinkKind::Present), ("Switch", LinkKind::Present), ("StartupSound", LinkKind::Present), ("ShutoffSound", LinkKind::Present), ("Mask", LinkKind::Mask)],
         "FireSoundEmitter" => &[],
         "GuideTemperatureBehaviour" => &[],
@@ -194,12 +214,26 @@ impl Game {
                 self.tr.cosmetic_rotation_behaviour.push(x);
                 TBehaviour::CosmeticRotationBehaviour(self.tr.cosmetic_rotation_behaviour.len() - 1)
             }
+            "DeformationBehaviour" => {
+                let mut x = deformation_behaviour::DeformationBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.deformation_behaviour.push(x);
+                TBehaviour::DeformationBehaviour(self.tr.deformation_behaviour.len() - 1)
+            }
             "DisableWhenWet" => {
                 let mut x = disable_when_wet::DisableWhenWet::default();
                 crate::game::spawn::load_values(x.fields(), values)?;
                 (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
                 self.tr.disable_when_wet.push(x);
                 TBehaviour::DisableWhenWet(self.tr.disable_when_wet.len() - 1)
+            }
+            "EmitParticlesOnShakeBehaviour" => {
+                let mut x = emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour::default();
+                crate::game::spawn::load_values(x.fields(), values)?;
+                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
+                self.tr.emit_particles_on_shake_behaviour.push(x);
+                TBehaviour::EmitParticlesOnShakeBehaviour(self.tr.emit_particles_on_shake_behaviour.len() - 1)
             }
             "FanBehaviour" => {
                 let mut x = fan_behaviour::FanBehaviour::default();
@@ -277,7 +311,9 @@ impl Game {
     pub fn tr_enabled(&self, b: TBehaviour) -> bool {
         match b {
             TBehaviour::CosmeticRotationBehaviour(i) => self.tr.cosmetic_rotation_behaviour[i].enabled,
+            TBehaviour::DeformationBehaviour(i) => self.tr.deformation_behaviour[i].enabled,
             TBehaviour::DisableWhenWet(i) => self.tr.disable_when_wet[i].enabled,
+            TBehaviour::EmitParticlesOnShakeBehaviour(i) => self.tr.emit_particles_on_shake_behaviour[i].enabled,
             TBehaviour::FanBehaviour(i) => self.tr.fan_behaviour[i].enabled,
             TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
             TBehaviour::GuideTemperatureBehaviour(i) => self.tr.guide_temperature_behaviour[i].enabled,
@@ -289,6 +325,7 @@ impl Game {
 
     pub fn tr_awake(&mut self, b: TBehaviour) {
         match b {
+            TBehaviour::EmitParticlesOnShakeBehaviour(i) => self.emit_particles_on_shake_behaviour_awake(i),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_awake(i),
             TBehaviour::GuideTemperatureBehaviour(i) => self.guide_temperature_behaviour_awake(i),
             TBehaviour::TargetLineRenderer(i) => self.target_line_renderer_awake(i),
@@ -371,6 +408,7 @@ impl Game {
         match (phase, b) {
             (Phase::Update, TBehaviour::CosmeticRotationBehaviour(i)) => self.cosmetic_rotation_behaviour_update(i),
             (Phase::Update, TBehaviour::DisableWhenWet(i)) => self.disable_when_wet_update(i),
+            (Phase::Fixed, TBehaviour::EmitParticlesOnShakeBehaviour(i)) => self.emit_particles_on_shake_behaviour_fixed_update(i),
             (Phase::Fixed, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_update(i),
             (Phase::Fixed, TBehaviour::FireSoundEmitter(i)) => self.fire_sound_emitter_fixed_update(i),

@@ -252,6 +252,18 @@ impl Game {
         });
     }
 
+    /// GetComponent<T>() != null for a presentation component (its Unity class id) on the GameObject of component `id`.
+    pub fn tr_has_component(&mut self, id: i32, class_id: i32) -> bool {
+        use crate::assets::db::Component;
+        self.with_component_instance(id, |_, inst, o| {
+            inst.prefab.objects[o].components.iter().any(|(_, c)| match c {
+                Component::SpriteRenderer(_) => class_id == 212,
+                Component::Other(k) => *k == class_id,
+                _ => false,
+            })
+        })
+    }
+
     /// GameObject.transform
     pub fn tr_go_transform(&mut self, go: Go) -> Xf {
         let id = go.local();
