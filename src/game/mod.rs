@@ -319,7 +319,7 @@ pub struct Time {
 }
 
 /// UnityEngine.Bounds in the xy plane.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
     pub center: [f32; 2],
     pub extents: [f32; 2],

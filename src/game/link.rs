@@ -32,12 +32,16 @@ struct Arenas {
     node: HashMap<usize, usize>,
 }
 
-/// What `link_instance` built: the Person's index, and the arena index of each limb object and of each
-/// Rigidbody-less Transform above a body.
+/// What `link_instance` built: the Person's index (a root PersonBehaviour), and the arena index of each limb,
+/// PhysicalBehaviour and MapLightBehaviour object and of each Rigidbody-less Transform above a body.
 pub struct Linked {
-    pub person: usize,
+    pub person: Option<usize>,
     pub limbs: HashMap<usize, usize>,
     pub nodes: HashMap<usize, usize>,
+    pub physicals: HashMap<usize, usize>,
+    pub map_lights: HashMap<usize, usize>,
+    /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
+    pub parent_audio: Option<usize>,
 }
 
 fn script<'a>(prefab: &'a Prefab, o: usize, class: &str) -> Option<(usize, bool, &'a Value)> {
@@ -99,6 +103,12 @@ fn curve(v: &Value) -> Result<Curve, String> {
 }
 
 /// Sprite.bounds (Sprite::GetBounds): the sprite rect around its pivot in units, 0.1 deep either side.
+/// A UnityEngine.Bounds field as the 2D box the map scripts use.
+fn map_bounds(v: &Value) -> Result<Bounds, String> {
+    let b = bounds(field(v, "BoundingBox")?)?;
+    Ok(Bounds { center: [b[0], b[1]], extents: [b[3], b[4]] })
+}
+
 fn sprite_bounds(s: &Sprite) -> ([f32; 3], [f32; 3]) {
     let (w, h) = (s.rect[2] / s.pixels_to_units, s.rect[3] / s.pixels_to_units);
     let (ex, ey) = (w * 0.5, h * 0.5);
@@ -159,7 +169,7 @@ impl Game {
         let file = prefab.objects[0].game_object.file;
         let mut l = Linker { prefab, inst, file, arenas: Arenas::default() };
         let n = prefab.objects.len();
-        let person = self.people.len();
+        let person = script(prefab, 0, "PersonBehaviour").map(|_| self.people.len());
 
         // TransformChain: each body's parents up to the root, the first body to reach one listing it.
         for o in (0..n).filter(|o| inst.bodies.contains_key(o)) {
@@ -302,7 +312,7 @@ impl Game {
             // Awake's GetComponent<PhysicalBehaviour/HingeJoint2D/GripBehaviour>() (the first of each on the object),
             // and PersonBehaviour.Awake's limb.Person = this.
             b.PhysicalBehaviour = *l.arenas.physical.get(&o).ok_or_else(|| format!("{}: LimbBehaviour without PhysicalBehaviour", b.name))?;
-            b.Person = person;
+            b.Person = person.ok_or_else(|| format!("{}: a LimbBehaviour outside a Person", b.name))?;
             b.Joint = (0..prefab.objects[o].components.len()).find_map(|k| l.arenas.hinge.get(&(o, k)).copied());
             b.GripBehaviour = l.arenas.grip.get(&o).copied();
             b.ConnectedLimbs = l.limbs(v, "ConnectedLimbs")?;
@@ -373,6 +383,17 @@ impl Game {
         }
         // LimbBehaviour.Awake's GetOrAddComponent<GForceMeasureBehaviour>() adds the ones the prefab lacks; the
         // arena keeps the limb index only if the prefab has all or none.
+        let mut map_lights = HashMap::new();
+        for o in 0..n {
+            let Some((_, _, v)) = script(prefab, o, "MapLightBehaviour") else { continue };
+            let mut m = MapLight::default();
+            load_values(m.fields(), v)?;
+            // A serialized array is never null.
+            m.switches = Some(array(v, "Switches")?.len());
+            m.hasAudio = l.object(field(v, "AudioSource")?)?.is_some();
+            map_lights.insert(o, self.map_lights.len());
+            self.map_lights.push(m);
+        }
         let gforces = (0..n).filter(|&o| script(prefab, o, "GForceMeasureBehaviour").is_some()).count();
         if gforces != 0 && gforces != l.arenas.limb.len() {
             unimplemented!("a prefab with GForceMeasureBehaviour on some limbs only");
@@ -384,65 +405,66 @@ impl Game {
             self.gforces.push(gf);
         }
 
-        let (c, _, v) = script(prefab, 0, "PersonBehaviour").ok_or("the root has no PersonBehaviour")?;
-        let mut p = Person { name: prefab.objects[0].name.clone(), id: inst.objects[0].components[c], ..Default::default() };
-        load_values(p.fields(), v)?;
-        p.Limbs = l.limbs(v, "Limbs")?;
-        p.BoneBreakClips = array(v, "BoneBreakClips")?.len();
-        p.DismembermentClips = array(v, "DismembermentClips")?.len();
-        // CirculationBehaviour copies the BleedingParticle prefab's DripSounds (a serialized array, never null).
-        if let Some(bp) = field(v, "BleedingParticlePrefab")?.pptr().filter(|p| !p.is_null()) {
-            let go = db.resolve(file, bp).ok_or("BleedingParticlePrefab outside the data")?;
-            let mut drips = None;
-            for c in db.game_object(go)?.components {
-                let c = db.resolve(go.file, c).ok_or("a BleedingParticlePrefab component outside the data")?;
-                if db.class(c) != 114 {
-                    continue;
-                }
-                if let Some((script, _, bv)) = db.mono(c)? {
-                    if script.class_name == "BleedingParticleBehaviour" {
-                        drips = Some(array(&bv, "DripSounds")?.len());
+        if let Some((c, _, v)) = script(prefab, 0, "PersonBehaviour") {
+            let mut p = Person { name: prefab.objects[0].name.clone(), id: inst.objects[0].components[c], ..Default::default() };
+            load_values(p.fields(), v)?;
+            p.Limbs = l.limbs(v, "Limbs")?;
+            p.BoneBreakClips = array(v, "BoneBreakClips")?.len();
+            p.DismembermentClips = array(v, "DismembermentClips")?.len();
+            // CirculationBehaviour copies the BleedingParticle prefab's DripSounds (a serialized array, never null).
+            if let Some(bp) = field(v, "BleedingParticlePrefab")?.pptr().filter(|p| !p.is_null()) {
+                let go = db.resolve(file, bp).ok_or("BleedingParticlePrefab outside the data")?;
+                let mut drips = None;
+                for c in db.game_object(go)?.components {
+                    let c = db.resolve(go.file, c).ok_or("a BleedingParticlePrefab component outside the data")?;
+                    if db.class(c) != 114 {
+                        continue;
+                    }
+                    if let Some((script, _, bv)) = db.mono(c)? {
+                        if script.class_name == "BleedingParticleBehaviour" {
+                            drips = Some(array(&bv, "DripSounds")?.len());
+                        }
                     }
                 }
+                p.BleedingDripSounds = Some(drips.ok_or("BleedingParticlePrefab without BleedingParticleBehaviour")?);
             }
-            p.BleedingDripSounds = Some(drips.ok_or("BleedingParticlePrefab without BleedingParticleBehaviour")?);
-        }
-        let s = inst.objects[0].trs.s;
-        p.localScale = [s[0], s[1], s[2]];
-        for pose in array(v, "Poses")? {
-            let mut angles = Vec::new();
-            for a in array(pose, "Angles")? {
-                let animated = field(a, "Animated")?.bool().ok_or("Animated")?;
-                angles.push(LimbPose {
-                    Limb: l.limb(field(a, "Limb")?)?.ok_or("a LimbPose without its limb")?,
-                    Animated: animated,
-                    PoseRigidityModifier: float(a, "PoseRigidityModifier")?,
-                    Angle: float(a, "Angle")?,
-                    StartAngle: float(a, "StartAngle")?,
-                    EndAngle: float(a, "EndAngle")?,
-                    AnimationDuration: float(a, "AnimationDuration")?,
-                    RandomInfluence: float(a, "RandomInfluence")?,
-                    RandomSpeed: float(a, "RandomSpeed")?,
-                    TimeOffset: float(a, "TimeOffset")?,
-                    AnimationCurve: Some(curve(field(a, "AnimationCurve")?)?),
-                    cache: CurveCache::default(),
+            let s = inst.objects[0].trs.s;
+            p.localScale = [s[0], s[1], s[2]];
+            for pose in array(v, "Poses")? {
+                let mut angles = Vec::new();
+                for a in array(pose, "Angles")? {
+                    let animated = field(a, "Animated")?.bool().ok_or("Animated")?;
+                    angles.push(LimbPose {
+                        Limb: l.limb(field(a, "Limb")?)?.ok_or("a LimbPose without its limb")?,
+                        Animated: animated,
+                        PoseRigidityModifier: float(a, "PoseRigidityModifier")?,
+                        Angle: float(a, "Angle")?,
+                        StartAngle: float(a, "StartAngle")?,
+                        EndAngle: float(a, "EndAngle")?,
+                        AnimationDuration: float(a, "AnimationDuration")?,
+                        RandomInfluence: float(a, "RandomInfluence")?,
+                        RandomSpeed: float(a, "RandomSpeed")?,
+                        TimeOffset: float(a, "TimeOffset")?,
+                        AnimationCurve: Some(curve(field(a, "AnimationCurve")?)?),
+                        cache: CurveCache::default(),
+                    });
+                }
+                p.Poses.push(RagdollPose {
+                    Name: string(pose, "Name")?,
+                    Rigidity: float(pose, "Rigidity")?,
+                    ForceMultiplier: float(pose, "ForceMultiplier")?,
+                    ShouldStandUpright: field(pose, "ShouldStandUpright")?.bool().ok_or("ShouldStandUpright")?,
+                    DragInfluence: float(pose, "DragInfluence")?,
+                    UprightForceMultiplier: float(pose, "UprightForceMultiplier")?,
+                    ShouldStumble: field(pose, "ShouldStumble")?.bool().ok_or("ShouldStumble")?,
+                    State: field(pose, "State")?.i64().ok_or("State")? as i32,
+                    AnimationSpeedMultiplier: float(pose, "AnimationSpeedMultiplier")?,
+                    Angles: angles,
                 });
             }
-            p.Poses.push(RagdollPose {
-                Name: string(pose, "Name")?,
-                Rigidity: float(pose, "Rigidity")?,
-                ForceMultiplier: float(pose, "ForceMultiplier")?,
-                ShouldStandUpright: field(pose, "ShouldStandUpright")?.bool().ok_or("ShouldStandUpright")?,
-                DragInfluence: float(pose, "DragInfluence")?,
-                UprightForceMultiplier: float(pose, "UprightForceMultiplier")?,
-                ShouldStumble: field(pose, "ShouldStumble")?.bool().ok_or("ShouldStumble")?,
-                State: field(pose, "State")?.i64().ok_or("State")? as i32,
-                AnimationSpeedMultiplier: float(pose, "AnimationSpeedMultiplier")?,
-                Angles: angles,
-            });
+            self.people.push(p);
         }
-        self.people.push(p);
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, map_lights, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -463,20 +485,24 @@ impl Game {
             self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
-        self.queue_starts(prefab, &linked, &behaviours);
+        self.queue_starts(prefab, &inst, &linked, &behaviours)?;
         Ok((inst, linked))
     }
 
-    /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order. The classes left out have no Awake
-    /// that touches simulation state (ConnectedNodeBehaviour, GripBehaviour and GoreStringBehaviour only read
-    /// components; the root's other scripts have none), and none of the Person's scripts has OnEnable.
+    /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order, skipping objects inactive by then.
+    /// The classes left out have no Awake that touches simulation state (ConnectedNodeBehaviour, GripBehaviour
+    /// and GoreStringBehaviour only read components; MapConfig, MapLightBehaviour and WindControllerBehaviour
+    /// only fetch components), and none of these scripts has OnEnable.
     pub fn awake_behaviours(&mut self, prefab: &Prefab, inst: &mut Instance, linked: &Linked, order: &[(usize, usize)]) {
         for &(o, c) in order {
+            if !inst.objects[o].active {
+                continue;
+            }
             let Component::Script { class, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
             let limb = || linked.limbs[&o];
             match class.as_str() {
                 "PersonBehaviour" => {
-                    if let Some(s) = self.person_awake(linked.person) {
+                    if let Some(s) = self.person_awake(linked.person.unwrap()) {
                         inst.set_local_scale(0, s);
                         if let Some(&n) = linked.nodes.get(&0) {
                             self.transform_nodes[n].trs.s = [s[0], s[1], s[2], 0.0];
@@ -484,7 +510,8 @@ impl Game {
                     }
                 }
                 "SkinMaterialHandler" => self.skin_awake(limb()),
-                "PhysicalBehaviour" => self.physical_awake(self.limbs[limb()].PhysicalBehaviour),
+                "PhysicalBehaviour" => self.physical_awake(linked.physicals[&o]),
+                "WaterBehaviour" => unimplemented!("WaterBehaviour"),
                 "LimbBehaviour" => self.limb_awake(limb()),
                 "CirculationBehaviour" => self.circulation_awake(limb()),
                 _ => {}
@@ -496,18 +523,21 @@ impl Game {
     /// LateUpdate). Each PhysicalBehaviour's `hash_code` must be set by then: Random.InitState(GetHashCode()) takes
     /// Mono's object hash. SkinMaterialHandler, DisintegrationCounterBehaviour and IncreaseStatOnStart's Starts only
     /// touch rendering, event subscriptions and the stat manager.
-    pub fn queue_starts(&mut self, prefab: &Prefab, linked: &Linked, order: &[(usize, usize)]) {
+    pub fn queue_starts(&mut self, prefab: &Prefab, inst: &Instance, linked: &Linked, order: &[(usize, usize)]) -> Result<(), String> {
         use super::misc::PendingStart;
         for &(o, c) in order {
-            let Component::Script { class, fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            let Component::Script { class, fields: v, enabled, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            if !inst.objects[o].active || !enabled {
+                continue;
+            }
             let limb = || linked.limbs[&o];
             let flag = |name: &str| field(v, name).and_then(|x| x.bool().ok_or_else(|| name.to_string())).unwrap();
             let start = match class.as_str() {
-                "PersonBehaviour" => PendingStart::Person(linked.person),
-                "HingeJointLimitAutofixBehaviour" => PendingStart::HingeJointLimitAutofix(linked.person),
+                "PersonBehaviour" => PendingStart::Person(linked.person.unwrap()),
+                "HingeJointLimitAutofixBehaviour" => PendingStart::HingeJointLimitAutofix(linked.person.unwrap()),
                 "CirculationBehaviour" => PendingStart::Circulation(limb()),
                 "PhysicalBehaviour" => {
-                    let p = self.limbs[limb()].PhysicalBehaviour;
+                    let p = linked.physicals[&o];
                     self.physicals[p].in_world = false;
                     PendingStart::Physical(p)
                 }
@@ -516,10 +546,32 @@ impl Game {
                 "GripBehaviour" => PendingStart::Grip(self.limbs[limb()].GripBehaviour.unwrap()),
                 "GoreStringBehaviour" => PendingStart::GoreString(limb(), flag("CreateJointOnStart")),
                 "ShatteredObjectGenerator" if flag("GenerateOnStart") => unimplemented!("ShatteredObjectGenerator.Start with GenerateOnStart"),
+                "MapLightBehaviour" => PendingStart::MapLight(linked.map_lights[&o]),
+                // CameraControlBehaviour takes the box.
+                "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
+                "MapConfig" => {
+                    for prefab_field in ["SnowPrefab", "RainPrefab", "FogPrefab", "LightningCreatorPrefab"] {
+                        if field(v, prefab_field)?.pptr().is_some_and(|p| !p.is_null()) {
+                            unimplemented!("MapConfig.Reinitialise with a {prefab_field}");
+                        }
+                    }
+                    // Awake's GetComponent<BoundingBoxBehaviour>().
+                    let (_, _, b) = script(prefab, o, "BoundingBoxBehaviour").ok_or("MapConfig without a BoundingBoxBehaviour")?;
+                    let ambience = field(v, "Ambience")?;
+                    let settings = field(v, "Settings")?;
+                    PendingStart::MapConfig(super::map::MapConfigStart {
+                        bounds: map_bounds(b)?,
+                        audio: linked.parent_audio,
+                        ambience: field(v, "OverrideAmbientSounds")?.bool().ok_or("OverrideAmbientSounds")?.then(|| -> Result<_, String> { Ok((float(ambience, "Chance")?, array(ambience, "Clips")?.len())) }).transpose()?,
+                        gravity: float(settings, "Gravity")?,
+                        ambient_temperature: float(settings, "Ambient_temperature")?,
+                    })
+                }
                 _ => continue,
             };
             self.pending_starts.push(start);
         }
+        Ok(())
     }
 
     /// The PhysicalProperties asset's arena index, loading it on first use (assets are shared by name).
@@ -599,7 +651,7 @@ mod tests {
         first.records.retain(|r| r.ty != "FancyBloodSplatController" && r.ty != "BleedingParticleBehaviour");
         let want = Game::from_snapshot(&first, &rig).unwrap();
         let linked = g.link_instance(&mut db, &prefab, &inst).unwrap();
-        let person = linked.person;
+        let person = linked.person.unwrap();
         assert_eq!(g.people[person].BleedingDripSounds, Some(11), "BleedingParticle DripSounds");
         // The queue 0x14 order, as instantiate_native returns it (script execution order, then the higher clone id).
         let mut order: Vec<(usize, usize)> = (0..prefab.objects.len())
@@ -622,7 +674,7 @@ mod tests {
             let id = g.physicals[p].id;
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
-        g.queue_starts(&prefab, &linked, &order);
+        g.queue_starts(&prefab, &inst, &linked, &order).unwrap();
         g.run_pending_starts();
         assert!(g.physicals.iter().all(|p| p.in_world));
         // The first frame's render: OnWillRenderObject fills the blood colour caches.

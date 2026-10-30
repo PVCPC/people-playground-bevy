@@ -315,6 +315,10 @@ pub enum PendingStart {
     Grip(usize),
     /// GoreStringBehaviour with its serialized CreateJointOnStart.
     GoreString(usize, bool),
+    MapLight(usize),
+    /// BoundingBoxBehaviour with its serialized box.
+    BoundingBox(super::Bounds),
+    MapConfig(super::map::MapConfigStart),
     /// ExplosionSoundBehviour on a BloodExplosion (three Near clips, StartWhenAwake, no distant sound).
     BloodExplosionSound,
     /// A new BloodPuff's ExplosionSoundBehviour (eight Near clips).
@@ -602,6 +606,10 @@ impl Game {
                 PendingStart::Node(n, keep) => self.node_start(n, keep.as_deref()),
                 PendingStart::Grip(g) => self.grip_start(g),
                 PendingStart::GoreString(l, create) => self.gore_string_start(l, create),
+                PendingStart::MapLight(m) => self.map_light_start(m),
+                // BoundingBoxBehaviour.Start: Global.main.CameraControlBehaviour.BoundingBox (Extend is camera only).
+                PendingStart::BoundingBox(b) => self.BoundingBox = b,
+                PendingStart::MapConfig(m) => self.map_config_start(&m),
                 PendingStart::BloodPuffEmitterWater(b) => {
                     let s = self.blood_puffs[b].splat;
                     let p = self.splats[s].parent_position;

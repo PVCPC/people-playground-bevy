@@ -5,6 +5,7 @@ use super::{temperature::AmbientTemperatureGridBehaviour, Game, PlayAudioAtRando
 use crate::assets::classes::{MonoBehaviour, Transform};
 use crate::assets::db::{AssetDb, ObjRef};
 use crate::assets::mono::Value;
+use crate::assets::serialized::Reader;
 use std::path::Path;
 
 /// A scene MonoBehaviour: its class, whether Unity runs its Awake/Start (enabled, on an object active in the
@@ -49,12 +50,26 @@ fn active_in_hierarchy(db: &AssetDb, file: usize, mb: &MonoBehaviour) -> Result<
 }
 
 impl Game {
+    /// globalgamemanagers' TimeManager (class 5), as its StreamedBinaryRead transfer (1805359f0) reads it:
+    /// Fixed Timestep, Maximum Allowed Timestep (SetMaximumDeltaTime keeps it at least the fixed step), m_TimeScale,
+    /// and Maximum Particle Timestep (particles only).
+    pub fn load_time_manager(&mut self, db: &AssetDb) -> Result<(), String> {
+        let file = db.file_index("globalgamemanagers").ok_or("no globalgamemanagers")?;
+        let manager = db.files[file].objects.iter().find(|o| o.class_id == 5).ok_or("no TimeManager")?;
+        let r = &mut Reader::new(db.data(ObjRef { file, path_id: manager.path_id }));
+        self.time.fixedDeltaTime = r.f32()?;
+        self.time.maximumDeltaTime = super::mathf::max(r.f32()?, self.time.fixedDeltaTime);
+        self.time.timeScale = r.f32()?;
+        Ok(())
+    }
+
     /// SceneManager.LoadScene("Main"): the scene objects' serialized state and the Awake/Start effects the
     /// simulation reads. `game` is the game folder (UserPreferenceManager's working directory).
     pub fn load_main(db: &mut AssetDb, game: &Path) -> Result<Game, String> {
         let mut g = Game::default();
         // UserPreferenceLoader (level0) ran UserPreferenceManager.Load.
         g.prefs = Prefs::load(game);
+        g.load_time_manager(db)?;
         let mut found = [false; 4];
         for s in scene_scripts(db, "level1")? {
             let v = &s.fields;
@@ -115,6 +130,7 @@ mod tests {
         let Ok(rig) = crate::game_assets::HumanRig::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("local-cache"), &game) else { return };
         let want = Game::from_snapshot(&first, &rig).unwrap();
         assert_eq!(g.DynamicSqrdVelocityThreshold, want.DynamicSqrdVelocityThreshold);
+        assert_eq!((g.time.fixedDeltaTime, g.time.maximumDeltaTime, g.time.timeScale), (want.time.fixedDeltaTime, want.time.maximumDeltaTime, want.time.timeScale));
         assert_eq!((g.velocityIterations, g.positionIterations), (want.velocityIterations, want.positionIterations));
         let (a, b) = (&g.ambient_audio[0], &want.ambient_audio[0]);
         assert_eq!((a.ChooseRandomClip, a.PlaceInRandomPositionInCircle, a.OnlyOnEdge, a.clips), (b.ChooseRandomClip, b.PlaceInRandomPositionInCircle, b.OnlyOnEdge, b.clips));

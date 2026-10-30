@@ -1,6 +1,6 @@
 //! The map's scripts that share UnityEngine.Random with the human: PlayAudioAtRandom (the ambience
 //! emitter) and MapLightBehaviour (the lights switching on after the map loads).
-use super::{script, Game};
+use super::{script, Bounds, Game};
 
 script! {
     PlayAudioAtRandom {
@@ -41,7 +41,48 @@ script! {
     }
 }
 
+/// What MapConfig.Start reads: its BoundingBoxBehaviour's box, the parent's PlayAudioAtRandom, the
+/// OverrideAmbientSounds ambience (Chance, Clips.Length) and its EnvironmentalSettings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapConfigStart {
+    pub bounds: Bounds,
+    pub audio: Option<usize>,
+    pub ambience: Option<(f32, usize)>,
+    pub gravity: f32,
+    pub ambient_temperature: f32,
+}
+
 impl Game {
+    /// MapLightBehaviour.Start: Activated = StartEnabled (Global.Awake clears it), UpdateActivated(playSound:
+    /// true) on the off branch (rendering only), then DelayedActivation(4) up to its WaitForSeconds, whose
+    /// DelayedCallManager entry is the current time plus the float seconds.
+    pub fn map_light_start(&mut self, l: usize) {
+        self.map_lights[l].Activated = false;
+        let m = &self.map_lights[l];
+        let (interval, order) = (m.TimeIntervalInSeconds, m.Order);
+        let seconds = interval * self.random.range(1.0, 1.1) * (order + 4.0);
+        self.map_lights[l].wake = Some(self.time.timeAsDouble + seconds as f64);
+    }
+
+    /// MapConfig.Start: Reinitialise (the weather prefabs are null on the maps it is used for), then
+    /// ApplySettings(Settings): SetGravity, SetFloodLights (Settings is the same object: no change) and
+    /// PhysicalBehaviour.AmbientTemperature. The heat/cold post-processing and foliage tint are rendering.
+    pub fn map_config_start(&mut self, m: &MapConfigStart) {
+        if let Some(a) = m.audio {
+            let s = &mut self.ambient_audio[a];
+            s.PositionCenter = m.bounds.center;
+            s.Radius = super::mathf::max(m.bounds.extents[0], m.bounds.extents[1]) * 1.41421;
+            if let Some((chance, clips)) = m.ambience {
+                s.ChancePerSecond = chance;
+                s.clips = Some(clips);
+            }
+        }
+        // Physics2D.gravity = Gravity * Vector2.up.
+        self.world.gravity = crate::b2::math::Vec2::new(0.0 * m.gravity, 1.0 * m.gravity);
+        // WaterBehaviour.waters is empty: a WaterBehaviour does not link (awake_behaviours).
+        self.AmbientTemperature = m.ambient_temperature;
+    }
+
     /// PlayAudioAtRandom.Update
     pub fn play_audio_at_random_update(&mut self, a: usize) {
         let dt = self.time.deltaTime;
