@@ -286,8 +286,9 @@ pub struct BloodPuff {
     pub splat: usize,
     pub emitter_active: bool,
     /// The root ParticleSystem's time: 3 s, not looping, one burst at 0 whose particles live 0.1-0.3 s, so it
-    /// stops (stopAction Callback: PoolableParticleSystemHelper returns it) when the time reaches 3 s.
-    pub particle_time: f32,
+    /// stops (stopAction Callback: PoolableParticleSystemHelper returns it) when the time reaches 3 s. The clock
+    /// is a double: thirty 0.1 s frames stop it in the game (dump18), where a float sum stays under 3.
+    pub particle_time: f64,
 }
 
 /// ObjectPoolBehaviour: createdObjects and availableObjects (HashSets in slot order).
@@ -663,7 +664,7 @@ impl Game {
             if !puff.active {
                 continue;
             }
-            puff.particle_time += dt;
+            puff.particle_time += dt as f64;
             if puff.particle_time >= 3.0 {
                 puff.active = false;
                 self.blood_puff_pool.as_mut().unwrap().available.add(b);
