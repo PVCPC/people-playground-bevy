@@ -295,6 +295,21 @@ impl Instance {
         }
     }
 
+    /// Transform.position = p (SetPosition): the local position, marking the object's global T and every descendant's
+    /// global T, R and S.
+    pub fn set_world_position(&mut self, o: usize, p: [f32; 3]) {
+        let chain = self.chain(o);
+        let ((local, _), _) = crate::unity::transform::set_world(&chain[1..], p, self.rotation(o));
+        if self.objects[o].trs.t[..3] == local {
+            return;
+        }
+        self.objects[o].trs.t = [local[0], local[1], local[2], self.objects[o].trs.t[3]];
+        self.changed[o] |= self.interest[o] & GLOBAL_T;
+        for d in self.descendants(o) {
+            self.changed[d] |= self.interest[d] & (GLOBAL_T | GLOBAL_R | GLOBAL_S);
+        }
+    }
+
     /// The object's descendants in hierarchy (pre-) order.
     pub(super) fn descendants(&self, o: usize) -> Vec<usize> {
         // The prefab's depth-first order bounds them; SetParent(null) may have taken some out.

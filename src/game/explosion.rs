@@ -86,6 +86,8 @@ script! {
         enabled: bool = true,
         /// OnEndOfLife's persistent calls reach only audio and particle components.
         OnEndOfLifePresentation: bool = true,
+        /// AddComponent<DeleteAfterTime>() at run time: the Transform id of its GameObject.
+        added_to: Option<i32> = None,
     }
 }
 
@@ -712,8 +714,24 @@ impl Game {
         id
     }
 
+    /// AddComponent<DeleteAfterTime>() on the GameObject with Transform `key`, then Life = `life`: a new instance id, and
+    /// Update from the next frame.
+    pub(super) fn add_delete_after(&mut self, key: i32, life: f32) {
+        let id = self.allocate_instance_id();
+        self.delete_afters.push(DeleteAfter { id, Life: life, added_to: Some(key), ..Default::default() });
+        let b = Behaviour::DeleteAfter(self.delete_afters.len() - 1);
+        self.behaviour_of.insert(id, (0, b));
+        self.behaviours.add(0, b);
+    }
+
     /// DeleteAfterTime.Update
     pub fn delete_after_update(&mut self, i: usize) {
+        // An added one is not in its clone's component lists: it leaves with its destroyed GameObject here.
+        if let Some(key) = self.delete_afters[i].added_to && self.destroyed_components.contains(&key) {
+            self.behaviours.remove(Behaviour::DeleteAfter(i));
+            self.behaviour_of.remove(&self.delete_afters[i].id);
+            return;
+        }
         let dt = self.time.deltaTime;
         let s = &mut self.delete_afters[i];
         s.time += dt;
@@ -721,7 +739,7 @@ impl Game {
             if !s.OnEndOfLifePresentation {
                 unimplemented!("DeleteAfterTime.OnEndOfLife: a persistent call beyond audio and particles");
             }
-            let id = s.id;
+            let id = s.added_to.unwrap_or(s.id);
             self.destroy_object(id);
         }
     }

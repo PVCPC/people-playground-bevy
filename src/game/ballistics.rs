@@ -35,6 +35,13 @@ const SHOT_RECEIVERS: &[&str] = &[
     "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
     "MendingSyringe", "PainKillerSyringe", "PinkSyringe", "UltraStrengthSyringe", "WaterBreathingSyringe", "ZombieSyringe",
 ];
+/// The classes with a Break(Vector2) or Break() method, and their subclasses.
+const BREAK_RECEIVERS: &[&str] = &[
+    "BalloonBehaviour", "BulbBehaviour", "CathodeLightBehaviour", "DamagableMachineryBehaviour", "DestroyableBehaviour", "GlowtubeBehaviour",
+    "OldSyringeBehaviour", "SyringeBehaviour", "TelevisionBehaviour", "TyreDeflationBehaviour",
+    "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
+    "MendingSyringe", "PainKillerSyringe", "PinkSyringe", "UltraStrengthSyringe", "WaterBreathingSyringe", "ZombieSyringe",
+];
 const EXIT_SHOT_RECEIVERS: &[&str] = &[
     "PhysicalBehaviour", "BalloonBehaviour", "CirculationBehaviour", "LimbBehaviour", "LiquidContainerLeakingBehaviour", "OldSyringeBehaviour", "SyringeBehaviour",
     "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
@@ -670,7 +677,7 @@ impl Game {
 
     /// SendMessage("Shot"/"ExitShot", shot) to a GameObject: `physical` when the target is a physical's object, else
     /// the collider's bare object. Every component on it with the method runs (disabled ones too), in order.
-    fn send_shot(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool) {
+    pub(super) fn send_shot(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool) {
         let receivers = if exit { EXIT_SHOT_RECEIVERS } else { SHOT_RECEIVERS };
         let Some(p) = physical.or_else(|| self.physical_of_collider(collider)) else {
             if self.bare_colliders[&collider].receives(receivers) {
@@ -729,6 +736,45 @@ impl Game {
                 }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
+            }
+        }
+    }
+
+    /// SendMessage("Break", velocity) to a GameObject, as `send_shot` finds it.
+    pub(super) fn send_break(&mut self, collider: i32, physical: Option<usize>, velocity: [f32; 2]) {
+        let Some(p) = physical.or_else(|| self.physical_of_collider(collider)) else {
+            if self.bare_colliders[&collider].receives(BREAK_RECEIVERS) {
+                unimplemented!("SendMessage Break to the scripts of a collider without a PhysicalBehaviour");
+            }
+            return;
+        };
+        for class in self.receivers_of(self.physicals[p].id, BREAK_RECEIVERS) {
+            match class.as_str() {
+                "DestroyableBehaviour" => {
+                    let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");
+                    self.destroyable_break(x, velocity);
+                }
+                "DamagableMachineryBehaviour" => {
+                    let m = self.machinery.iter().position(|m| m.PhysicalBehaviour == p).expect("the object's DamagableMachineryBehaviour");
+                    let mc = &mut self.machinery[m];
+                    if !mc.Indestructible && !mc.Destroyed {
+                        mc.Health -= mc.BreakDamage;
+                        self.machinery_act_on_damage(m);
+                    }
+                }
+                "TyreDeflationBehaviour" => {
+                    let t = self.tyres.iter().position(|t| t.Phys == p).expect("the object's TyreDeflationBehaviour");
+                    self.tyre_pop(t, None);
+                }
+                "GlowtubeBehaviour" => {
+                    let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
+                    self.glowtube_break(g);
+                }
+                "BulbBehaviour" => {
+                    let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
+                    self.bulb_break(b);
+                }
+                c => unimplemented!("{c}.Break"),
             }
         }
     }

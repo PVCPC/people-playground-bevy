@@ -77,6 +77,7 @@ pub struct Linked {
     pub thrusterbeds: HashMap<usize, usize>,
     pub pistons: HashMap<usize, usize>,
     pub flamethrowers: HashMap<usize, usize>,
+    pub rockets: HashMap<usize, usize>,
     pub point_liquids: HashMap<usize, usize>,
     pub act_on_collides: HashMap<usize, usize>,
     pub spawners: HashMap<usize, usize>,
@@ -468,7 +469,7 @@ pub(super) fn check_rewritten(class: &str) {
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
         | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
-        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" => {}
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" | "LaunchedRocketBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
         // SmoothLineControllerBehaviour only sets LineRenderer positions and width.
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
@@ -1378,7 +1379,7 @@ impl Game {
             machinery.insert(o, self.machinery.len());
             self.machinery.push(m);
         }
-        let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers, mut rockets) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
             if let Some((c, enabled, v)) = script(prefab, o, "GeneratorBehaviour") {
@@ -1523,6 +1524,17 @@ impl Game {
                 }
                 flamethrowers.insert(o, self.flamethrowers.len());
                 self.flamethrowers.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "LaunchedRocketBehaviour") {
+                let mut x = super::rocket::LaunchedRocket::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.ImmobiltyFieldLayer = field(field(v, "ImmobiltyFieldLayer")?, "m_Bits")?.i64().ok_or("ImmobiltyFieldLayer.m_Bits")? as u32;
+                let trail = l.object(field(v, "relevantSystem")?)?.unwrap_or_else(|| unimplemented!("LaunchedRocketBehaviour.relevantSystem is null (NullReferenceException on a hit)"));
+                x.relevantSystem = inst.objects[trail].components[0];
+                x.Explosion = Some(explosion_parameters(field(v, "Explosion")?)?);
+                rockets.insert(o, self.rockets.len());
+                self.rockets.push(x);
             }
         }
         let mut fire_maps = HashMap::new();
@@ -1837,7 +1849,7 @@ impl Game {
                 self.tr_link(b, name, val);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -2237,6 +2249,7 @@ impl Game {
                     unimplemented!("LocalFirePropagationMap.CalculatePoints (Awake without serialized Points)")
                 }
                 "GearBehaviour" => self.gear_awake(inst.objects[o].components[c]),
+                "LaunchedRocketBehaviour" => self.rocket_awake(linked.rockets[&o]),
                 "DestroyWhenAllChildrenDestroyed" => {
                     let Component::Script { fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
                     let file = prefab.objects[o].game_object.file;
@@ -2360,6 +2373,7 @@ impl Game {
                 "ThrusterbedBehaviour" => Some(Behaviour::Thrusterbed(linked.thrusterbeds[&o])),
                 "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
                 "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
+                "LaunchedRocketBehaviour" => Some(Behaviour::Rocket(linked.rockets[&o])),
                 "PointLiquidTransferBehaviour" => Some(Behaviour::PointLiquid(linked.point_liquids[&o])),
                 name if super::translated::CLASSES.contains(&name) => Some(Behaviour::Translated(linked.translated[&(o, c)])),
                 _ => None,

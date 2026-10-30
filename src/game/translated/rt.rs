@@ -22,6 +22,8 @@ pub enum Xf {
     Bare { physics: bool },
     /// A Collider2D's GameObject.
     Collider(i32),
+    /// A clone's GameObject with no PhysicalBehaviour, Collider2D or Rigidbody2D on or below it, by its Transform id.
+    Object(i32),
 }
 
 /// A translated component that takes collision messages: its place among the scripts on its PhysicalBehaviour's
@@ -85,7 +87,7 @@ pub fn pres(present: bool) {
 
 /// `transform.localRotation = ...` or `localPosition = ...` that only shows: the object must not move anything physical.
 pub fn presentation_pose(xf: Xf) {
-    if !matches!(xf, Xf::Bare { physics: false }) {
+    if !matches!(xf, Xf::Bare { physics: false } | Xf::Object(_)) {
         unimplemented!("Transform.localRotation/localPosition of an object with physics ({xf:?})");
     }
 }
@@ -182,10 +184,11 @@ impl Game {
         let owner = |x: Xf| match x {
             Xf::Physical(p) => Some(Some(p)),
             Xf::Collider(c) => self.physical_of_collider(c).map(Some),
-            Xf::Bare { .. } => None,
+            Xf::Bare { .. } | Xf::Object(_) => None,
         };
         match (a, b) {
             (Xf::Collider(x), Xf::Collider(y)) if x == y => true,
+            (Xf::Object(x), Xf::Object(y)) => x == y,
             _ => match (owner(a), owner(b)) {
                 (Some(x), Some(y)) => x == y,
                 // A bare object against a physical's: never the same GameObject.
@@ -357,6 +360,9 @@ impl Game {
     /// Transform.rotation = q on a clone's object: the PhysicalBehaviours below it see their new poses, and the
     /// bodies at the next SyncTransforms.
     pub fn tr_set_rotation(&mut self, xf: Xf, q: [f32; 4]) {
+        if let Xf::Object(id) = xf {
+            return self.with_component_instance(id, |_, inst, o| inst.set_world_rotation(o, q));
+        }
         let Xf::Physical(p) = xf else { unimplemented!("Transform.rotation = on a Transform without a PhysicalBehaviour ({xf:?})") };
         let id = self.physicals[p].transform_id;
         self.with_component_instance(id, |g, inst, o| {
@@ -412,7 +418,7 @@ impl Game {
         self.with_component_instance(id, |_, inst, o| {
             let prefab = inst.prefab.clone();
             let physics = std::iter::once(o).chain(inst.descendants(o)).any(|d| prefab.objects[d].components.iter().any(|(_, x)| matches!(x, crate::assets::db::Component::Collider2D(_) | crate::assets::db::Component::Rigidbody2D(_))));
-            Xf::Bare { physics }
+            if physics { Xf::Bare { physics } } else { Xf::Object(id) }
         })
     }
 
@@ -421,7 +427,7 @@ impl Game {
         let p = match xf {
             Xf::Physical(p) => Some(p),
             Xf::Collider(c) => self.physical_of_collider(c),
-            Xf::Bare { .. } => None,
+            Xf::Bare { .. } | Xf::Object(_) => None,
         };
         p.filter(|&p| self.physicals[p].in_world && !self.physicals[p].destroyed)
     }

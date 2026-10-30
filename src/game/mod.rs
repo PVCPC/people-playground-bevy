@@ -19,6 +19,7 @@ pub mod effector;
 pub mod messages;
 pub mod sort;
 pub mod flamethrower;
+pub mod rocket;
 pub mod piston;
 pub mod thruster;
 pub mod devices;
@@ -1093,6 +1094,7 @@ pub enum Behaviour {
     Thrusterbed(usize),
     Piston(usize),
     Flamethrower(usize),
+    Rocket(usize),
     Translated(translated::TBehaviour),
 }
 
@@ -1134,6 +1136,7 @@ impl Behaviour {
             Behaviour::Thrusterbed(_) => "ThrusterbedBehaviour",
             Behaviour::Piston(_) => "PistonBehaviour",
             Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
+            Behaviour::Rocket(_) => "LaunchedRocketBehaviour",
             Behaviour::Sticky(_) => "StickyGrenadeBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
@@ -1263,6 +1266,7 @@ pub struct Game {
     pub thrusterbeds: Vec<thruster::Thrusterbed>,
     pub pistons: Vec<piston::Piston>,
     pub flamethrowers: Vec<flamethrower::Flamethrower>,
+    pub rockets: Vec<rocket::LaunchedRocket>,
     /// `anchored_joints` slot -> `fixed_joints` entry, for the prefab joints adopted (a script that reads the component,
     /// or HingeJointLimitAutofixBehaviour.Start of a mirrored host): the first adoption owns the component's state.
     pub adopted_slots: HashMap<usize, usize>,
