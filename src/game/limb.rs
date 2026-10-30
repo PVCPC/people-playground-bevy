@@ -9,6 +9,10 @@ pub const TORSO: i32 = 1;
 pub const LEGS: i32 = 2;
 pub const ARMS: i32 = 3;
 
+/// Instance ids taken by the Instantiate of the LimbStatus prefab (LimbBehaviour.Awake): GameObject, Transform, Optout,
+/// LimbStatusBehaviour, SpriteRenderer, ParentConstraint, then the bar's GameObject, Transform and SpriteRenderer.
+pub const LIMB_STATUS_OBJECTS: usize = 9;
+
 script! {
     Limb {
         RoughClassification: i32 = 0,
@@ -389,6 +393,76 @@ impl Game {
             let max = mathf::lerp(max, 180.0, 0.5);
             let min = mathf::lerp(min, -180.0, 0.5);
             self.hinges[h].set_limits(&mut self.world, min, max);
+        }
+    }
+
+    /// LimbBehaviour.Awake. The component links (Skin, Physical, Circulation, Node, Grip, GoreString, Collider, Joint,
+    /// ShatteredObjectGenerators) are the shared arena index and the fields of this limb. Not modelled: `Color = white`
+    /// (sprite colour) and the LimbStatus UI clone's own state (LimbStatusBehaviour holds no simulation data).
+    pub fn limb_awake(&mut self, l: usize) {
+        // myStatus = Instantiate(LimbStatus, transform): the clone's objects take instance ids.
+        for _ in 0..LIMB_STATUS_OBJECTS {
+            self.allocate_instance_id();
+        }
+        self.limbs[l].InitialHealth = self.limbs[l].Health;
+        self.limbs[l].HasJoint = self.limbs[l].Joint.is_some();
+        self.limbs[l].randomOffset = self.random.range_int(-10000, 10000) as f32;
+        if self.limbs[l].HasJoint {
+            self.limb_setup_joint(l);
+        }
+        self.limbs[l].InternalTemperature = self.limbs[l].BodyTemperature;
+        let p = self.limbs[l].PhysicalBehaviour;
+        self.physicals[p].Temperature = self.limbs[l].BodyTemperature;
+    }
+
+    /// LimbBehaviour.SetupJoint: useMotor = true, then motor = (speed 0, torque MotorStrength). The motor setter forces
+    /// useMotor on and enables the b2 motor first (waking both bodies), so it covers the first assignment too.
+    fn limb_setup_joint(&mut self, l: usize) {
+        let torque = self.motor_strength(l);
+        let h = self.limbs[l].Joint.unwrap();
+        self.hinges[h].set_motor(&mut self.world, 0.0, torque);
+    }
+
+    /// LimbBehaviour.Start. Not modelled: the undo history lookup (UndoControllerBehaviour.FindRelevantAction),
+    /// LimbBehaviourManager.Limbs.Add, the OnDisintegration subscription (Disintegrate calls `limb_on_disintegration`
+    /// directly) and CreateContextMenuOptions (UI buttons).
+    pub fn limb_start(&mut self, l: usize) {
+        // gforce = GetOrAddComponent<GForceMeasureBehaviour>(): adds one (and its id) when the prefab has none; the
+        // arena keeps the limb's index.
+        if l >= self.gforces.len() {
+            assert_eq!(self.gforces.len(), l, "GForceMeasureBehaviour arena out of step with the limbs");
+            self.allocate_instance_id();
+            self.gforces.push(Default::default());
+        }
+        self.limbs[l].IsOnFloor = false;
+        if self.limbs[l].Broken {
+            self.break_bone_internal(l);
+        }
+        if self.limbs[l].IsDismembered {
+            unimplemented!("LimbBehaviour.SynchroniseDismemberment from Start: Destroy(Joint) of a dismembered prefab limb");
+        }
+        if self.limbs[l].HasJoint {
+            let h = self.limbs[l].Joint.unwrap();
+            self.limbs[l].originalJointLimits = self.hinges[h].limits;
+        }
+        for i in 0..self.limbs[l].ConnectedLimbs.len() {
+            let other = self.limbs[l].ConnectedLimbs[i];
+            let closer = match self.limbs[l].NearestLimbToBrain {
+                None => true,
+                Some(n) => self.limbs[other].DistanceToBrain < self.limbs[n].DistanceToBrain,
+            };
+            if closer && self.limbs[other].DistanceToBrain < self.limbs[l].DistanceToBrain {
+                self.limbs[l].NearestLimbToBrain = Some(other);
+            }
+        }
+        // goreString.TissueColour = GetOriginalBloodType().Color: the line renderer's colour.
+    }
+
+    /// GoreStringBehaviour.Awake only reads components and smoothedColour = TissueColour (rendering).
+    /// GoreStringBehaviour.Start. `create_joint_on_start` is the prefab's CreateJointOnStart.
+    pub fn gore_string_start(&mut self, l: usize, create_joint_on_start: bool) {
+        if create_joint_on_start || self.limbs[l].gore.HadJointWhenSerialised {
+            self.gore_string_create_joint(l);
         }
     }
 

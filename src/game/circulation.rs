@@ -157,6 +157,12 @@ impl RefFloat {
     }
 }
 
+/// Instance ids of one BleedingParticle prefab clone: the root (GameObject, Transform, ParticleSystem,
+/// ParticleSystemRenderer, BleedingParticleBehaviour), Trail (5), extraDecals (GameObject, Transform,
+/// FancyBloodSplatController, Optout, ActivateIfFancyEffects, DrippingBloodController) and water (GameObject,
+/// Transform, ParticleSystemRenderer, ParticleSystem, ActivateIfFancyEffects, Optout).
+pub const BLEEDING_PARTICLE_OBJECTS: usize = 22;
+
 script! {
     Circulation {
         IsPump: bool = false,
@@ -622,83 +628,146 @@ impl Game {
         false
     }
 
+    /// Instantiate(Person.BleedingParticlePrefab, position, Quaternion.identity, parent limb's transform) and
+    /// `transform.up = up`: the 22 objects of the clone take instance ids, then the clone's Awakes run (the two
+    /// ActivateIfFancyEffects each draw `Chance(1) > Random.value` before reading FancyEffects). `at` is the world
+    /// position, `up` the direction of the new transform's up axis. Returns the BleedingParticle's index; the caller
+    /// sets the fields CreateBleedingParticle / CreateDismembermentBloodParticle set after the Instantiate.
+    fn instantiate_bleeding_particle(&mut self, parent: usize, at: [f32; 3], up: [f32; 3]) -> usize {
+        use crate::unity::transform::{from_to_rotation_up, set_world, Trs};
+        for _ in 0..BLEEDING_PARTICLE_OBJECTS {
+            self.allocate_instance_id();
+        }
+        let p = self.limbs[parent].PhysicalBehaviour;
+        // The world pose under the parent (the prefab's scale is 1), then transform.up = up sets the world rotation.
+        let chain: Vec<Trs> = self.local_chain(p).into_iter().rev().collect();
+        let ((t, _), _) = set_world(&chain, at, [0.0, 0.0, 0.0, 1.0]);
+        let ((_, q), _) = set_world(&chain, at, from_to_rotation_up(up));
+        let local = Trs { t: [t[0], t[1], t[2], 0.0], q, s: [1.0, 1.0, 1.0, 0.0] };
+        let extra_decals = 1.0 > self.random.value() && self.prefs.FancyEffects;
+        let _water_puff = 1.0 > self.random.value() && self.prefs.FancyEffects;
+        // The extraDecals child is the FancyBloodSplatController (Start is delayed: started = false).
+        let splat = if extra_decals {
+            self.splats.push(FancyBloodSplat {
+                UnparentAtStart: false,
+                DirectionMode: 0,
+                Continuous: true,
+                Direction: [0.0, 1.0],
+                SpawningChance: 0.0,
+                AmountRange: [1.0, 4.0],
+                AngleRandomisation: 9.0,
+                LifetimeInSeconds: [1.0, 2.0],
+                EjectionForce: [0.0, 1.0],
+                DecalColourMultiplier: [1.0, 0.0, 0.0, 1.0],
+                Size: 0.1,
+                DestroyWhenNoParticles: true,
+                TriggerOnCollide: false,
+                particles: Default::default(),
+                parent_position: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                started: false,
+                destroyed: false,
+                CollisionLayers: 10752,
+                // The extraDecals child's local rotation is identity.
+                attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
+                parent_person: Some(self.limbs[parent].Person),
+            });
+            let s = self.splats.len() - 1;
+            self.update_splat_pose(s);
+            self.pending_starts.push(super::misc::PendingStart::Splat(s));
+            Some(s)
+        } else {
+            None
+        };
+        // BleedingParticleBehaviour: Awake (clock, collision module) and Start (WaterPuffSystem) draw nothing.
+        self.bleeding.push(BleedingParticle {
+            IsOnlyForInternalBleeding: false,
+            SpeedMultiplier: 0.6,
+            RateMultiplier: 1.25,
+            Laminarity: 0.0,
+            DripSoundRateThreshold: 1.0,
+            ShouldBecomeSmokeInWater: false,
+            PulseSpeed: 2.0,
+            PulseIntensity: 1.3,
+            fakeHeartClock: 0.0,
+            CirculationBehaviour: parent,
+            PushingTo: None,
+            BloodSplatController: splat,
+            dripSoundClock: FixedIntervalDistributor::with_rate(0.5),
+            DripSounds: self.people[self.limbs[parent].Person].BleedingDripSounds,
+            visible: false,
+            startSpeedMultiplier: 0.0,
+            rateOverTimeMultiplier: 0.0,
+            emission_enabled: false,
+            destroyed: false,
+        });
+        self.bleeding.len() - 1
+    }
+
     /// CirculationBehaviour.CreateBleedingParticle
     /// Every caller passes makeSound = false, so DripSounds is always nulled.
     pub fn create_bleeding_particle(&mut self, l: usize, world_position: [f32; 2], direction: [f32; 2], laminarity: f32) {
         if !self.limbs[l].IsAndroid && !self.limbs[l].IsZombie && self.circulations[l].BleedingPointCount < 8 {
-            use crate::unity::transform::{bounds_closest_point, from_to_rotation_up, set_world, Trs};
             let p = self.limbs[l].PhysicalBehaviour;
             let (c, e) = self.sprite_world_bounds(p);
-            let (closest, _) = bounds_closest_point([world_position[0], world_position[1], 0.0], c, e);
-            // Instantiate(BleedingParticle.prefab, worldPosition - direction * 0.1f, identity, limb): the world pose
-            // under the limb (the prefab's scale is 1), then transform.up = direction sets the world rotation.
+            let (closest, _) = crate::unity::transform::bounds_closest_point([world_position[0], world_position[1], 0.0], c, e);
             let at = [closest[0] - direction[0] * 0.1, closest[1] - direction[1] * 0.1, 0.0];
-            let chain: Vec<Trs> = self.local_chain(p).into_iter().rev().collect();
-            let ((t, _), _) = set_world(&chain, at, [0.0, 0.0, 0.0, 1.0]);
-            let ((_, q), _) = set_world(&chain, at, from_to_rotation_up([direction[0], direction[1], 0.0]));
-            let local = Trs { t: [t[0], t[1], t[2], 0.0], q, s: [1.0, 1.0, 1.0, 0.0] };
-            let b = self.bleeding.len();
-            // Awake of the clone's hierarchy (Trail, extraDecals, water puff): the two
-            // ActivateIfFancyEffects each draw `Chance(1) > Random.value` before reading FancyEffects.
-            let extra_decals = 1.0 > self.random.value() && self.prefs.FancyEffects;
-            let _water_puff = 1.0 > self.random.value() && self.prefs.FancyEffects;
-            // The extraDecals child is the FancyBloodSplatController (Start is delayed: started = false).
-            let splat = if extra_decals {
-                self.splats.push(FancyBloodSplat {
-                    UnparentAtStart: false,
-                    DirectionMode: 0,
-                    Continuous: true,
-                    Direction: [0.0, 1.0],
-                    SpawningChance: 0.0,
-                    AmountRange: [1.0, 4.0],
-                    AngleRandomisation: 9.0,
-                    LifetimeInSeconds: [1.0, 2.0],
-                    EjectionForce: [0.0, 1.0],
-                    DecalColourMultiplier: [1.0, 0.0, 0.0, 1.0],
-                    Size: 0.1,
-                    DestroyWhenNoParticles: true,
-                    TriggerOnCollide: false,
-                    particles: Default::default(),
-                    parent_position: [0.0; 3],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    started: false,
-                    destroyed: false,
-                    CollisionLayers: 10752,
-                    // The extraDecals child's local rotation is identity.
-                    attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
-                    parent_person: Some(self.limbs[l].Person),
-                });
-                let s = self.splats.len() - 1;
-                self.update_splat_pose(s);
-                self.pending_starts.push(super::misc::PendingStart::Splat(s));
-                Some(s)
-            } else {
-                None
-            };
-            // BleedingParticleBehaviour: Awake (clock, collision module) and Start (WaterPuffSystem) draw nothing.
-            self.bleeding.push(BleedingParticle {
-                IsOnlyForInternalBleeding: false,
-                SpeedMultiplier: 0.6,
-                RateMultiplier: 1.25,
-                Laminarity: laminarity,
-                DripSoundRateThreshold: 1.0,
-                ShouldBecomeSmokeInWater: self.circulations[l].BleedingPointCount == 0,
-                PulseSpeed: 2.0,
-                PulseIntensity: 1.3,
-                fakeHeartClock: 0.0,
-                CirculationBehaviour: l,
-                PushingTo: None,
-                BloodSplatController: splat,
-                dripSoundClock: FixedIntervalDistributor::with_rate(0.5),
-                DripSounds: None,
-                visible: false,
-                startSpeedMultiplier: 0.0,
-                rateOverTimeMultiplier: 0.0,
-                emission_enabled: false,
-                destroyed: false,
-            });
+            let b = self.instantiate_bleeding_particle(l, at, [direction[0], direction[1], 0.0]);
+            self.bleeding[b].ShouldBecomeSmokeInWater = self.circulations[l].BleedingPointCount == 0;
+            self.bleeding[b].CirculationBehaviour = l;
+            self.bleeding[b].Laminarity = laminarity;
+            self.bleeding[b].DripSounds = None;
             self.circulations[l].BleedingParticles.push(b);
             self.circulations[l].BleedingPointCount += 1;
+        }
+    }
+
+    /// CirculationBehaviour.CreateDismembermentBloodParticle: a particle under the connected (parent) limb at the
+    /// joint's connected anchor, pointing from the parent to this limb. It is on neither BleedingParticles nor
+    /// BleedingPointCount, and keeps the prefab's DripSounds.
+    pub fn create_dismemberment_blood_particle(&mut self, l: usize) {
+        if !self.limbs[l].IsAndroid && self.limbs[l].HasJoint {
+            let h = self.limbs[l].Joint.expect("MissingReferenceException: HasJoint without a Joint");
+            let parent = self.hinges[h].connected;
+            let pp = self.limbs[parent].PhysicalBehaviour;
+            let anchor = self.hinges[h].connectedAnchor;
+            let position = self.transform_point3(pp, [anchor[0], anchor[1], 0.0]);
+            let (a, b) = (self.physicals[self.limbs[l].PhysicalBehaviour].transform.position, self.physicals[pp].transform.position);
+            let up = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+            let particle = self.instantiate_bleeding_particle(parent, position, up);
+            // obj.AddComponent<Optout>()
+            self.allocate_instance_id();
+            self.bleeding[particle].CirculationBehaviour = parent;
+            self.bleeding[particle].PushingTo = Some(l);
+            self.bleeding[particle].ShouldBecomeSmokeInWater = true;
+            self.bleeding[particle].Laminarity = self.random.value();
+        }
+    }
+
+    /// CirculationBehaviour.Awake
+    pub fn circulation_awake(&mut self, l: usize) {
+        self.circulations[l].NewlySpawned = true;
+        self.circulations[l].WasInitiallyPumping = self.circulations[l].IsPump;
+        self.circulations[l].BloodFlow = 1.0;
+        for i in 0..self.circulations[l].PushesTo.len() {
+            let to = self.circulations[l].PushesTo[i];
+            self.circulations[to].Source = Some(l);
+        }
+    }
+
+    /// CirculationBehaviour.Start. The Person prefab's SerialisableDistributions are empty on all 14 limbs, so the
+    /// TRITIUM check of the glowing-human achievement flag only looks at the species.
+    pub fn circulation_start(&mut self, l: usize) {
+        if self.limbs[l].SpeciesIdentity != "Human" {
+            self.circulations[l].canUnlockGlowingHumanAchievement = false;
+        }
+        let liquid = self.blood_type(l);
+        if self.circulations[l].NewlySpawned {
+            self.add_liquid(l, liquid, 1.0);
+            self.circulations[l].NewlySpawned = false;
+        }
+        if !self.physicals[self.limbs[l].PhysicalBehaviour].isDisintegrated {
+            self.create_dismemberment_blood_particle(l);
         }
     }
 

@@ -328,7 +328,7 @@ impl Game {
     /// (180c16380) on each attached collider: GetColliderMaterialState (180c11360) gives the collider's own material,
     /// else the body's (the prefab colliders have none, see spawn), the fixtures take its friction and bounciness and
     /// the collider refilters. The colliders are the body's fixtures' user data, sorted and made unique; the sort is
-    /// by native address, taken here as fixture creation order.
+    /// by native address, modelled as fixture creation order (the allocation-order model of the heap order).
     fn physical_set_properties(&mut self, p: usize) {
         let props = &self.properties[self.physicals[p].Properties];
         let (Some(friction), false) = (props.friction, self.physicals[p].rigidbody_has_material) else { return };

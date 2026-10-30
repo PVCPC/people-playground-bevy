@@ -497,6 +497,72 @@ mod tests {
         first.records.retain(|r| r.ty != "FancyBloodSplatController" && r.ty != "BleedingParticleBehaviour");
         let want = Game::from_snapshot(&first, &rig).unwrap();
         let person = g.link_instance(&mut db, &prefab, &inst).unwrap();
+        // The Awake and Start passes over the queue 0x14 behaviours, sorted as AwakeFromLoadQueue sorts them (script
+        // execution order, then the higher clone id).
+        let header = super::super::dump::header(&root.join("reference-probe/game/dump31spawnrand.txt")).unwrap();
+        g.random = crate::unity::Random { state: super::super::dump::spawn_random_state(&header).unwrap() };
+        // The BleedingParticle prefab's DripSounds (Person.BleedingParticlePrefab) is 11 clips.
+        g.people[person].BleedingDripSounds = Some(11);
+        let mut order: Vec<(usize, usize)> = (0..prefab.objects.len())
+            .flat_map(|o| (0..prefab.objects[o].components.len()).map(move |c| (o, c)))
+            .filter(|&(o, c)| matches!(prefab.objects[o].components[c].1, Component::Script { .. }))
+            .collect();
+        order.sort_by_key(|&(o, c)| {
+            let Component::Script { execution_order, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            (*execution_order, std::cmp::Reverse(inst.objects[o].components[c]))
+        });
+        let class_of = |o: usize, c: usize| match &prefab.objects[o].components[c].1 {
+            Component::Script { class, .. } => class.clone(),
+            _ => unreachable!(),
+        };
+        let limb_of = |g: &Game, o: usize| (0..g.limbs.len()).find(|&l| g.limbs[l].Person == person && g.limbs[l].name == prefab.objects[o].name).unwrap();
+        for &(o, c) in &order {
+            match class_of(o, c).as_str() {
+                "PersonBehaviour" => {
+                    let scale = g.person_awake(person).unwrap();
+                    let s = inst.objects[0].trs.s;
+                    assert_eq!(scale.map(f32::to_bits), [s[0].to_bits(), s[1].to_bits(), s[2].to_bits()], "PersonBehaviour.Awake scale");
+                }
+                "SkinMaterialHandler" => g.skin_awake(limb_of(&g, o)),
+                "PhysicalBehaviour" => g.physical_awake(g.limbs[limb_of(&g, o)].PhysicalBehaviour),
+                "LimbBehaviour" => g.limb_awake(limb_of(&g, o)),
+                "CirculationBehaviour" => g.circulation_awake(limb_of(&g, o)),
+                _ => {}
+            }
+        }
+        // PhysicalBehaviour.SetupSpawnPrefab (Instantiate of the Resources prefab) is not rewritten: off for the Start pass.
+        // Mono's GetHashCode (Random.InitState(GetHashCode()) in PhysicalBehaviour.Start) is a heap property: from the recording.
+        for p in 0..g.physicals.len() {
+            let id = g.physicals[p].id;
+            g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
+        }
+        let spawn_particles: Vec<bool> = g.physicals.iter().map(|p| p.SpawnSpawnParticles).collect();
+        g.physicals.iter_mut().for_each(|p| p.SpawnSpawnParticles = false);
+        for &(o, c) in &order {
+            let Some((_, _, v)) = script(&prefab, o, &class_of(o, c)) else { unreachable!() };
+            match class_of(o, c).as_str() {
+                "PersonBehaviour" => g.person_start(person),
+                "HingeJointLimitAutofixBehaviour" => g.hinge_joint_limit_autofix_start(person),
+                "CirculationBehaviour" => g.circulation_start(limb_of(&g, o)),
+                "PhysicalBehaviour" => g.physical_start(g.limbs[limb_of(&g, o)].PhysicalBehaviour),
+                "LimbBehaviour" => g.limb_start(limb_of(&g, o)),
+                "ConnectedNodeBehaviour" => {
+                    let keep: Option<Vec<bool>> = v.get("SerialisableConnectedNodes").and_then(Value::array).map(|a| a.iter().map(|x| x.bool().unwrap()).collect());
+                    g.node_start(limb_of(&g, o), keep.as_deref());
+                }
+                "GripBehaviour" => g.grip_start(g.limbs[limb_of(&g, o)].GripBehaviour.unwrap()),
+                "GoreStringBehaviour" => g.gore_string_start(limb_of(&g, o), field(v, "CreateJointOnStart").unwrap().bool().unwrap()),
+                "ShatteredObjectGenerator" => assert!(!field(v, "GenerateOnStart").unwrap().bool().unwrap(), "ShatteredObjectGenerator.Start generates"),
+                _ => {}
+            }
+        }
+        for (p, on) in g.physicals.iter_mut().zip(spawn_particles) {
+            p.SpawnSpawnParticles = on;
+        }
+        // The first frame's render: OnWillRenderObject fills the blood colour caches.
+        for l in 0..g.limbs.len() {
+            g.skin_will_render(l);
+        }
         let mut out = Vec::new();
         let mut links = Vec::new();
         let mut check = |label: String, a: String, b: String| {
@@ -516,6 +582,7 @@ mod tests {
             check(format!("{n} id"), a.id.to_string(), b.id.to_string());
             check(format!("{n} PhysicalBehaviour"), want.physicals[a.PhysicalBehaviour].id.to_string(), g.physicals[b.PhysicalBehaviour].id.to_string());
             check(format!("{n} Joint"), format!("{:?}", a.Joint), format!("{:?}", b.Joint));
+            check(format!("{n} NearestLimbToBrain"), format!("{:?}", a.NearestLimbToBrain), format!("{:?}", b.NearestLimbToBrain));
             check(format!("{n} GripBehaviour"), format!("{:?}", a.GripBehaviour), format!("{:?}", b.GripBehaviour));
             check(format!("{n} ConnectedLimbs"), names(&want, &a.ConnectedLimbs), names(&g, &b.ConnectedLimbs));
             check(format!("{n} StrengthMultipliers"), format!("{:?}", a.StrengthMultipliers), format!("{:?}", b.StrengthMultipliers));
@@ -525,7 +592,7 @@ mod tests {
             let (mut a, mut b) = (a.clone(), b.clone());
             diff(&n, a.fields(), b.fields(), &mut out);
             let (mut a, mut b) = (want.circulations[l].clone(), g.circulations[l].clone());
-            check(format!("{n} circulation links"), format!("{:?} {:?}", a.PushesTo, a.LocalArteryRects), format!("{:?} {:?}", b.PushesTo, b.LocalArteryRects));
+            check(format!("{n} circulation links"), format!("{:?} {:?} {:?}", a.PushesTo, a.LocalArteryRects, a.Source), format!("{:?} {:?} {:?}", b.PushesTo, b.LocalArteryRects, b.Source));
             diff(&format!("{n} circulation"), a.fields(), b.fields(), &mut out);
             let (mut a, mut b) = (want.nodes[l].clone(), g.nodes[l].clone());
             check(format!("{n} node links"), format!("{:?}", a.Connections), format!("{:?}", b.Connections));
@@ -566,7 +633,7 @@ mod tests {
         }
         check("hinge count".into(), want.hinges.len().to_string(), g.hinges.len().to_string());
         for (h, (a, b)) in want.hinges.iter().zip(&g.hinges).enumerate() {
-            let show = |x: &Hinge| format!("{} {} {:?} {} {} {} {}", x.useMotor, x.useLimits, x.limits, x.breakForce, x.breakTorque, x.connected, x.enabled);
+            let show = |x: &Hinge| format!("{} {:?} {} {:?} {} {} {} {}", x.useMotor, x.motor, x.useLimits, x.limits, x.breakForce, x.breakTorque, x.connected, x.enabled);
             check(format!("hinge {h}"), show(a), show(b));
         }
         check("grip count".into(), want.grips.len().to_string(), g.grips.len().to_string());
@@ -582,6 +649,7 @@ mod tests {
         let (a, b) = (&want.people[0], &g.people[person]);
         check("person".into(), format!("{} {} {} {:?}", a.id, a.BoneBreakClips, a.DismembermentClips, a.localScale), format!("{} {} {} {:?}", b.id, b.BoneBreakClips, b.DismembermentClips, b.localScale));
         check("pose count".into(), a.Poses.len().to_string(), b.Poses.len().to_string());
+        check("person runtime links".into(), format!("{} {:?} {:?} {:?}", names(&want, &a.Limbs), a.Head, a.LinkedPoses, a.ActivePose), format!("{} {:?} {:?} {:?}", names(&g, &b.Limbs), b.Head, b.LinkedPoses, b.ActivePose));
         for (pa, pb) in a.Poses.iter().zip(&b.Poses) {
             let show = |p: &RagdollPose| {
                 let angles: Vec<String> = p.Angles.iter().map(|x| match x.Animated {

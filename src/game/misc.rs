@@ -329,6 +329,38 @@ impl Game {
         self.nodes[a].Connections.contains(&Some(b))
     }
 
+    /// ConnectedNodeBehaviour.Start. `serialisable_connected_nodes` is the prefab's SerialisableConnectedNodes (None when
+    /// null). Awake only adds the node to NodeController.Nodes, which `node_controller_update` already walks.
+    pub fn node_start(&mut self, n: usize, serialisable_connected_nodes: Option<&[bool]>) {
+        if !self.nodes[n].ShouldLoadSerialisableConnections {
+            return;
+        }
+        let Some(keep) = serialisable_connected_nodes else { return };
+        for i in 0..self.nodes[n].Connections.len() {
+            if !keep[i] {
+                self.nodes[n].Connections[i] = None;
+            }
+        }
+    }
+
+    /// SkinMaterialHandler.Awake. `renderer.material` (after assigning Person.ChosenMaterial when it is set) makes the
+    /// renderer's own Material instance, which takes one instance id. Start only reads the blood colour and uploads the
+    /// material (rendering).
+    pub fn skin_awake(&mut self, l: usize) {
+        self.allocate_instance_id();
+        let time = self.time.time;
+        self.skins[l].damagePointTimeStamps = vec![time; 128];
+        self.skins[l].damagePoints = vec![[0.0, 0.0, 0.0, damage_type::NONE as f32]; 128];
+    }
+
+    /// GripBehaviour.Start. CollidersToIgnore (the root's colliders) is only read by Attach, which is not rewritten.
+    /// Awake adds the pause listener (modding API).
+    pub fn grip_start(&mut self, g: usize) {
+        if self.grips[g].isHolding && self.grips[g].CurrentlyHolding.is_some() {
+            unimplemented!("GripBehaviour.Attach");
+        }
+    }
+
     /// NodeController.Update over NodeController.Nodes (HashSet, insertion order).
     pub fn node_controller_update(&mut self) {
         for n in &mut self.nodes {

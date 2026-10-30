@@ -136,6 +136,10 @@ script! {
         /// DisintegrationCounterBehaviour.DisintegrationCount (the root object's).
         DisintegrationCount: i32 = 0,
         DismembermentClips: usize = 0,
+        /// DripSounds length of the BleedingParticle prefab (Person.BleedingParticlePrefab); None when it is null.
+        BleedingDripSounds: Option<usize> = None,
+        /// HingeJointLimitAutofixBehaviour.IsFlipped
+        IsFlipped: bool = false,
         /// A pending Object.Destroy(root gameObject): the DelayedCallManager time it runs at.
         destroy_at: Option<f64> = None,
         /// The root GameObject (and its whole hierarchy) was destroyed.
@@ -147,6 +151,79 @@ impl Game {
     pub fn active_pose(&self, person: usize) -> &RagdollPose {
         let p = &self.people[person];
         &p.Poses[p.ActivePose.unwrap()]
+    }
+
+    /// PersonBehaviour.Awake. `Limbs` is GetComponentsInChildren<LimbBehaviour> (the person's limbs in arena order, which is the
+    /// hierarchy order); `Poses` and each `Limb.Person` link are the bridge's. Returns the new local scale of the root transform (RandomisedSize), which the bridge applies.
+    /// Not modelled: AddToDictionary (AliveBehaviour.AliveByTransform, read by nothing rewritten) and chosenMaterial
+    /// (a render material picked from the Goreless/Gore preferences).
+    pub fn person_awake(&mut self, person: usize) -> Option<[f32; 3]> {
+        self.people[person].seed = self.random.value() * 1000.0;
+        // CreateLinkedPoseDictionary: PoseState values in order, PickRandom over the poses of that state.
+        for state in 0..pose_state::COUNT {
+            let of_state: Vec<usize> = (0..self.people[person].Poses.len()).filter(|&i| self.people[person].Poses[i].State == state as i32).collect();
+            if of_state.is_empty() {
+                panic!("Missing pose for {state}");
+            }
+            let pick = self.pick_random(of_state.len()).unwrap();
+            self.people[person].LinkedPoses[state] = of_state[pick];
+        }
+        self.people[person].Consciousness = 1.0;
+        self.people[person].OxygenLevel = 1.0;
+        self.people[person].Limbs = (0..self.limbs.len()).filter(|&l| self.limbs[l].Person == person).collect();
+        for i in 0..self.people[person].Limbs.len() {
+            let l = self.people[person].Limbs[i];
+            self.limbs[l].Person = person;
+            if self.limbs[l].HasBrain {
+                self.people[person].Head = Some(l);
+            }
+        }
+        if self.people[person].RandomisedSize {
+            let s = 1.0 * self.random.range(1.59, 2.0) / 2.0 / 0.82397;
+            self.people[person].localScale = [s, s, 0.0];
+            return Some([s, s, 0.0]);
+        }
+        None
+    }
+
+    /// PersonBehaviour.Start. ConstructDictionary only builds AngleDictionary from Angles (an ArgumentException on a
+    /// duplicate limb).
+    pub fn person_start(&mut self, person: usize) {
+        self.people[person].IsTouchingFloor = false;
+        self.people[person].AngleOffset = if !(self.people[person].localScale[0] < 0.0) { 1.0 } else { -1.0 };
+        for pose in &self.people[person].Poses {
+            for (i, a) in pose.Angles.iter().enumerate() {
+                assert!(!pose.Angles[..i].iter().any(|b| b.Limb == a.Limb), "ArgumentException: duplicate key in AngleDictionary");
+            }
+        }
+        // SetCollisionIgnores: every ordered pair of distinct limbs (Limb.Collider is the first collider of the object).
+        for i in 0..self.people[person].Limbs.len() {
+            for j in 0..self.people[person].Limbs.len() {
+                if i != j {
+                    let (a, b) = (self.people[person].Limbs[i], self.people[person].Limbs[j]);
+                    let (ca, cb) = (self.physicals[self.limbs[a].PhysicalBehaviour].all_colliders[0], self.physicals[self.limbs[b].PhysicalBehaviour].all_colliders[0]);
+                    self.ignore_collision_substitute(ca, cb, true);
+                }
+            }
+        }
+        self.set_pose(person, 0);
+    }
+
+    /// HingeJointLimitAutofixBehaviour.Start (on the root): a mirrored root flips every hinge's limits. The person has no
+    /// SliderJoint2D or FixedJoint2D, so FixSlider and FixFixed find nothing.
+    pub fn hinge_joint_limit_autofix_start(&mut self, person: usize) {
+        self.people[person].IsFlipped = false;
+        if !(self.people[person].localScale[0] > 0.0) {
+            self.people[person].IsFlipped = true;
+            for i in 0..self.people[person].Limbs.len() {
+                if let Some(h) = self.limbs[self.people[person].Limbs[i]].Joint {
+                    if self.hinges[h].useLimits {
+                        let [min, max] = self.hinges[h].limits;
+                        self.hinges[h].set_limits(&mut self.world, 0.0 - max, 0.0 - min);
+                    }
+                }
+            }
+        }
     }
 
     /// PersonBehaviour.IsAlive / IsHeadAlive
@@ -494,6 +571,79 @@ mod tests {
         let human = first.of("TransformChain").find(|r| r.name == "Human").unwrap();
         let want: Vec<f32> = human.get("lscale").unwrap().split(',').map(|w| f32::from_bits(u32::from_str_radix(w, 16).unwrap())).collect();
         assert_eq!([scale.to_bits(), scale.to_bits(), 0], [want[0].to_bits(), want[1].to_bits(), want[2].to_bits()], "lscale {want:?} ours {scale}");
+    }
+
+    /// The Awake and Start passes of a spawned Person take the instance ids the recording lists, in order: the type at
+    /// the first id of each phase and the final next id (dump33human: the Person's clone ends at -62472; the recorded
+    /// ids-after33 lists every UnityEngine.Object by id). PhysicalBehaviour.Start is not run (its ids are checked by
+    /// `physical::tests::start_matches_game`); the allocator jumps over its 169 ids.
+    #[test]
+    fn awake_start_ids_match_game() {
+        use super::super::dump;
+        use crate::game_assets::HumanRig;
+        use std::path::Path;
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(rig) = HumanRig::load(&root.join("local-cache"), &game) else { return };
+        let Ok(mut snaps) = dump::snapshots(&root.join("reference-probe/game/dump33human.txt")) else { return };
+        let Ok(ids) = std::fs::read_to_string(root.join("reference-probe/game/ids-after33.txt")) else { return };
+        let kind_at = |id: i32| ids.lines().find_map(|l| l.strip_prefix(&format!("{id} "))).map(|r| r.split(' ').next().unwrap().to_string());
+        let _first = snaps.next().unwrap();
+        let fs = snaps.find(|s| s.pt == "FS" && s.of("b2World").next().is_some()).unwrap();
+        let mut g = Game::from_snapshot(&fs, &rig).unwrap();
+        let limbs = g.people[0].Limbs.clone();
+        assert_eq!(limbs.len(), 14);
+        g.next_instance_id = -62474;
+        let mut phase = |g: &mut Game, name: &str, want_first: &str, f: &dyn Fn(&mut Game)| {
+            let first = g.next_instance_id;
+            assert_eq!(kind_at(first).as_deref(), Some(want_first), "{name}: type at {first}");
+            f(g);
+        };
+        phase(&mut g, "person awake", "Material", &|g| {
+            g.person_awake(0);
+        });
+        // Awake order: SkinMaterialHandler (0), PhysicalBehaviour (80), LimbBehaviour (200).
+        for &l in &limbs {
+            g.skin_awake(l);
+        }
+        assert_eq!(g.next_instance_id, -62502);
+        for &l in &limbs {
+            let p = g.limbs[l].PhysicalBehaviour;
+            g.physicals[p].ids.ActivationNode = 0;
+            g.physicals[p].ids.ContextMenuOptions = 0;
+        }
+        phase(&mut g, "physical awake", "NodeBehaviour", &|g| {
+            for &l in &limbs {
+                g.physical_awake(g.limbs[l].PhysicalBehaviour);
+            }
+        });
+        assert_eq!(g.next_instance_id, -62558);
+        phase(&mut g, "limb awake", "GameObject", &|g| {
+            for &l in &limbs {
+                g.limb_awake(l);
+            }
+        });
+        assert_eq!(g.next_instance_id, -62810);
+        for &l in &limbs {
+            g.circulation_awake(l);
+        }
+        // Start order: the order-0 scripts, PhysicalBehaviour (80), HingeJointLimitAutofixBehaviour (100), LimbBehaviour (200).
+        g.person_start(0);
+        phase(&mut g, "circulation start", "GameObject", &|g| {
+            for &l in &limbs {
+                g.circulation_start(l);
+            }
+        });
+        assert_eq!(g.next_instance_id, -63408);
+        g.next_instance_id = -63746;
+        g.gforces.clear();
+        g.hinge_joint_limit_autofix_start(0);
+        phase(&mut g, "limb start", "GForceMeasureBehaviour", &|g| {
+            for &l in &limbs {
+                g.limb_start(l);
+            }
+        });
+        assert_eq!(g.next_instance_id, -63774);
     }
 
     /// The last disintegration queues the root GameObject's Destroy once, at min(fixed time, frame time).
