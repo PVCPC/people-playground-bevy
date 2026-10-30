@@ -49,7 +49,18 @@ impl Cartridge {
     }
 }
 
-/// A BallisticsEmitter: a FirearmBehaviour's (made in Start) or the GlobalShrapnelEmitter's.
+/// A BallisticsEmitter's ConnectedBehaviour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Shooter {
+    /// A FirearmBehaviour (`Game::firearms`).
+    Firearm(usize),
+    /// A MachineGunBehaviour (`Game::machine_guns`).
+    MachineGun(usize),
+    /// The GlobalShrapnelEmitter.
+    Shrapnel,
+}
+
+/// A BallisticsEmitter: a FirearmBehaviour's or MachineGunBehaviour's (made in Start) or the GlobalShrapnelEmitter's.
 #[derive(Clone, Debug)]
 pub struct Emitter {
     pub cartridge: Cartridge,
@@ -67,6 +78,9 @@ pub struct Emitter {
     pub lastCrackPlayTime: f32,
     /// `tracers`: how many of the pool's tracers it holds (which ones is rendering).
     pub tracers: usize,
+    pub ExplosiveRound: bool,
+    pub ExplosiveRoundParams: super::explosion::ExplosionParameters,
+    pub ExplodeAtHitPoint: bool,
 }
 
 impl Emitter {
@@ -85,6 +99,9 @@ impl Emitter {
             Charge: 0.0,
             lastCrackPlayTime: f32::MIN,
             tracers: 0,
+            ExplosiveRound: false,
+            ExplosiveRoundParams: Default::default(),
+            ExplodeAtHitPoint: false,
         }
     }
 }
@@ -101,8 +118,7 @@ pub const SHRAPNEL_OWNER: i32 = i32::MIN;
 /// The arguments of one BallisticIteration.
 #[derive(Clone, Copy, Debug)]
 pub struct Bullet {
-    /// The ConnectedBehaviour: a FirearmBehaviour (`Game::firearms`), or None for the GlobalShrapnelEmitter.
-    pub firearm: Option<usize>,
+    pub shooter: Shooter,
     pub origin: [f32; 2],
     pub direction: [f32; 2],
     pub speed: f32,
@@ -254,9 +270,15 @@ impl Game {
         }
     }
 
-    /// BallisticsEmitter.Dispose (FirearmBehaviour.OnDestroy): the tracers it still holds go back.
-    pub fn emitter_dispose(&mut self, f: usize) {
-        if let Some(e) = self.firearms[f].emitter.as_mut() {
+    /// BallisticsEmitter.Dispose (OnDestroy of its ConnectedBehaviour; none before its Start): the tracers it still
+    /// holds go back.
+    pub fn emitter_dispose(&mut self, f: Shooter) {
+        let e = match f {
+            Shooter::Firearm(f) => self.firearms[f].emitter.as_mut(),
+            Shooter::MachineGun(m) => self.machine_guns[m].emitter.as_mut(),
+            Shooter::Shrapnel => unreachable!(),
+        };
+        if let Some(e) = e {
             let n = std::mem::take(&mut e.tracers);
             for _ in 0..n {
                 self.tracer_return();
@@ -266,27 +288,33 @@ impl Game {
 
     // ---- BallisticsEmitter ----------------------------------------------------------------------------------------
 
-    fn emitter(&self, f: Option<usize>) -> &Emitter {
+    fn emitter(&self, f: Shooter) -> &Emitter {
         match f {
-            Some(f) => self.firearms[f].emitter.as_ref().unwrap_or_else(|| unimplemented!("FirearmBehaviour.Shoot before Start (NullReferenceException)")),
-            None => &self.shrapnel.as_ref().expect("the GlobalShrapnelEmitter").emitter,
+            Shooter::Firearm(f) => self.firearms[f].emitter.as_ref().unwrap_or_else(|| unimplemented!("FirearmBehaviour.Shoot before Start (NullReferenceException)")),
+            Shooter::MachineGun(m) => self.machine_guns[m].emitter.as_ref().unwrap_or_else(|| unimplemented!("MachineGunBehaviour.Shoot before Start (NullReferenceException)")),
+            Shooter::Shrapnel => &self.shrapnel.as_ref().expect("the GlobalShrapnelEmitter").emitter,
         }
     }
 
-    fn emitter_mut(&mut self, f: Option<usize>) -> &mut Emitter {
+    fn emitter_mut(&mut self, f: Shooter) -> &mut Emitter {
         match f {
-            Some(f) => self.firearms[f].emitter.as_mut().unwrap(),
-            None => &mut self.shrapnel.as_mut().expect("the GlobalShrapnelEmitter").emitter,
+            Shooter::Firearm(f) => self.firearms[f].emitter.as_mut().unwrap(),
+            Shooter::MachineGun(m) => self.machine_guns[m].emitter.as_mut().unwrap(),
+            Shooter::Shrapnel => &mut self.shrapnel.as_mut().expect("the GlobalShrapnelEmitter").emitter,
         }
     }
 
     /// The ConnectedBehaviour's instance id (its coroutines' owner).
-    fn emitter_owner(&self, f: Option<usize>) -> i32 {
-        f.map_or(SHRAPNEL_OWNER, |f| self.firearms[f].id)
+    fn emitter_owner(&self, f: Shooter) -> i32 {
+        match f {
+            Shooter::Firearm(f) => self.firearms[f].id,
+            Shooter::MachineGun(m) => self.machine_guns[m].id,
+            Shooter::Shrapnel => SHRAPNEL_OWNER,
+        }
     }
 
     /// BallisticsEmitter.Emit(origin, direction)
-    pub fn emitter_emit(&mut self, f: Option<usize>, origin: [f32; 2], direction: [f32; 2]) {
+    pub fn emitter_emit(&mut self, f: Shooter, origin: [f32; 2], direction: [f32; 2]) {
         let e = self.emitter(f);
         let (traversal, charge, speed) = (e.DoTraversal && e.RenderTracersIfTraversal, e.Charge, e.cartridge.StartSpeed);
         let mut tracer = false;
@@ -294,7 +322,7 @@ impl Game {
             self.emitter_mut(f).tracers += 1;
             tracer = true;
         }
-        let b = Bullet { firearm: f, origin, direction: mathf::normalized2(direction), speed, iteration: 0, total: 0.0, previous: None, tracer, splash: true, can_explode: true, charge };
+        let b = Bullet { shooter: f, origin, direction: mathf::normalized2(direction), speed, iteration: 0, total: 0.0, previous: None, tracer, splash: true, can_explode: true, charge };
         self.bullet_iterate(b);
     }
 
@@ -308,19 +336,19 @@ impl Game {
 
     fn remove_tracer(&mut self, b: &Bullet) {
         if b.tracer {
-            self.emitter_mut(b.firearm).tracers -= 1;
+            self.emitter_mut(b.shooter).tracers -= 1;
             self.tracer_return();
         }
     }
 
     /// Random insideUnitCircle * PenetrationRandomAngleMultiplier
-    fn bullet_random_angle(&mut self, f: Option<usize>) -> [f32; 2] {
+    fn bullet_random_angle(&mut self, f: Shooter) -> [f32; 2] {
         let m = self.emitter(f).cartridge.PenetrationRandomAngleMultiplier;
         mul(self.random.inside_unit_circle(), m)
     }
 
     /// GetDamageForDistance(totalDistance)
-    fn damage_for_distance(&self, f: Option<usize>, distance: f32) -> f32 {
+    fn damage_for_distance(&self, f: Shooter, distance: f32) -> f32 {
         // DamageMultiplierByDistance
         let m = mathf::clamp((d(1.5f32) / distance + d(0.7f32) / mathf::lerp(distance, 0.8, 0.992)).f(), 0.5, 10.0);
         self.emitter(f).cartridge.Damage * m
@@ -341,15 +369,19 @@ impl Game {
     /// PhysicalObjectsInWorldByTransform.TryGetValue(transform) for a transform that is the collider's own (overlap)
     /// or its attached Rigidbody2D's (raycast), with the root check before it. The GlobalShrapnelEmitter's root is a
     /// level1 object, never a physical's root.
-    fn bullet_target(&self, f: Option<usize>, p: Option<usize>) -> Option<usize> {
-        let root = f.map(|f| self.root_id(self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D")));
+    fn bullet_target(&self, f: Shooter, p: Option<usize>) -> Option<usize> {
+        let root = match f {
+            Shooter::Firearm(f) => Some(self.root_id(self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D"))),
+            Shooter::MachineGun(m) => Some(self.root_id(self.machine_guns[m].physical)),
+            Shooter::Shrapnel => None,
+        };
         p.filter(|&p| Some(self.root_id(p)) != root && self.physicals[p].in_world && !self.physicals[p].destroyed)
     }
 
     /// BallisticIteration up to its next yield; the overlap path's StartCoroutine runs its iteration at once.
     fn bullet_iterate(&mut self, mut b: Bullet) {
         loop {
-            let f = b.firearm;
+            let f = b.shooter;
             let e = self.emitter(f);
             if b.iteration >= e.MaxBallisticsIterations || b.total >= e.MaxTotalDistance {
                 self.remove_tracer(&b);
@@ -377,8 +409,12 @@ impl Game {
                     if let Some(prev) = b.previous.filter(|&c| self.collider_exists(c)) {
                         let at = sub(b.origin, mul(b.direction, THICKNESS));
                         self.send_shot(prev, None, b.direction, at, damage, true);
+                        self.bullet_exit_callback(f, at, b.direction);
                     }
                     self.send_shot(collider, Some(p), mul(b.direction, -1.0), b.origin, damage, false);
+                    self.bullet_entry_callback(f, b.origin, b.direction);
+                    let origin = b.origin;
+                    self.bullet_explode(&mut b, origin);
                 }
                 let impact = self.emitter(f).cartridge.ImpactForce;
                 let force = mul(mul(mul(mul(mul(b.direction, impact), num2), THICKNESS), IMPACT_FORCE_MULTIPLIER), 4.0);
@@ -406,6 +442,7 @@ impl Game {
                 let at = sub(b.origin, mul(b.direction, THICKNESS));
                 let damage = self.damage_for_distance(f, THICKNESS + b.total) * mathf::clamp01(num);
                 self.send_shot(prev, None, b.direction, at, damage, true);
+                self.bullet_exit_callback(f, at, b.direction);
             }
             let ray = self.raycast(V::new(b.origin[0], b.origin[1]), b.direction, max_range, layers, -0.1, 0.1);
             let target = ray.and_then(|h| self.bullet_target(f, self.physical_of_body(h.body)).map(|p| (h, p)));
@@ -438,12 +475,43 @@ impl Game {
             let charge = self.emitter(f).Charge;
             let ph = &mut self.physicals[p];
             ph.charge = mathf::max(charge * ph.EnergyWireResistance, ph.Charge());
+            self.bullet_entry_callback(f, point, b.direction);
+            self.bullet_explode(&mut b, point);
             let h = BulletHit { physical: p, hardness, damage: damage2, collider: hit.collider, point, normal, distance: hit.distance };
             let slot = self.bullet_slot(b, Some(h));
             let owner = self.emitter_owner(f);
             self.start_wait(owner, 0.01, Step::Bullet(slot));
             return;
         }
+    }
+
+    /// BulletEntryCallback (BulletEntryEvent has no listeners).
+    fn bullet_entry_callback(&mut self, f: Shooter, position: [f32; 2], direction: [f32; 2]) {
+        if let Shooter::MachineGun(m) = f {
+            self.machine_gun_on_entry(m, position, direction);
+        }
+    }
+
+    /// BulletExitCallback
+    fn bullet_exit_callback(&mut self, f: Shooter, position: [f32; 2], direction: [f32; 2]) {
+        if let Shooter::MachineGun(m) = f {
+            self.machine_gun_on_exit(m, position, direction);
+        }
+    }
+
+    /// `if (canExplode && ExplosiveRound) explode(point)`: ExplosionCreator.Explode(ExplosiveRoundParams) at the point,
+    /// or half a unit past it, and canExplode = false.
+    fn bullet_explode(&mut self, b: &mut Bullet, point: [f32; 2]) {
+        let e = self.emitter(b.shooter);
+        if !(b.can_explode && e.ExplosiveRound) {
+            return;
+        }
+        let at = if e.ExplodeAtHitPoint { point } else { add(point, mul(b.direction, 0.5)) };
+        let mut ex = e.ExplosiveRoundParams;
+        ex.Position = [at[0], at[1], 0.0];
+        self.emitter_mut(b.shooter).ExplosiveRoundParams.Position = ex.Position;
+        self.explosion_creator_explode(ex);
+        b.can_explode = false;
     }
 
     fn bullet_slot(&mut self, b: Bullet, h: Option<BulletHit>) -> usize {
@@ -466,13 +534,18 @@ impl Game {
             self.bullet_iterate(b);
             return;
         };
-        let f = b.firearm;
+        let f = b.shooter;
         let mut b = b;
         b.splash = !self.test_for_water_hit(f, b.origin, b.direction, h.damage, b.splash);
         if self.should_ricochet(f, b.direction, &h) {
-            // RicochetBullet: OnRicochet (FirearmBehaviour) instantiates Prefabs/Ricochet at the hit point.
-            if self.emitter(f).ricochet_callback {
-                self.spawn_resource("Prefabs/Ricochet", [h.point[0], h.point[1], 0.0]);
+            // RicochetBullet: BulletRicochetCallback.
+            match f {
+                // FirearmBehaviour.OnRicochet instantiates Prefabs/Ricochet at the hit point.
+                Shooter::Firearm(_) if self.emitter(f).ricochet_callback => {
+                    self.spawn_resource("Prefabs/Ricochet", [h.point[0], h.point[1], 0.0]);
+                }
+                Shooter::MachineGun(m) => self.machine_gun_on_ricochet(m, h.point),
+                _ => {}
             }
             let dot = dot2(h.normal, b.direction);
             let k = -2.0 * dot;
@@ -505,7 +578,7 @@ impl Game {
     }
 
     /// ShouldRicochet(incoming, hit, phys)
-    fn should_ricochet(&mut self, f: Option<usize>, incoming: [f32; 2], h: &BulletHit) -> bool {
+    fn should_ricochet(&mut self, f: Shooter, incoming: [f32; 2], h: &BulletHit) -> bool {
         let m = self.emitter(f).RicochetChanceMultiplier;
         let ph = &self.physicals[h.physical];
         // !hit.transform: the physical's GameObject is gone.
@@ -536,7 +609,7 @@ impl Game {
     }
 
     /// CanPlayCracks(origin, speed, distance); Global.main.Paused is never set.
-    fn can_play_cracks(&mut self, f: Option<usize>, origin: [f32; 2], speed: f32, distance: f32) -> bool {
+    fn can_play_cracks(&mut self, f: Shooter, origin: [f32; 2], speed: f32, distance: f32) -> bool {
         if self.camera_orthographic_size() > 8.0 || distance < 5.0 {
             return false;
         }
@@ -555,7 +628,7 @@ impl Game {
     }
 
     /// TestForWaterHit(origin, direction, damage, sendMessage)
-    fn test_for_water_hit(&mut self, f: Option<usize>, origin: [f32; 2], direction: [f32; 2], damage: f32, send: bool) -> bool {
+    fn test_for_water_hit(&mut self, f: Shooter, origin: [f32; 2], direction: [f32; 2], damage: f32, send: bool) -> bool {
         let e = self.emitter(f);
         let (range, mask) = (e.MaxRange, e.WaterLayer);
         let Some(hit) = self.raycast(V::new(origin[0], origin[1]), direction, range, mask, f32::NEG_INFINITY, f32::INFINITY) else { return false };

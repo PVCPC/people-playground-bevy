@@ -89,13 +89,9 @@ impl Game {
 
     /// GetBarrelDirection: transform.TransformDirection(barrelDirection) * transform.localScale.x.
     fn launcher_barrel_direction(&self, l: usize) -> [f32; 2] {
-        use crate::unity::transform::rotate_direction;
         let p = self.launchers[l].physical;
         let b = self.launchers[l].barrelDirection;
-        let mut v = [b[0], b[1], 0.0, 0.0];
-        for (i, node) in self.local_chain(p).iter().rev().enumerate() {
-            v = rotate_direction(node.q, (i > 0).then_some(node.s), v);
-        }
+        let v = self.transform_direction(p, [b[0], b[1], 0.0]);
         let s = self.physicals[p].transform.localScale[0];
         [(d(v[0]) * s).f(), (d(v[1]) * s).f()]
     }

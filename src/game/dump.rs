@@ -927,6 +927,7 @@ impl Game {
                 (Phase::Update, B::Firearm(f)) => self.firearm_update(f),
                 (Phase::Fixed, B::Launcher(l)) => self.launcher_fixed_update(l),
                 (Phase::Update, B::Launcher(l)) => self.launcher_update(l),
+                (Phase::Update, B::MachineGun(m)) => self.machine_gun_update(m),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),

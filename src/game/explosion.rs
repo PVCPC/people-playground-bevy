@@ -88,15 +88,16 @@ script! {
 }
 
 /// ExplosionCreator.EffectSize
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum EffectSize {
+    #[default]
     Medium,
     Small,
     Large,
 }
 
 /// ExplosionCreator.ExplosionParameters
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ExplosionParameters {
     pub FragmentationRayCount: u32,
     pub Position: [f32; 3],
@@ -519,6 +520,18 @@ impl Game {
                 self.physicals[v].Temperature = mathf::lerp(t, temperature, heat);
             }
         }
+    }
+
+    /// ExplosionCreator.Explode(ex)
+    pub fn explosion_creator_explode(&mut self, ex: ExplosionParameters) {
+        let under_water = self.is_point_under_water([ex.Position[0], ex.Position[1]]);
+        self.create_explosion_with_water(under_water, ex);
+    }
+
+    /// OnlyExplosionBehaviour.Start (ExplodeOnStart): Explode with Position = transform.position.
+    pub fn only_explosion_start(&mut self, id: i32, mut ex: ExplosionParameters) {
+        ex.Position = self.with_component_instance(id, |_, inst, o| inst.position(o));
+        self.explosion_creator_explode(ex);
     }
 
     /// ExplosionCreator.CreateExplosionWithWater(isUnderWater, ex)

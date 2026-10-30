@@ -52,6 +52,8 @@ pub struct Linked {
     pub fire_maps: HashMap<usize, usize>,
     pub firearms: HashMap<usize, usize>,
     pub launchers: HashMap<usize, usize>,
+    pub bells: HashMap<usize, usize>,
+    pub machine_guns: HashMap<usize, usize>,
     pub explosives: HashMap<usize, usize>,
     pub delete_afters: HashMap<usize, usize>,
     pub point_to_velocities: HashMap<usize, usize>,
@@ -110,6 +112,27 @@ fn floats<const N: usize>(v: &Value) -> Result<[f32; N], String> {
     let mut out = [0.0; N];
     out.set(v)?;
     Ok(out)
+}
+
+/// A serialized ExplosionCreator.ExplosionParameters.
+fn explosion_parameters(v: &Value) -> Result<super::explosion::ExplosionParameters, String> {
+    use super::explosion::EffectSize;
+    let int = |name: &str| field(v, name)?.i64().ok_or_else(|| format!("{name}: not an integer"));
+    Ok(super::explosion::ExplosionParameters {
+        FragmentationRayCount: int("FragmentationRayCount")? as u32,
+        Position: floats::<3>(field(v, "Position")?)?,
+        Range: float(v, "Range")?,
+        FragmentForce: float(v, "FragmentForce")?,
+        CreateParticlesAndSound: field(v, "CreateParticlesAndSound")?.bool().ok_or("CreateParticlesAndSound")?,
+        EffectSize: match int("EffectSize")? {
+            0 => EffectSize::Medium,
+            1 => EffectSize::Small,
+            2 => EffectSize::Large,
+            x => return Err(format!("EffectSize {x}")),
+        },
+        DismemberChance: float(v, "DismemberChance")?,
+        BallisticShrapnelCount: int("BallisticShrapnelCount")? as i32,
+    })
 }
 
 /// A serialized Bounds as center then extents.
@@ -354,10 +377,12 @@ pub(super) fn check_rewritten(class: &str) {
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
         | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
-        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" => {}
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
         // SmoothLineControllerBehaviour only sets LineRenderer positions and width.
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
+        // OnEnable's two Random.value (`color_wave_on_enable`) feed only OnWillRenderObject's SpriteRenderer.color.
+        "ColorWave" => {}
         // Start: see PendingStart::FirearmAttachmentPoint. OnTriggerEnter2D only takes a FirearmAttachmentBehaviour (whose
         // Awake stops the rewrite), and OnDestroy only destroys a connected one.
         "FirearmAttachmentPointBehaviour" => {}
@@ -900,6 +925,54 @@ impl Game {
             firearms.insert(o, self.firearms.len());
             self.firearms.push(fa);
         }
+        let mut machine_guns = HashMap::new();
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "MachineGunBehaviour") else { continue };
+            let mut x = super::machinegun::MachineGun::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("MachineGunBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+            let cartridge = field(v, "Cartridge")?.pptr().ok_or("Cartridge")?;
+            let Some(cartridge) = db.resolve(file, cartridge) else { unimplemented!("MachineGunBehaviour with a null Cartridge (NullReferenceException)") };
+            let (_, _, cv) = db.mono(cartridge)?.ok_or("Cartridge is not a MonoBehaviour")?;
+            x.Cartridge = super::ballistics::Cartridge::read(&cv)?;
+            x.ExplosionSettings = explosion_parameters(field(v, "ExplosionSettings")?)?;
+            x.Sounds = array(v, "Sounds")?.len();
+            for (name, slot) in [("ImpactEffect", &mut x.ImpactEffect), ("RicochetEffect", &mut x.RicochetEffect)] {
+                let p = field(v, name)?.pptr().ok_or(name)?;
+                if !p.is_null() {
+                    let r = db.resolve(file, p).ok_or_else(|| format!("MachineGunBehaviour.{name} outside the data"))?;
+                    if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("MachineGunBehaviour: an {name} with physics (its pose)");
+                    }
+                    *slot = Some(r);
+                }
+            }
+            // Start's Effect pose for a flipped root: a particle system without physics.
+            let effect = field(v, "Effect")?.pptr().ok_or("Effect")?;
+            if !effect.is_null() {
+                let (eo, _) = *prefab.index.get(&ObjRef { file, path_id: effect.path_id }).filter(|_| effect.file == 0).ok_or("MachineGunBehaviour.Effect outside the prefab")?;
+                if std::iter::once(eo).chain(inst.descendants(eo)).any(|d| prefab.objects[d].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                    unimplemented!("MachineGunBehaviour.Effect with physics (its pose in Start)");
+                }
+            }
+            machine_guns.insert(o, self.machine_guns.len());
+            self.machine_guns.push(x);
+        }
+        let mut bells = HashMap::new();
+        for o in 0..n {
+            let Some((_, _, v)) = script(prefab, o, "BellBehaviour") else { continue };
+            let mut x = super::bell::Bell::default();
+            load_values(x.fields(), v)?;
+            let r = field(v, "PhysicalBehaviour")?.pptr().ok_or("PhysicalBehaviour")?;
+            let own = script(prefab, o, "PhysicalBehaviour").map(|(pc, _, _)| prefab.objects[o].components[pc].0.path_id);
+            if r.file != 0 || own != Some(r.path_id) {
+                unimplemented!("BellBehaviour.PhysicalBehaviour not on its own GameObject");
+            }
+            x.physical = l.arenas.physical[&o];
+            bells.insert(o, self.bells.len());
+            self.bells.push(x);
+        }
         let mut launchers = HashMap::new();
         for o in 0..n {
             let Some((c, enabled, v)) = script(prefab, o, "ProjectileLauncherBehaviour") else { continue };
@@ -1350,7 +1423,7 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -1375,6 +1448,12 @@ impl Game {
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
         self.queue_starts(db, prefab, &inst, &linked, &behaviours)?;
         Ok((inst, linked))
+    }
+
+    /// ColorWave.OnEnable: oV = Random.value, sV = Random.value.
+    pub(super) fn color_wave_on_enable(&mut self) {
+        self.random.value();
+        self.random.value();
     }
 
     /// The linked objects' Transforms after a script changed the clone's.
@@ -1624,6 +1703,8 @@ impl Game {
                     }
                 }
                 "LiquidContainerController" => self.liquid_container_awake(linked.liquid_containers[&o]),
+                // No Awake; its OnEnable follows here.
+                "ColorWave" if *enabled => self.color_wave_on_enable(),
                 "DetectorBehaviour" => self.detector_awake(linked.detectors[&o]),
                 "PersonBehaviour" => {
                     if let Some(s) = self.person_awake(linked.person.unwrap()) {
@@ -1741,6 +1822,8 @@ impl Game {
                 "LocalFirePropagationMap" => Some(Behaviour::FireMap(linked.fire_maps[&o])),
                 "FirearmBehaviour" => Some(Behaviour::Firearm(linked.firearms[&o])),
                 "ProjectileLauncherBehaviour" => Some(Behaviour::Launcher(linked.launchers[&o])),
+                "BellBehaviour" => Some(Behaviour::Bell(linked.bells[&o])),
+                "MachineGunBehaviour" => Some(Behaviour::MachineGun(linked.machine_guns[&o])),
                 "ExplosiveBehaviour" => Some(Behaviour::Explosive(linked.explosives[&o])),
                 "DeleteAfterTime" => Some(Behaviour::DeleteAfter(linked.delete_afters[&o])),
                 "PointToVelocityBehaviour" => Some(Behaviour::PointToVelocity(linked.point_to_velocities[&o])),
@@ -1880,11 +1963,14 @@ impl Game {
                     PendingStart::ExplosionSoundPlay(inst.objects[o].components[c], has.then_some(near), distant, float(v, "Delay")?)
                 }
                 "ExistByChance" => PendingStart::ExistByChance(inst.objects[o].components[c], float(v, "Chance")?),
+                "OnlyExplosionBehaviour" if !flag("ExplodeOnStart") => continue,
+                "OnlyExplosionBehaviour" => PendingStart::OnlyExplosion(inst.objects[o].components[c], explosion_parameters(field(v, "ExplosionParameters")?)?),
                 "ExplosiveBehaviour" => PendingStart::Explosive(linked.explosives[&o]),
                 "NoCollide" => PendingStart::NoCollide(inst.objects[o].components[c]),
                 "CarBehaviour" => PendingStart::Car(linked.cars[&o]),
                 "TyreDeflationBehaviour" => PendingStart::Tyre(linked.tyres[&o]),
                 "FirearmBehaviour" => PendingStart::Firearm(linked.firearms[&o]),
+                "MachineGunBehaviour" => PendingStart::MachineGun(linked.machine_guns[&o]),
                 "FirearmAttachmentPointBehaviour" => {
                     if field(v, "FirearmAttachment")?.pptr().is_some_and(|p| !p.is_null()) {
                         unimplemented!("FirearmAttachmentPointBehaviour.Start with a FirearmAttachment");

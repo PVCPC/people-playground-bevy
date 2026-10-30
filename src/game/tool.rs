@@ -374,6 +374,15 @@ impl Game {
         [v[0], v[1], v[2]]
     }
 
+    /// Transform.TransformDirection of a physical object.
+    pub fn transform_direction(&self, p: usize, dir: [f32; 3]) -> [f32; 3] {
+        let mut v = [dir[0], dir[1], dir[2], 0.0];
+        for (i, node) in self.local_chain(p).iter().rev().enumerate() {
+            v = crate::unity::transform::rotate_direction(node.q, (i > 0).then_some(node.s), v);
+        }
+        [v[0], v[1], v[2]]
+    }
+
     /// Transform.lossyScale of a physical object.
     pub fn lossy_scale(&self, p: usize) -> [f32; 3] {
         let mut nodes = self.local_chain(p);
@@ -446,7 +455,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_)))) => out.push(b),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_)))) => out.push(b),
                         _ => unimplemented!("{class}.Use"),
                     }
                 }
@@ -458,6 +467,8 @@ impl Game {
                 Behaviour::Firearm(f) => self.firearm_use(f),
                 Behaviour::Explosive(e) => self.explosive_use(e),
                 Behaviour::Launcher(l) => self.launcher_use(l),
+                Behaviour::Bell(b) => self.bell_use(b),
+                Behaviour::MachineGun(m) => self.machine_gun_use(m),
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
                 Behaviour::Led(i) => self.led_use(i),
                 Behaviour::Detector(i) => self.detector_use(i),

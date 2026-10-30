@@ -272,9 +272,13 @@ impl Game {
                         "NoChildrenCollide" => {}
                         "FirearmBehaviour" => {
                             let f = g.firearms.iter().position(|x| x.id == cid).expect("the FirearmBehaviour");
-                            g.emitter_dispose(f);
+                            g.emitter_dispose(super::ballistics::Shooter::Firearm(f));
                         }
                         "ProjectileLauncherBehaviour" => g.launcher_destroy(cid),
+                        "MachineGunBehaviour" => {
+                            let m = g.machine_guns.iter().position(|x| x.id == cid).expect("the MachineGunBehaviour");
+                            g.emitter_dispose(super::ballistics::Shooter::MachineGun(m));
+                        }
                         c if !super::declares(c, "OnDestroy") => {}
                         c => unimplemented!("{c}.OnDestroy"),
                     }
@@ -441,7 +445,7 @@ impl Game {
             Step::ShrapnelEmit(at, n) => {
                 for _ in 0..n {
                     let direction = self.random.inside_unit_circle();
-                    self.emitter_emit(None, at, direction);
+                    self.emitter_emit(super::ballistics::Shooter::Shrapnel, at, direction);
                 }
             }
             Step::DoAtTimeOnceInvoke(d, k) => {

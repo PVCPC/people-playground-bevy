@@ -19,6 +19,8 @@ pub mod destroyable;
 pub mod fire;
 pub mod firearm;
 pub mod launcher;
+pub mod bell;
+pub mod machinegun;
 pub mod limb;
 pub mod machinery;
 pub mod link;
@@ -946,6 +948,8 @@ pub enum Behaviour {
     FireMap(usize),
     Firearm(usize),
     Launcher(usize),
+    Bell(usize),
+    MachineGun(usize),
     PointToVelocity(usize),
     Car(usize),
     Tyre(usize),
@@ -989,6 +993,8 @@ impl Behaviour {
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
             Behaviour::Launcher(_) => "ProjectileLauncherBehaviour",
+            Behaviour::Bell(_) => "BellBehaviour",
+            Behaviour::MachineGun(_) => "MachineGunBehaviour",
         }
     }
 }
@@ -1083,6 +1089,8 @@ pub struct Game {
     pub fire_maps: Vec<fire::FireMap>,
     pub firearms: Vec<firearm::Firearm>,
     pub launchers: Vec<launcher::Launcher>,
+    pub bells: Vec<bell::Bell>,
+    pub machine_guns: Vec<machinegun::MachineGun>,
     pub explosives: Vec<explosion::Explosive>,
     pub act_on_collides: Vec<acts::ActOnCollide>,
     pub no_collides: Vec<acts::NoCollide>,

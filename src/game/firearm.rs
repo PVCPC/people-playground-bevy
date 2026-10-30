@@ -206,6 +206,6 @@ impl Game {
         }
         let spread = mathf::max(0.0025, g.InitialInaccuracy * m);
         let r = self.random.inside_unit_circle();
-        self.emitter_emit(Some(f), origin, [direction[0] + r[0] * spread, direction[1] + r[1] * spread]);
+        self.emitter_emit(super::ballistics::Shooter::Firearm(f), origin, [direction[0] + r[0] * spread, direction[1] + r[1] * spread]);
     }
 }

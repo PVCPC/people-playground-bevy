@@ -438,6 +438,8 @@ pub enum PendingStart {
     DoAtTimeOnce(usize),
     /// ExistByChance.Start: the component's instance id and its Chance.
     ExistByChance(i32, f32),
+    /// OnlyExplosionBehaviour.Start with ExplodeOnStart: the component's instance id and its ExplosionParameters.
+    OnlyExplosion(i32, super::explosion::ExplosionParameters),
     Explosive(usize),
     /// NoCollide.Start: the component's instance id.
     NoCollide(i32),
@@ -448,6 +450,8 @@ pub enum PendingStart {
     /// TyreDeflationBehaviour.Start: the `Game::tyres` index.
     Tyre(usize),
     Firearm(usize),
+    /// MachineGunBehaviour.Start: the `Game::machine_guns` index.
+    MachineGun(usize),
     /// FlaskBehaviour.Start: the `Game::flasks` index.
     Flask(usize),
     /// DetectorBehaviour.Start: the `Game::detectors` index.
@@ -901,12 +905,14 @@ impl Game {
                 }
                 PendingStart::DoAtTimeOnce(d) => self.do_at_time_once_next(d, 0),
                 PendingStart::ExistByChance(id, chance) => self.exist_by_chance_start(id, chance),
+                PendingStart::OnlyExplosion(id, ex) => self.only_explosion_start(id, ex),
                 PendingStart::Explosive(e) => self.explosive_start(e),
                 PendingStart::NoCollide(id) => self.no_collide_start(id),
                 PendingStart::DisintegrationCounter(id) => self.disintegration_counter_start(id),
                 PendingStart::Car(c) => self.car_start(c),
                 PendingStart::Tyre(t) => self.tyre_start(t),
                 PendingStart::Firearm(f) => self.firearm_start(f),
+                PendingStart::MachineGun(m) => self.machine_gun_start(m),
                 PendingStart::Flask(f) => self.flask_start(f),
                 PendingStart::Detector(i) => self.detector_start(i),
                 PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),

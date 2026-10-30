@@ -395,6 +395,11 @@ impl Game {
                         let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
                         self.physicals[p].active = true;
                     }
+                    "ColorWave" => {
+                        if *enabled && !self.script_disabled(id) {
+                            self.color_wave_on_enable();
+                        }
+                    }
                     c if !super::declares(c, "OnEnable") => {}
                     _ => unimplemented!("{class}.OnEnable"),
                 }
