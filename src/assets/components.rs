@@ -353,11 +353,296 @@ impl SpriteRenderer {
     }
 }
 
+/// Texture2D (class 28). Pixel data is inline or streamed from a .resS file.
+#[derive(Clone, Debug)]
+pub struct Texture2D {
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
+    pub complete_image_size: u32,
+    pub format: i32,
+    pub mip_count: i32,
+    pub filter_mode: i32,
+    pub wrap: [i32; 3],
+    pub color_space: i32,
+    pub image_data: Vec<u8>,
+    /// (offset, size, path) into a .resS file when `image_data` is empty.
+    pub stream: (u64, u32, String),
+}
+
+impl Texture2D {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let name = r.string()?;
+        let _forced_fallback_format = r.i32()?;
+        let (_downscale_fallback, _is_alpha_channel_optional) = (r.bool()?, r.bool()?);
+        r.align();
+        let (width, height, complete_image_size) = (r.i32()?, r.i32()?, r.u32()?);
+        let _mips_stripped = r.i32()?;
+        let (format, mip_count) = (r.i32()?, r.i32()?);
+        // IsReadable, IsPreProcessed, IgnoreMasterTextureLimit, StreamingMipmaps.
+        r.bytes(4)?;
+        let _streaming_mipmaps_priority = r.i32()?;
+        let (_image_count, _texture_dimension) = (r.i32()?, r.i32()?);
+        let filter_mode = r.i32()?;
+        let (_aniso, _mip_bias) = (r.i32()?, r.f32()?);
+        let wrap = [r.i32()?, r.i32()?, r.i32()?];
+        let _lightmap_format = r.i32()?;
+        let color_space = r.i32()?;
+        let n = r.i32()? as usize;
+        r.bytes(n)?;
+        r.align();
+        let n = r.i32()? as usize;
+        let image_data = r.bytes(n)?.to_vec();
+        r.align();
+        let stream = (r.u64()?, r.u32()?, r.string()?);
+        let v = Self { name, width, height, complete_image_size, format, mip_count, filter_mode, wrap, color_space, image_data, stream };
+        done(r, "Texture2D", v)
+    }
+
+    /// Mip 0 as RGBA8 rows, bottom row first (Unity's order). `data_dir` holds the .resS files.
+    pub fn rgba(&self, data_dir: &std::path::Path) -> Result<Vec<u8>, String> {
+        if self.width == 0 || self.height == 0 {
+            // Font textures that are filled at runtime.
+            return Ok(Vec::new());
+        }
+        let streamed;
+        let bytes = if self.image_data.is_empty() {
+            let (offset, size, path) = &self.stream;
+            if path.is_empty() {
+                return Err(format!("{}: no image data ({}x{}, {} bytes, format {})", self.name, self.width, self.height, self.complete_image_size, self.format));
+            }
+            let file = data_dir.join(path.rsplit('/').next().unwrap_or(path));
+            let all = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            streamed = all.get(*offset as usize..*offset as usize + *size as usize).ok_or("stream past the end")?.to_vec();
+            &streamed
+        } else {
+            &self.image_data
+        };
+        let n = (self.width * self.height) as usize;
+        let px = |bpp: usize| bytes.get(..n * bpp).ok_or_else(|| format!("{}: short image data", self.name));
+        Ok(match self.format {
+            1 => px(1)?.iter().flat_map(|&a| [0, 0, 0, a]).collect(),
+            3 => px(3)?.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+            4 => px(4)?.to_vec(),
+            5 => px(4)?.chunks(4).flat_map(|c| [c[1], c[2], c[3], c[0]]).collect(),
+            7 => px(2)?
+                .chunks(2)
+                .flat_map(|c| {
+                    let v = u16::from_le_bytes([c[0], c[1]]);
+                    let (r, g, b) = ((v >> 11) as u8, (v >> 5 & 63) as u8, (v & 31) as u8);
+                    [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
+                })
+                .collect(),
+            17 => px(8)?
+                .chunks(2)
+                .map(|c| (half(u16::from_le_bytes([c[0], c[1]])).clamp(0.0, 1.0) * 255.0) as u8)
+                .collect(),
+            63 => px(1)?.iter().flat_map(|&v| [v, 0, 0, 255]).collect(),
+            10 | 12 | 25 | 28 => {
+                let (w, h) = (self.width as usize, self.height as usize);
+                let mut out = vec![0u32; n];
+                let res = match self.format {
+                    10 => texture2ddecoder::decode_bc1(bytes, w, h, &mut out),
+                    12 => texture2ddecoder::decode_bc3(bytes, w, h, &mut out),
+                    25 => texture2ddecoder::decode_bc7(bytes, w, h, &mut out),
+                    _ => texture2ddecoder::decode_unity_crunch(bytes, w, h, &mut out),
+                };
+                res.map_err(|e| format!("{}: {e}", self.name))?;
+                // The decoders write BGRA.
+                out.iter().flat_map(|p| {
+                    let [b, g, r, a] = p.to_le_bytes();
+                    [r, g, b, a]
+                }).collect()
+            }
+            f => return Err(format!("{}: texture format {f} not rewritten", self.name)),
+        })
+    }
+}
+
+/// An IEEE half-precision float.
+fn half(h: u16) -> f32 {
+    let (sign, exp, frac) = ((h >> 15) as u32, (h >> 10 & 31) as u32, (h & 1023) as u32);
+    let v = match exp {
+        0 => frac as f32 / 1024.0 / 16384.0,
+        31 => if frac == 0 { f32::INFINITY } else { f32::NAN },
+        _ => f32::from_bits((exp + 112) << 23 | frac << 13),
+    };
+    if sign == 1 { -v } else { v }
+}
+
+#[derive(Clone, Debug)]
+pub struct SubMesh {
+    pub first_byte: u32,
+    pub index_count: u32,
+    pub topology: i32,
+    pub base_vertex: u32,
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+    pub local_aabb: [f32; 6],
+}
+
+/// (stream, offset, format, dimension) of one vertex channel.
+pub type Channel = [u8; 4];
+
+/// Sprite (class 213).
+#[derive(Clone, Debug)]
+pub struct Sprite {
+    pub name: String,
+    pub rect: [f32; 4],
+    pub offset: [f32; 2],
+    pub border: [f32; 4],
+    pub pixels_to_units: f32,
+    pub pivot: [f32; 2],
+    pub extrude: u32,
+    pub is_polygon: bool,
+    pub atlas: PPtr,
+    pub texture: PPtr,
+    pub alpha_texture: PPtr,
+    pub sub_meshes: Vec<SubMesh>,
+    pub index_buffer: Vec<u8>,
+    pub vertex_count: u32,
+    pub channels: Vec<Channel>,
+    pub vertex_data: Vec<u8>,
+    pub texture_rect: [f32; 4],
+    pub texture_rect_offset: [f32; 2],
+    pub atlas_rect_offset: [f32; 2],
+    pub settings_raw: u32,
+    pub uv_transform: [f32; 4],
+    pub downscale_multiplier: f32,
+    pub physics_shape: Vec<Vec<[f32; 2]>>,
+}
+
+impl Sprite {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let name = r.string()?;
+        let (rect, offset, border, pixels_to_units, pivot, extrude) =
+            (floats(r)?, vec2(r)?, floats(r)?, r.f32()?, vec2(r)?, r.u32()?);
+        let is_polygon = flag(r)?;
+        let _render_data_key = (r.bytes(16)?, r.i64()?);
+        let _atlas_tags = vec(r, |r| r.string())?;
+        let atlas = PPtr::read(r)?;
+        let texture = PPtr::read(r)?;
+        let alpha_texture = PPtr::read(r)?;
+        let _secondary_textures = vec(r, |r| Ok((PPtr::read(r)?, r.string()?)))?;
+        let sub_meshes = vec(r, |r| {
+            Ok(SubMesh {
+                first_byte: r.u32()?,
+                index_count: r.u32()?,
+                topology: r.i32()?,
+                base_vertex: r.u32()?,
+                first_vertex: r.u32()?,
+                vertex_count: r.u32()?,
+                local_aabb: floats(r)?,
+            })
+        })?;
+        let n = r.i32()? as usize;
+        let index_buffer = r.bytes(n)?.to_vec();
+        r.align();
+        let vertex_count = r.u32()?;
+        let channels = vec(r, |r| Ok([r.u8()?, r.u8()?, r.u8()?, r.u8()?]))?;
+        let n = r.i32()? as usize;
+        let vertex_data = r.bytes(n)?.to_vec();
+        r.align();
+        let _bindpose = vec(r, floats::<16>)?;
+        let v = Self {
+            name,
+            rect,
+            offset,
+            border,
+            pixels_to_units,
+            pivot,
+            extrude,
+            is_polygon,
+            atlas,
+            texture,
+            alpha_texture,
+            sub_meshes,
+            index_buffer,
+            vertex_count,
+            channels,
+            vertex_data,
+            texture_rect: floats(r)?,
+            texture_rect_offset: vec2(r)?,
+            atlas_rect_offset: vec2(r)?,
+            settings_raw: r.u32()?,
+            uv_transform: floats(r)?,
+            downscale_multiplier: r.f32()?,
+            physics_shape: vec(r, |r| vec(r, vec2))?,
+        };
+        let _bones = vec(r, |r| {
+            let name = r.string()?;
+            let (_position, _rotation): ([f32; 3], [f32; 4]) = (floats(r)?, floats(r)?);
+            let (_length, _parent) = (r.f32()?, r.i32()?);
+            Ok(name)
+        })?;
+        done(r, "Sprite", v)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::serialized::SerializedFile;
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Decoded pixels equal AssetRipper's PNG export of the same texture, for each texture format in the game.
+    #[test]
+    fn texture_pixels_match_export() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let export = std::path::Path::new("unity-export/ExportedProject/Assets/Texture2D");
+        if !export.is_dir() {
+            return;
+        }
+        let data = game.join("People Playground_Data");
+        let mut checked = std::collections::BTreeMap::new();
+        for e in std::fs::read_dir(&data).unwrap() {
+            let name = e.unwrap().file_name().into_string().unwrap();
+            if !(name.ends_with(".assets") || name.starts_with("level")) {
+                continue;
+            }
+            let f = SerializedFile::open(&data.join(&name)).unwrap();
+            for o in f.objects.iter().filter(|o| o.class_id == 28) {
+                let t = Texture2D::read(f.data(o)).unwrap();
+                let png_path = export.join(format!("{}.png", t.name));
+                if checked.contains_key(&t.format) || t.width == 0 || !png_path.is_file() {
+                    continue;
+                }
+                let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&png_path).unwrap()));
+                let mut reader = decoder.read_info().unwrap();
+                let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+                let info = reader.next_frame(&mut buf).unwrap();
+                if (info.width, info.height) != (t.width as u32, t.height as u32) {
+                    continue;
+                }
+                let buf: Vec<u8> = match info.color_type {
+                    png::ColorType::Rgba => buf,
+                    png::ColorType::Rgb => buf[..info.buffer_size()].chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+                    _ => continue,
+                };
+                let ours = t.rgba(&data).unwrap();
+                let row = t.width as usize * 4;
+                // PNG rows run top-down; Unity's bottom-up.
+                let max_diff = (0..t.height as usize)
+                    .flat_map(|y| {
+                        let a = &ours[y * row..][..row];
+                        let b = &buf[(t.height as usize - 1 - y) * row..][..row];
+                        a.iter().zip(b).map(|(x, y)| x.abs_diff(*y))
+                    })
+                    .max()
+                    .unwrap();
+                checked.insert(t.format, (t.name.clone(), max_diff));
+            }
+        }
+        eprintln!("{checked:?}");
+        // RGB565 (7) is left out: the export shifts without bit replication, while the GPU (the only reader here;
+        // "shard id mask" is not script-readable) replicates.
+        for f in [1, 3, 4, 10, 12, 17, 25, 28, 63] {
+            let (name, diff) = checked.get(&f).unwrap_or_else(|| panic!("no exported texture of format {f}"));
+            assert_eq!(*diff, 0, "format {f} ({name})");
+        }
+    }
 
     /// Every physics/render component in the shipped data reads to exactly its serialized size.
     #[test]
@@ -389,6 +674,14 @@ mod tests {
                     50 => Rigidbody2D::read(d).map(drop),
                     62 => PhysicsMaterial2D::read(d).map(drop),
                     212 => SpriteRenderer::read(d).map(drop),
+                    28 => Texture2D::read(d).and_then(|t| {
+                        let px = t.rgba(&data)?;
+                        if px.len() != (t.width * t.height * 4) as usize {
+                            return Err("pixel count".into());
+                        }
+                        Ok(())
+                    }),
+                    213 => Sprite::read(d).map(drop),
                     c if Collider2D::CLASSES.contains(&c) => Collider2D::read(c, d).map(drop),
                     c if Joint2D::CLASSES.contains(&c) => Joint2D::read(c, d).map(drop),
                     _ => continue,

@@ -9,6 +9,7 @@ bevy = { version = "=0.20.0", default-features = false, features = ["2d", "ui", 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 raw-window-handle = "0.6.2"
+texture2ddecoder = "0.1.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
@@ -19,3 +20,6 @@ debug = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+png = "0.18.1"
