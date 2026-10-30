@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/JackOLaternBehaviour.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from JackOLaternBehaviour in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -28,11 +28,12 @@ impl Game {
     /// JackOLaternBehaviour.Start
     pub fn jack_o_latern_behaviour_start(&mut self, this: usize) {
         self.jack_o_latern_behaviour_refresh(this);
+        return;
     }
 
     /// JackOLaternBehaviour.Refresh
     pub fn jack_o_latern_behaviour_refresh(&mut self, this: usize) {
-        let _ = { rt::pres(self.tr.jack_o_latern_behaviour[this].GlowingSprites); };
-        rt::pres(self.tr.jack_o_latern_behaviour[this].LightSprite);
+        { let _ = { let _ = { rt::pres(self.tr.jack_o_latern_behaviour[this].ObjectSprite); }; rt::pres(self.tr.jack_o_latern_behaviour[this].GlowingSprites); }; rt::pres(self.tr.jack_o_latern_behaviour[this].LightSprite); };
+        return;
     }
 }

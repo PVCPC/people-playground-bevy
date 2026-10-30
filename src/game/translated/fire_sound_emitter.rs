@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/FireSoundEmitter.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from FireSoundEmitter in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -26,6 +26,8 @@ impl Game {
     /// FireSoundEmitter.FixedUpdate
     pub fn fire_sound_emitter_fixed_update(&mut self, this: usize) {
         if self.tr_active_in_hierarchy(rt::nn(Some(rt::Go::Local(self.tr.fire_sound_emitter[this].this_id)))) {
+            { let _ = self.tr_position(rt::nn(Some(rt::Xf::this(self.tr.fire_sound_emitter[this].this_physical, self.tr.fire_sound_emitter[this].this_physics)))); let _ = mathf::clamp01(self.tr.fire_sound_emitter[this].Intensity); };
         }
+        return;
     }
 }

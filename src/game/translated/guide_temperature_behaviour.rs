@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/GuideTemperatureBehaviour.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from GuideTemperatureBehaviour in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -28,10 +28,12 @@ impl Game {
     /// GuideTemperatureBehaviour.Awake
     pub fn guide_temperature_behaviour_awake(&mut self, this: usize) {
         self.tr.guide_temperature_behaviour[this].phys = self.tr.guide_temperature_behaviour[this].this_physical;
+        return;
     }
 
     /// GuideTemperatureBehaviour.FixedUpdate
     pub fn guide_temperature_behaviour_fixed_update(&mut self, this: usize) {
         self.physicals[rt::nn(self.tr.guide_temperature_behaviour[this].phys)].Temperature = mathf::lerp(self.physicals[rt::nn(self.tr.guide_temperature_behaviour[this].phys)].Temperature, self.tr.guide_temperature_behaviour[this].TargetTemperature, self.tr.guide_temperature_behaviour[this].GuideSpeed);
+        return;
     }
 }

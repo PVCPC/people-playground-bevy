@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/DisableWhenWet.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from DisableWhenWet in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -28,8 +28,11 @@ impl Game {
     pub fn disable_when_wet_update(&mut self, this: usize) {
         if (((self.physicals[rt::nn(self.tr.disable_when_wet[this].PhysicalBehaviour)].Wetness as f64) > (0.0 as f64)) && self.tr_active_self(rt::nn(self.tr.disable_when_wet[this].ToDisable))) {
             self.tr_set_active(rt::nn(self.tr.disable_when_wet[this].ToDisable), false);
-        } else if !self.tr_active_self(rt::nn(self.tr.disable_when_wet[this].ToDisable)) {
-            self.tr_set_active(rt::nn(self.tr.disable_when_wet[this].ToDisable), true);
+        } else {
+            if !self.tr_active_self(rt::nn(self.tr.disable_when_wet[this].ToDisable)) {
+                self.tr_set_active(rt::nn(self.tr.disable_when_wet[this].ToDisable), true);
+            }
         }
+        return;
     }
 }

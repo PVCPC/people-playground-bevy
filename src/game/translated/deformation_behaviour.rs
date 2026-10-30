@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/DeformationBehaviour.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from DeformationBehaviour in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;

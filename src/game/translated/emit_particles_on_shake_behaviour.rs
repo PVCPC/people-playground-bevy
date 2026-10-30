@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/EmitParticlesOnShakeBehaviour.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from EmitParticlesOnShakeBehaviour in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -31,16 +31,21 @@ impl Game {
     pub fn emit_particles_on_shake_behaviour_awake(&mut self, this: usize) {
         self.tr.emit_particles_on_shake_behaviour[this].ps = self.tr_has_component(self.tr.emit_particles_on_shake_behaviour[this].this_id, 198);
         self.tr.emit_particles_on_shake_behaviour[this].rb = self.tr.emit_particles_on_shake_behaviour[this].this_physical;
+        return;
     }
 
     /// EmitParticlesOnShakeBehaviour.FixedUpdate
     pub fn emit_particles_on_shake_behaviour_fixed_update(&mut self, this: usize) {
-        let mut velocity: [f32; 2] = self.physicals[rt::nn(self.tr.emit_particles_on_shake_behaviour[this].rb)].rigidbody.velocity(&self.world);
-        let mut sqrMagnitude: f32 = mathf::sqr_magnitude((rt::sub(self.tr.emit_particles_on_shake_behaviour[this].previousVelocity, velocity)));
+        let mut velocity: [f32; 2] = [0.0; 2];
+        let mut sqrMagnitude: f32 = 0.0;
+        let mut num: f32 = 0.0;
+        velocity = self.physicals[rt::nn(self.tr.emit_particles_on_shake_behaviour[this].rb)].rigidbody.velocity(&self.world);
+        sqrMagnitude = mathf::sqr_magnitude(rt::sub(self.tr.emit_particles_on_shake_behaviour[this].previousVelocity, velocity));
         self.tr.emit_particles_on_shake_behaviour[this].previousVelocity = velocity;
-        let mut num: f32 = ((((self.tr.emit_particles_on_shake_behaviour[this].ShakeThreshold as f64) * (self.tr.emit_particles_on_shake_behaviour[this].ShakeThreshold as f64))) as f32);
+        num = ((((self.tr.emit_particles_on_shake_behaviour[this].ShakeThreshold as f64) * (self.tr.emit_particles_on_shake_behaviour[this].ShakeThreshold as f64))) as f32);
         if ((sqrMagnitude as f64) > (num as f64)) {
-            { let _ = { let (a, b) = (rt::to_int((((((self.tr.emit_particles_on_shake_behaviour[this].EmissionCount as f64) * (((sqrMagnitude as f64) / (num as f64))))) as f32) as f64).ceil()), 4); if a < b { a } else { b } }; rt::pres(self.tr.emit_particles_on_shake_behaviour[this].ps); };
+            { let _ = { let (a, b) = (rt::to_int((((((self.tr.emit_particles_on_shake_behaviour[this].EmissionCount as f64) * ((sqrMagnitude as f64) / (num as f64)))) as f32) as f64).ceil()), 4); if a < b { a } else { b } }; rt::pres(self.tr.emit_particles_on_shake_behaviour[this].ps); };
         }
+        return;
     }
 }

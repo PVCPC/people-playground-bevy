@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/SirenBehaviour.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from SirenBehaviour in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -32,6 +32,7 @@ impl Game {
     /// SirenBehaviour.Use
     pub fn siren_behaviour_use(&mut self, this: usize) {
         self.tr.siren_behaviour[this].Activated = !self.tr.siren_behaviour[this].Activated;
+        return;
     }
 
     /// SirenBehaviour.Update
@@ -43,5 +44,6 @@ impl Game {
                 { let _ = (if self.machinery[rt::nn(self.tr.siren_behaviour[this].DamagableMachineryBehaviour)].Destroyed { self.tr.siren_behaviour[this].BrokenSirenSound } else { self.tr.siren_behaviour[this].SirenSound }); rt::pres(self.tr.siren_behaviour[this].AudioSource); };
             }
         }
+        return;
     }
 }

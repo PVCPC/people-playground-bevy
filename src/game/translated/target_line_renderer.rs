@@ -1,5 +1,5 @@
-//! Translated from decompiled/Assembly-CSharp/TargetLineRenderer.cs by tools/translator/cs2rs.py: do not edit.
-#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, dead_code, unused_imports)]
+//! Translated from TargetLineRenderer in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
 
 use super::rt;
 use crate::assets::db::ObjRef;
@@ -26,14 +26,16 @@ script! {
 impl Game {
     /// TargetLineRenderer.Awake
     pub fn target_line_renderer_awake(&mut self, this: usize) {
-        rt::pres(self.tr.target_line_renderer[this].LineRenderer);
-        rt::pres(self.tr.target_line_renderer[this].LineRenderer);
         { rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
+        { rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
+        { let _ = rt::v3([0.0, 0.0]); rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
         self.target_line_renderer_update(this);
+        return;
     }
 
     /// TargetLineRenderer.Update
     pub fn target_line_renderer_update(&mut self, this: usize) {
         { let _ = { let a1 = self.tr_position(rt::nn(self.tr.target_line_renderer[this].Target)); self.tr_inverse_transform_point(rt::nn(Some(rt::Xf::this(self.tr.target_line_renderer[this].this_physical, self.tr.target_line_renderer[this].this_physics))), a1) }; rt::pres(self.tr.target_line_renderer[this].LineRenderer); };
+        return;
     }
 }
