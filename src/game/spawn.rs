@@ -540,6 +540,10 @@ mod tests {
                 }
             }
         }
+        let game_joints = first.of("b2RevoluteJoint").filter(|r| inst.objects.iter().any(|o| o.components.contains(&r.id))).count();
+        if inst.joints.len() != 13 || game_joints != 13 {
+            out.push(format!("hinges: game {game_joints} ours {}", inst.joints.len()));
+        }
         // Hinges: anchors (w0-3), motor (w8 low byte, w9, w10), limits (w11 low byte, w13, w14), reference angle (w12).
         for (&(o, c), &id) in &inst.joints {
             let name = format!("{}", prefab.objects[o].name);
