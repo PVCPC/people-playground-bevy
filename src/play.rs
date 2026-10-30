@@ -98,12 +98,12 @@ pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         .insert_resource(rig)
         .insert_resource(Play { game, stopped: None, paused: false })
         .add_systems(Startup, setup)
-        .add_systems(Update, (controls, mouse, frame, draw).chain())
+        .add_systems(Update, (controls, mouse, frame, limb_sprites, draw).chain())
         .run();
     Ok(())
 }
 
-fn setup(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, play: Res<Play>) {
+fn setup(mut commands: Commands, play: Res<Play>) {
     let g = &play.game;
     let center = g.limbs.first().map_or([g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0], |l| g.physicals[l.PhysicalBehaviour].transform.position);
     commands.spawn((
@@ -111,15 +111,6 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, p
         Projection::Orthographic(OrthographicProjection { scale: 0.006, ..OrthographicProjection::default_2d() }),
         Transform::from_xyz(center[0], center[1], 0.0),
     ));
-    for (l, limb) in g.limbs.iter().enumerate() {
-        let name = &g.physicals[limb.PhysicalBehaviour].name;
-        let Some(part) = rig.parts.iter().find(|p| &p.name == name) else { continue };
-        let [x, y, w, h] = part.rect;
-        let mut sprite = Sprite::from_image(assets.load(part.texture.clone()));
-        sprite.rect = Some(Rect::new(x, y, x + w, y + h));
-        sprite.custom_size = Some(Vec2::from_array(part.size));
-        commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default()));
-    }
     commands.spawn((
         Hud,
         Text::new(""),
@@ -223,6 +214,21 @@ fn step(g: &mut Game, real: f32) -> Result<(), String> {
     .map_err(|panic| {
         panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
     })
+}
+
+/// A sprite for each limb without one: the starting people's, then the ones spawned since.
+fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, play: Res<Play>, mut done: Local<usize>) {
+    let g = &play.game;
+    for l in *done..g.limbs.len() {
+        let name = &g.physicals[g.limbs[l].PhysicalBehaviour].name;
+        let Some(part) = rig.parts.iter().find(|p| &p.name == name) else { continue };
+        let [x, y, w, h] = part.rect;
+        let mut sprite = Sprite::from_image(assets.load(part.texture.clone()));
+        sprite.rect = Some(Rect::new(x, y, x + w, y + h));
+        sprite.custom_size = Some(Vec2::from_array(part.size));
+        commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default()));
+    }
+    *done = g.limbs.len();
 }
 
 fn draw(
