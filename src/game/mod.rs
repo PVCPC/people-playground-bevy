@@ -11,7 +11,12 @@ pub mod car;
 pub mod tyre;
 pub mod flask;
 pub mod light;
+pub mod continuous;
 pub mod detector;
+pub mod sort;
+pub mod flamethrower;
+pub mod piston;
+pub mod thruster;
 pub mod devices;
 pub mod dump;
 pub mod explosion;
@@ -22,6 +27,7 @@ pub mod firearm;
 pub mod launcher;
 pub mod bell;
 pub mod machinegun;
+pub mod translated;
 pub mod limb;
 pub mod machinery;
 pub mod link;
@@ -125,6 +131,9 @@ pub mod mathf {
     }
     pub fn sin(f: f32) -> f32 {
         (f as f64).sin() as f32
+    }
+    pub fn cos(f: f32) -> f32 {
+        (f as f64).cos() as f32
     }
     pub fn sqrt(f: f32) -> f32 {
         (f as f64).sqrt() as f32
@@ -978,6 +987,11 @@ pub enum Behaviour {
     SpikeGrenade(usize),
     HeatingElement(usize),
     RayGun(usize),
+    Bulb(usize),
+    Thrusterbed(usize),
+    Piston(usize),
+    Flamethrower(usize),
+    Translated(translated::TBehaviour),
 }
 
 impl Behaviour {
@@ -1012,12 +1026,17 @@ impl Behaviour {
             Behaviour::SpikeGrenade(_) => "SpikeGrenadeBehaviour",
             Behaviour::HeatingElement(_) => "HeatingElementBehaviour",
             Behaviour::RayGun(_) => "TemperatureRayGunBehaviour",
+            Behaviour::Bulb(_) => "BulbBehaviour",
+            Behaviour::Thrusterbed(_) => "ThrusterbedBehaviour",
+            Behaviour::Piston(_) => "PistonBehaviour",
+            Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
             Behaviour::Sticky(_) => "StickyGrenadeBehaviour",
             Behaviour::FireMap(_) => "LocalFirePropagationMap",
             Behaviour::Firearm(_) => "FirearmBehaviour",
             Behaviour::Launcher(_) => "ProjectileLauncherBehaviour",
             Behaviour::Bell(_) => "BellBehaviour",
             Behaviour::MachineGun(_) => "MachineGunBehaviour",
+            Behaviour::Translated(t) => t.class(),
         }
     }
 }
@@ -1114,6 +1133,8 @@ pub struct Game {
     pub launchers: Vec<launcher::Launcher>,
     pub bells: Vec<bell::Bell>,
     pub machine_guns: Vec<machinegun::MachineGun>,
+    /// The translated classes' components (tools/translator).
+    pub tr: translated::Translated,
     pub explosives: Vec<explosion::Explosive>,
     pub act_on_collides: Vec<acts::ActOnCollide>,
     pub no_collides: Vec<acts::NoCollide>,
@@ -1132,6 +1153,14 @@ pub struct Game {
     pub spike_grenades: Vec<devices::SpikeGrenade>,
     pub heating_elements: Vec<devices::HeatingElement>,
     pub ray_guns: Vec<devices::RayGun>,
+    pub bulbs: Vec<devices::Bulb>,
+    pub thrusterbeds: Vec<thruster::Thrusterbed>,
+    pub pistons: Vec<piston::Piston>,
+    pub flamethrowers: Vec<flamethrower::Flamethrower>,
+    /// `anchored_joints` slot -> `fixed_joints` entry, for the prefab joints adopted (a script that reads the component,
+    /// or HingeJointLimitAutofixBehaviour.Start of a mirrored host): the first adoption owns the component's state.
+    pub adopted_slots: HashMap<usize, usize>,
+    pub continuous: continuous::ContinuousActivation,
     /// Each TruckDoorBehaviour with its component's instance id.
     pub truck_doors: Vec<(i32, car::TruckDoor)>,
     pub joint_helpers: Vec<car::JointHelper>,

@@ -400,7 +400,15 @@ impl Game {
                             self.color_wave_on_enable();
                         }
                     }
-                    c if !super::declares(c, "OnEnable") => {}
+                    name if super::translated::CLASSES.contains(&name) => match self.behaviour_of.get(&id) {
+                    Some(&(_, super::Behaviour::Translated(t))) => {
+                        if self.tr_enabled(t) {
+                            self.tr_on_enable(t);
+                        }
+                    }
+                    _ => unimplemented!("{class}: Awake on its GameObject's first activation"),
+                },
+                c if !super::declares(c, "OnEnable") => {}
                     _ => unimplemented!("{class}.OnEnable"),
                 }
             }
@@ -463,6 +471,19 @@ impl Game {
                     let i = self.ray_guns.iter().position(|c| c.id == id).expect("a TemperatureRayGunBehaviour in the arena");
                     if self.ray_guns[i].enabled {
                         self.ray_gun_on_disable(i);
+                    }
+                }
+                "ThrusterbedBehaviour" => {
+                    let i = self.thrusterbeds.iter().position(|c| c.id == id).expect("a ThrusterbedBehaviour in the arena");
+                    if self.thrusterbeds[i].enabled {
+                        self.thrusterbed_on_disable(i);
+                    }
+                }
+                name if super::translated::CLASSES.contains(&name) => {
+                    if let Some(&(_, super::Behaviour::Translated(t))) = self.behaviour_of.get(&id) {
+                        if self.tr_enabled(t) {
+                            self.tr_on_disable(t);
+                        }
                     }
                 }
                 c if !super::declares(c, "OnDisable") => {}

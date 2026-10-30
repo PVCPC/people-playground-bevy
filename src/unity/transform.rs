@@ -112,6 +112,24 @@ pub fn global_position(p: &Trs, t: [f32; 4]) -> [f32; 4] {
     }
 }
 
+/// One node of Transform::TransformVector (1807f6f50): `global_position` without the translation (no `+ t`, so a
+/// -0 stays -0).
+pub fn global_vector(p: &Trs, t: [f32; 4]) -> [f32; 4] {
+    unsafe {
+        let q = ld(p.q);
+        let x9 = _mm_mul_ps(ld(p.s), ld(t));
+        let (x2s, x0, x5) = (sh!(q, 0xdb), sh!(q, 0x71), sh!(q, 0x8e));
+        let x6 = _mm_mul_ps(_mm_mul_ps(sh!(q, 0xaa), k(KF0)), x2s);
+        let x1 = _mm_mul_ps(_mm_mul_ps(sh!(q, 0x55), k(KF0)), x2s);
+        let x2 = _mm_sub_ps(_mm_mul_ps(_mm_mul_ps(sh!(q, 0x00), k(K30)), x5), x1);
+        let x6 = _mm_sub_ps(x6, _mm_mul_ps(_mm_mul_ps(sh!(q, 0x00), k(K20)), x0));
+        let x8 = _mm_sub_ps(_mm_mul_ps(_mm_mul_ps(sh!(q, 0x55), k(K20)), x0), _mm_mul_ps(_mm_mul_ps(sh!(q, 0xaa), k(K30)), x5));
+        let x6 = _mm_add_ps(_mm_mul_ps(x6, sh!(x9, 0x55)), _mm_mul_ps(x2, sh!(x9, 0xaa)));
+        let x8 = _mm_add_ps(_mm_mul_ps(x8, sh!(x9, 0x00)), x9);
+        out(_mm_add_ps(x8, x6))
+    }
+}
+
 /// One node of TransformDirection (1807f6560): a parent's negative scale axes flip the direction (`s`; None for
 /// the object itself), then the node's rotation turns it.
 pub fn rotate_direction(q: [f32; 4], s: Option<[f32; 4]>, v: [f32; 4]) -> [f32; 4] {

@@ -54,6 +54,7 @@ pub enum CollisionScript {
     Explosive(usize),
     ActOnCollide(usize),
     Sticky(usize),
+    Bulb(usize),
 }
 
 impl Game {
@@ -63,6 +64,7 @@ impl Game {
             CollisionScript::Explosive(e) => self.explosive_on_collision_enter(e, c),
             CollisionScript::ActOnCollide(a) => self.act_on_collide_enter(a, c),
             CollisionScript::Sticky(s) => self.sticky_grenade_collision_enter(s, c),
+            CollisionScript::Bulb(b) => self.bulb_on_collision_enter(b, c),
         }
     }
 

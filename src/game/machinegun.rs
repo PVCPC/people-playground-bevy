@@ -48,9 +48,19 @@ impl Game {
         self.machine_guns[m].emitter = Some(e);
     }
 
-    /// MachineGunBehaviour.Update: phys.IsBeingUsedContinuously() is false, as nothing in the rewrite calls
-    /// UseContinuous, so nothing runs.
-    pub fn machine_gun_update(&mut self, _m: usize) {}
+    /// MachineGunBehaviour.Update
+    pub fn machine_gun_update(&mut self, m: usize) {
+        let g = &self.machine_guns[m];
+        if g.Automatic && self.used_continuously(g.physical) {
+            let charge = self.physicals[g.physical].Charge();
+            if g.t > mathf::max(0.05, 0.2 / mathf::clamp(charge * 0.1, 1.0, 8.0)) {
+                self.machine_guns[m].t = 0.0;
+                self.machine_gun_shoot(m);
+            }
+            let g = &mut self.machine_guns[m];
+            g.t += self.time.deltaTime * g.FireRateMultiplier;
+        }
+    }
 
     /// MachineGunBehaviour.Use
     pub fn machine_gun_use(&mut self, m: usize) {

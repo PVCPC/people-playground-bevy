@@ -713,6 +713,10 @@ impl Game {
                     let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
                     self.glowtube_shot(g, damage);
                 }
+                ("BulbBehaviour", _) => {
+                    let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
+                    self.bulb_shot(b);
+                }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
             }

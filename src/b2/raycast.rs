@@ -154,7 +154,8 @@ impl Shape {
                     return None;
                 }
                 let a = -(sigma.sqrt() + cc);
-                if a < 0.0 || rr * input.max_fraction < a {
+                // comiss + jb (180bb464f, 180bb465d): an unordered compare (a NaN from an infinite rr) rejects.
+                if !(a >= 0.0) || !(rr * input.max_fraction >= a) {
                     return None;
                 }
                 let a = a / rr;

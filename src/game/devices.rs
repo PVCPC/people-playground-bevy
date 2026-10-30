@@ -1,5 +1,5 @@
-//! GeneratorBehaviour, SingleFloodlightBehaviour, SpikeGrenadeBehaviour, HeatingElementBehaviour and
-//! TemperatureRayGunBehaviour. Audio, particles, sprite and light toggles, property blocks and the context menu
+//! GeneratorBehaviour, SingleFloodlightBehaviour, SpikeGrenadeBehaviour, HeatingElementBehaviour,
+//! TemperatureRayGunBehaviour and BulbBehaviour. Audio, particles, sprite and light toggles, property blocks and the context menu
 //! button are presentation; the activation, charge, temperature, coroutine, spawn and raycast state stays.
 #![allow(non_snake_case)]
 
@@ -102,6 +102,32 @@ script! {
         Layers: u32 = 0,
         /// The local TRS of the LineRenderer's object and of each parent below the gun's own object.
         Barrel: Vec<Trs> = Vec::new(),
+    }
+}
+
+script! {
+    Bulb {
+        ChargeInfluence: f32 = 1.0,
+        MaximumTemperature: f32 = 300.0,
+        TargetFilamentTemperature: f32 = 2800.0,
+        MinimumImpactForce: f32 = 0.0,
+        FilamentHealth: f32 = 1.0,
+        FilamentTemp: f32 = 0.0,
+        Broken: bool = false,
+        Activated: bool = false,
+    }
+    links {
+        /// The component's instance id (its coroutine's owner).
+        id: i32 = 0,
+        /// PhysicalBehaviour
+        Phys: usize = 0,
+        /// OtherPart: the clone's object index.
+        OtherPart: Option<usize> = None,
+        /// private flicker
+        flicker: bool = false,
+        /// The component's index on its GameObject, and whether the PhysicalBehaviour precedes it.
+        index: usize = 0,
+        after_physical: bool = true,
     }
 }
 
@@ -318,7 +344,7 @@ impl Game {
     // ---- TemperatureRayGunBehaviour ----
 
     /// TemperatureRayGunBehaviour.UseContinuous: ContinuousActivationBehaviour.AssertState() only checks, and the
-    /// clip and AudioSource.Play are audio. (`tool.rs` has no UseContinuous yet.)
+    /// clip and AudioSource.Play are audio. (`continuous.rs` broadcasts it.)
     pub fn ray_gun_use_continuous(&mut self, i: usize) {
         if self.ray_guns[i].enabled {
             self.ray_guns[i].useHeat = 0.1;
@@ -352,15 +378,107 @@ impl Game {
                     && self.physicals[v].SimulateTemperature
                 {
                     self.physicals[v].Temperature += num;
-                    let vid = self.physicals[v].id;
-                    if self.with_component_instance(vid, |_, inst, o| inst.prefab.objects[o].components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "BulbBehaviour"))) {
-                        unimplemented!("TemperatureRayGunBehaviour: BulbBehaviour.FilamentTemp");
+                    // TryGetComponent<BulbBehaviour>: FilamentTemp += num * 4f
+                    if let Some(b) = self.bulbs.iter().position(|b| b.Phys == v) {
+                        self.bulbs[b].FilamentTemp += num * 4.0;
                     }
                 }
             }
         }
         let dt = self.time.deltaTime;
         self.ray_guns[i].useHeat -= dt;
+    }
+
+    // ---- BulbBehaviour ----
+
+    /// BulbBehaviour.Start (`seed` is only stored)
+    pub fn bulb_start(&mut self, i: usize) {
+        self.random.range_int(0, 1000);
+        if self.bulbs[i].Broken {
+            self.bulb_break(i);
+        }
+    }
+
+    /// BulbBehaviour.Update (UpdateColor is rendering)
+    pub fn bulb_update(&mut self, i: usize) {
+        let s = &mut self.bulbs[i];
+        s.FilamentTemp = mathf::max(0.0, s.FilamentTemp);
+        let (p, dt) = (s.Phys, self.time.deltaTime);
+        if self.physicals[p].Temperature > self.bulbs[i].MaximumTemperature {
+            self.bulb_break(i);
+        }
+        let s = &mut self.bulbs[i];
+        let lerp_factor = mathf::lerp_factor_dt(0.1, dt);
+        let temperature = self.physicals[p].Temperature;
+        let b = (d(temperature) * 0.6f32 + d(s.FilamentTemp) * 0.4f32).f();
+        s.FilamentTemp = mathf::lerp(s.FilamentTemp, b, lerp_factor);
+        self.physicals[p].Temperature = mathf::lerp(temperature, b, lerp_factor);
+        if s.Activated && !s.Broken && !s.flicker {
+            let lerp_factor = mathf::lerp_factor_dt(0.1, dt);
+            s.FilamentTemp = mathf::max(s.FilamentTemp, s.TargetFilamentTemperature * 0.4);
+            let charge = self.physicals[p].Charge();
+            let target = (d(s.TargetFilamentTemperature) * (0.5f32 + d(mathf::sqrt(charge * s.ChargeInfluence)))).f();
+            s.FilamentTemp = mathf::max(s.FilamentTemp, mathf::lerp(s.FilamentTemp, target, lerp_factor));
+        } else {
+            let lerp_factor = mathf::lerp_factor_dt(0.4, dt);
+            s.FilamentTemp = mathf::lerp(s.FilamentTemp, 0.0, lerp_factor);
+        }
+        s.flicker = false;
+    }
+
+    /// BulbBehaviour.FixedUpdate: `|=` evaluates the draw whatever flicker is.
+    pub fn bulb_fixed_update(&mut self, i: usize) {
+        let flicker = self.random.value() <= 0.005;
+        self.bulbs[i].flicker |= flicker;
+    }
+
+    /// BulbBehaviour.Use (Toggle)
+    pub fn bulb_use(&mut self, i: usize) {
+        let s = &mut self.bulbs[i];
+        s.Activated = !s.Activated;
+    }
+
+    /// BulbBehaviour.OnFragmentHit
+    pub fn bulb_on_fragment_hit(&mut self, i: usize) {
+        if !self.bulbs[i].Broken {
+            self.bulb_break(i);
+        }
+    }
+
+    /// BulbBehaviour.Shot: StartCoroutine(WaitAFrame()), which breaks it after WaitForSeconds(0.05).
+    pub fn bulb_shot(&mut self, i: usize) {
+        if !self.bulbs[i].Broken {
+            let id = self.bulbs[i].id;
+            self.start_wait(id, 0.05, Step::BulbBreak(i));
+        }
+    }
+
+    /// BulbBehaviour.OnCollisionEnter2D
+    pub(super) fn bulb_on_collision_enter(&mut self, i: usize, c: &crate::b2::contacts2d::ScriptCollision) {
+        let s = &self.bulbs[i];
+        if s.Broken {
+            return;
+        }
+        let first = c.contacts.first().unwrap_or_else(|| unimplemented!("BulbBehaviour.OnCollisionEnter2D: collision.contacts[0] without contacts (IndexOutOfRangeException)"));
+        if first.normal_impulse < s.MinimumImpactForce {
+            return;
+        }
+        if let Some(o) = self.physical_of_collider(c.collider).filter(|&o| self.physicals[o].rigidbody.bodyType == 0) {
+            let rb = self.physicals[o].rigidbody.clone();
+            let (v, prev) = (rb.velocity(&self.world), self.physicals[o].previousVelocity);
+            rb.set_velocity(&mut self.world, [mathf::lerp(v[0], prev[0], 1.0), mathf::lerp(v[1], prev[1], 1.0)]);
+        }
+        self.bulb_break(i);
+    }
+
+    /// BulbBehaviour.Break(velocity): the velocity is unused. The explosion and its sound, the sprites and the
+    /// Filament and LightSprite renderers are presentation.
+    pub fn bulb_break(&mut self, i: usize) {
+        self.bulbs[i].Broken = true;
+        if self.bulbs[i].OtherPart.is_some() {
+            unimplemented!("BulbBehaviour.Break: OtherPart.SetActive(true) on an object that never ran Awake and Start (its PhysicalBehaviour), SetParent(null) and the DebrisComponents");
+        }
+        unimplemented!("BulbBehaviour.Break: ColliderToDisable.enabled = false");
     }
 
     /// LineRenderer.transform's position and rotation: its local TRS up to the gun's object, then the gun's chain.

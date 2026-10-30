@@ -1,0 +1,219 @@
+//! What translated code (tools/translator/cs2rs.py) calls: Unity value types with Mono's rounding, null checks, and
+//! the engine members it maps (tools/translator/api.py).
+
+use crate::b2::math::Vec2 as V;
+use crate::b2::shape::Polygon;
+use crate::b2::world::Shape;
+use crate::game::explosion::RayHit2D;
+use crate::game::Game;
+
+/// A Transform as the translated scripts hold one.
+#[derive(Clone, Copy, Debug)]
+pub enum Xf {
+    /// A PhysicalBehaviour's GameObject.
+    Physical(usize),
+    /// A GameObject without a PhysicalBehaviour; whether it or a descendant has a Collider2D or Rigidbody2D.
+    Bare { physics: bool },
+    /// A Collider2D's GameObject.
+    Collider(i32),
+}
+
+impl Xf {
+    /// `base.transform` of a translated component.
+    pub fn this(physical: Option<usize>, physics: bool) -> Xf {
+        match physical {
+            Some(p) => Xf::Physical(p),
+            None => Xf::Bare { physics },
+        }
+    }
+}
+
+/// A null reference dereferenced.
+pub fn nn<T>(o: Option<T>) -> T {
+    o.unwrap_or_else(|| unimplemented!("NullReferenceException in a translated script"))
+}
+
+/// A call or assignment on a presentation component (`present`: the field is set).
+pub fn pres(present: bool) {
+    if !present {
+        unimplemented!("NullReferenceException: a null presentation component in a translated script");
+    }
+}
+
+/// `transform.localRotation = ...` that only shows: the object must not move anything physical.
+pub fn presentation_rotation(xf: Xf) {
+    if !matches!(xf, Xf::Bare { physics: false }) {
+        unimplemented!("Transform.localRotation of an object with physics ({xf:?})");
+    }
+}
+
+/// An array index.
+pub fn index(i: i32) -> usize {
+    usize::try_from(i).unwrap_or_else(|_| unimplemented!("IndexOutOfRangeException in a translated script"))
+}
+
+/// `(int)` of a double: cvttsd2si, int.MinValue when out of range or NaN.
+pub fn to_int(v: f64) -> i32 {
+    if v.is_nan() || v >= 2147483648.0 || v <= -2147483649.0 { i32::MIN } else { v as i32 }
+}
+
+/// A NonAlloc query's results copied into the script's buffer: the count that fits.
+pub fn fill(buffer: &mut [i32], hits: Vec<i32>) -> i32 {
+    let n = hits.len().min(buffer.len());
+    buffer[..n].copy_from_slice(&hits[..n]);
+    n as i32
+}
+
+/// RaycastHit2D.point (a default RaycastHit2D's is zero).
+pub fn hit_point(h: &Option<RayHit2D>) -> [f32; 2] {
+    h.as_ref().map_or([0.0; 2], |h| [h.point.x, h.point.y])
+}
+
+pub fn v2(v: [f32; 3]) -> [f32; 2] {
+    [v[0], v[1]]
+}
+
+pub fn v3(v: [f32; 2]) -> [f32; 3] {
+    [v[0], v[1], 0.0]
+}
+
+/// Vector2/Vector3 op_Addition (each component a float add: rounding the double sum gives the same).
+pub fn add<const N: usize>(a: [f32; N], b: [f32; N]) -> [f32; N] {
+    std::array::from_fn(|k| a[k] + b[k])
+}
+
+pub fn sub<const N: usize>(a: [f32; N], b: [f32; N]) -> [f32; N] {
+    std::array::from_fn(|k| a[k] - b[k])
+}
+
+pub fn mul<const N: usize>(a: [f32; N], d: f32) -> [f32; N] {
+    std::array::from_fn(|k| a[k] * d)
+}
+
+pub fn div<const N: usize>(a: [f32; N], d: f32) -> [f32; N] {
+    std::array::from_fn(|k| a[k] / d)
+}
+
+pub fn neg<const N: usize>(a: [f32; N]) -> [f32; N] {
+    std::array::from_fn(|k| -a[k])
+}
+
+pub fn normalized3(v: [f32; 3]) -> [f32; 3] {
+    crate::game::explosion::normalized3(v)
+}
+
+pub fn dot2(a: [f32; 2], b: [f32; 2]) -> f32 {
+    crate::game::physical::dot2(a, b)
+}
+
+/// Mathf.Atan2: (float)Math.Atan2 (the CRT's atan2, as Rust's on this target).
+pub fn atan2(y: f32, x: f32) -> f32 {
+    (y as f64).atan2(x as f64) as f32
+}
+
+impl Game {
+    fn tr_physical_xf(&self, xf: Xf) -> usize {
+        match xf {
+            Xf::Physical(p) => p,
+            _ => unimplemented!("a Transform without a PhysicalBehaviour in a translated script ({xf:?})"),
+        }
+    }
+
+    /// `a == b` for Transforms.
+    pub fn tr_xf_eq(&self, a: Xf, b: Xf) -> bool {
+        let owner = |x: Xf| match x {
+            Xf::Physical(p) => Some(Some(p)),
+            Xf::Collider(c) => self.physical_of_collider(c).map(Some),
+            Xf::Bare { .. } => None,
+        };
+        match (a, b) {
+            (Xf::Collider(x), Xf::Collider(y)) if x == y => true,
+            _ => match (owner(a), owner(b)) {
+                (Some(x), Some(y)) => x == y,
+                // A bare object against a physical's: never the same GameObject.
+                (Some(_), None) | (None, Some(_)) => false,
+                (None, None) => unimplemented!("comparing the Transforms of two objects without a PhysicalBehaviour"),
+            },
+        }
+    }
+
+    pub fn tr_position(&self, xf: Xf) -> [f32; 3] {
+        self.physicals[self.tr_physical_xf(xf)].transform.position
+    }
+
+    pub fn tr_local_scale(&self, xf: Xf) -> [f32; 3] {
+        self.physicals[self.tr_physical_xf(xf)].transform.localScale
+    }
+
+    pub fn tr_lossy_scale(&self, xf: Xf) -> [f32; 3] {
+        self.lossy_scale(self.tr_physical_xf(xf))
+    }
+
+    /// Transform.eulerAngles of a rotation about z.
+    pub fn tr_euler_angles(&self, xf: Xf) -> [f32; 3] {
+        let q = self.physicals[self.tr_physical_xf(xf)].transform.rotation;
+        if q[0] != 0.0 || q[1] != 0.0 {
+            unimplemented!("Transform.eulerAngles of a rotation off the z axis");
+        }
+        [0.0, 0.0, crate::game::dump::euler_z(q)]
+    }
+
+    pub fn tr_transform_point(&self, xf: Xf, v: [f32; 3]) -> [f32; 3] {
+        self.transform_point3(self.tr_physical_xf(xf), v)
+    }
+
+    pub fn tr_transform_direction(&self, xf: Xf, v: [f32; 3]) -> [f32; 3] {
+        self.transform_direction(self.tr_physical_xf(xf), v)
+    }
+
+    pub fn tr_inverse_transform_point(&self, xf: Xf, v: [f32; 3]) -> [f32; 3] {
+        self.inverse_transform_point(self.tr_physical_xf(xf), v)
+    }
+
+    /// Transform.TransformVector (1807f6f50): scale then rotation, from the object up through its parents.
+    pub fn tr_transform_vector(&self, xf: Xf, v: [f32; 3]) -> [f32; 3] {
+        let mut w = [v[0], v[1], v[2], 0.0];
+        for node in self.local_chain(self.tr_physical_xf(xf)).iter().rev() {
+            w = crate::unity::transform::global_vector(node, w);
+        }
+        [w[0], w[1], w[2]]
+    }
+
+    /// PhysicalObjectsInWorldByTransform.TryGetValue
+    pub fn tr_physical_by_transform(&self, xf: Xf) -> Option<usize> {
+        let p = match xf {
+            Xf::Physical(p) => Some(p),
+            Xf::Collider(c) => self.physical_of_collider(c),
+            Xf::Bare { .. } => None,
+        };
+        p.filter(|&p| self.physicals[p].in_world && !self.physicals[p].destroyed)
+    }
+
+    /// Physics2D.OverlapBoxNonAlloc's hits (PhysicsQuery2D::OverlapBoxAll, 180bf3610): the angle times Deg2Rad,
+    /// OverlapBoxQuery2D (180bf0fd0) SetAsBox(max(size / 2, 1e-4), point, angle) with b2_polygonRadius at the
+    /// identity, then the overlap filter and its sort.
+    pub fn tr_overlap_box(&mut self, point: [f32; 2], size: [f32; 2], angle: f32, mask: u32) -> Vec<i32> {
+        self.sync_pending();
+        let min = f32::from_bits(0x38d1b717);
+        let center = V::new(point[0], point[1]);
+        let poly = Polygon::set_as_box_angle((size[0] * 0.5).max(min), (size[1] * 0.5).max(min), center, angle * crate::game::mathf::DEG2RAD, crate::b2::settings::globals().polygon_radius);
+        let (mut lower, mut upper) = (poly.vertices[0], poly.vertices[0]);
+        for v in &poly.vertices[1..4] {
+            (lower, upper) = (V::new(lower.x.min(v.x), lower.y.min(v.y)), V::new(upper.x.max(v.x), upper.y.max(v.y)));
+        }
+        let r = poly.radius;
+        let aabb = crate::b2::broadphase::Aabb { lower: V::new(lower.x - r, lower.y - r), upper: V::new(upper.x + r, upper.y + r) };
+        let identity = crate::b2::math::Transform { p: V::ZERO, q: crate::b2::math::Rot::new(0.0) };
+        let shape = Shape::Polygon(poly);
+        let hits = self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf));
+        if hits.len() > 32 {
+            unimplemented!("Physics2D.OverlapBox with more than 32 hits (std::sort is not a stable insertion sort)");
+        }
+        hits.into_iter().map(|h| h.1).collect()
+    }
+
+    /// Physics2D.Raycast(origin, direction, distance, layerMask)
+    pub fn tr_raycast(&mut self, origin: [f32; 2], direction: [f32; 2], distance: f32, mask: u32) -> Option<RayHit2D> {
+        self.raycast(V::new(origin[0], origin[1]), direction, distance, mask, f32::NEG_INFINITY, f32::INFINITY)
+    }
+}

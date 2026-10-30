@@ -203,6 +203,16 @@ impl Game {
                     self.ray_gun_on_disable(i);
                 }
             }
+            "ThrusterbedBehaviour" => {
+                let i = self.thrusterbeds.iter().position(|x| x.id == id).expect("a ThrusterbedBehaviour in the arena");
+                if !std::mem::replace(&mut self.thrusterbeds[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Thrusterbed(i));
+                if active {
+                    self.thrusterbed_on_disable(i);
+                }
+            }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
         }
     }
@@ -215,5 +225,6 @@ impl Game {
             || self.floodlights.iter().any(|x| x.id == id && !x.enabled)
             || self.spike_grenades.iter().any(|x| x.id == id && !x.enabled)
             || self.ray_guns.iter().any(|x| x.id == id && !x.enabled)
+            || self.thrusterbeds.iter().any(|x| x.id == id && !x.enabled)
     }
 }

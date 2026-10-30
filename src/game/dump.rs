@@ -927,6 +927,12 @@ impl Game {
                 (Phase::Update, B::Floodlight(_)) => {}
                 (Phase::Fixed, B::HeatingElement(i)) => self.heating_element_fixed_update(i),
                 (Phase::Fixed, B::RayGun(i)) => self.ray_gun_fixed_update(i),
+                (Phase::Fixed, B::Bulb(i)) => self.bulb_fixed_update(i),
+                (Phase::Update, B::Bulb(i)) => self.bulb_update(i),
+                (Phase::Fixed, B::Thrusterbed(i)) => self.thrusterbed_fixed_update(i),
+                (Phase::Fixed, B::Piston(i)) => self.piston_fixed_update(i),
+                (Phase::Update, B::Flamethrower(i)) => self.flamethrower_update(i),
+                (Phase::Update, B::Piston(i)) => self.piston_update(i),
                 // TemperatureRayGunBehaviour.Update: the line renderer's start.
                 (Phase::Update, B::RayGun(_)) => {}
                 (Phase::Fixed, B::Sticky(i)) => self.sticky_grenade_fixed_update(i),
@@ -938,6 +944,7 @@ impl Game {
                 (Phase::Fixed, B::Launcher(l)) => self.launcher_fixed_update(l),
                 (Phase::Update, B::Launcher(l)) => self.launcher_update(l),
                 (Phase::Update, B::MachineGun(m)) => self.machine_gun_update(m),
+                (phase, B::Translated(t)) => self.tr_phase(phase, t),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
                 (Phase::Fixed, B::Grip(g)) => self.grip_fixed_update(g),
@@ -1000,7 +1007,8 @@ impl Game {
         self.map_light_coroutines();
         self.explosive_coroutines();
         self.gore_string_delayed_calls(true);
-        // LateUpdate; LimbBehaviour.ManagedLateUpdate is empty.
+        // LateUpdate: ContinuousActivationBehaviour (execution order -10) first; LimbBehaviour.ManagedLateUpdate is empty.
+        self.continuous_activation_late_update();
         // Global's ManagedLateUpdate walks PhysicalObjectsInWorld, which a spawned PhysicalBehaviour joins in Start.
         for p in 0..self.physicals.len() {
             if self.physicals[p].enabled && !self.physicals[p].isDisintegrated && self.physicals[p].in_world {

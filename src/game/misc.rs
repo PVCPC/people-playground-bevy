@@ -452,6 +452,8 @@ pub enum PendingStart {
     Firearm(usize),
     /// MachineGunBehaviour.Start: the `Game::machine_guns` index.
     MachineGun(usize),
+    /// A translated class's Start.
+    Translated(super::translated::TBehaviour),
     /// FlaskBehaviour.Start: the `Game::flasks` index.
     Flask(usize),
     /// DetectorBehaviour.Start: the `Game::detectors` index.
@@ -460,6 +462,12 @@ pub enum PendingStart {
     Floodlight(usize),
     /// SpikeGrenadeBehaviour.Start: the `Game::spike_grenades` index.
     SpikeGrenade(usize),
+    /// BulbBehaviour.Start: the `Game::bulbs` index.
+    Bulb(usize),
+    /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
+    Thrusterbed(usize),
+    /// PistonBehaviour.Start: the `Game::pistons` index and the `autofix_joints` entry holding its SliderJoint2D.
+    Piston(usize, usize),
     /// RandomCarTextureBehaviour.Start: the `Game::random_car_textures` index.
     CarTexture(usize),
     /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
@@ -791,7 +799,11 @@ impl Game {
 
     /// The Fixed/Slider arena entry for a prefab joint: from here on its break limit is `BreakJoint::Fixed`, in the same
     /// place of the list, and the component setters apply.
-    fn adopt_prefab_joint(&mut self, a: &AutofixJoint) -> usize {
+    pub(super) fn adopt_prefab_joint(&mut self, a: &AutofixJoint) -> usize {
+        // The component is one: a second script adopting it gets the first's entry.
+        if let Some(&f) = a.slot.and_then(|s| self.adopted_slots.get(&s)) {
+            return f;
+        }
         let f = self.fixed_joints.len();
         self.fixed_joints.push(super::simulate::FixedJoint {
             state: a.state.clone(),
@@ -810,6 +822,7 @@ impl Game {
             inst.anchored.remove(&(a.object, a.component));
         }
         if let Some(slot) = a.slot {
+            self.adopted_slots.insert(slot, f);
             self.anchored_joints[slot].joint = None;
             for k in self.joint_break_limits.iter_mut().chain(self.joint_break_sounds.iter_mut().flat_map(|s| &mut s.joints)).chain(self.joint_helpers.iter_mut().flat_map(|h| h.joints.iter_mut().flatten())).filter(|k| **k == BreakJoint::Anchored(slot)) {
                 *k = BreakJoint::Fixed(f);
@@ -917,10 +930,21 @@ impl Game {
                 PendingStart::Tyre(t) => self.tyre_start(t),
                 PendingStart::Firearm(f) => self.firearm_start(f),
                 PendingStart::MachineGun(m) => self.machine_gun_start(m),
+                PendingStart::Translated(b) => self.tr_start(b),
                 PendingStart::Flask(f) => self.flask_start(f),
                 PendingStart::Detector(i) => self.detector_start(i),
                 PendingStart::Floodlight(i) => self.floodlight_start(i),
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
+                PendingStart::Bulb(i) => self.bulb_start(i),
+                PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
+                PendingStart::Piston(i, joints) => {
+                    let a = std::mem::take(&mut self.autofix_joints[joints]).sliders.remove(0);
+                    if a.slot.is_none() {
+                        unimplemented!("PistonBehaviour.Start: a SliderJoint2D that was never created");
+                    }
+                    let f = self.adopt_prefab_joint(&a);
+                    self.piston_start(i, f);
+                }
                 PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),
                 PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
                 PendingStart::FirearmAttachmentPoint => {

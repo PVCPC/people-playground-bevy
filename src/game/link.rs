@@ -71,6 +71,10 @@ pub struct Linked {
     pub spike_grenades: HashMap<usize, usize>,
     pub heating_elements: HashMap<usize, usize>,
     pub ray_guns: HashMap<usize, usize>,
+    pub bulbs: HashMap<usize, usize>,
+    pub thrusterbeds: HashMap<usize, usize>,
+    pub pistons: HashMap<usize, usize>,
+    pub flamethrowers: HashMap<usize, usize>,
     pub act_on_collides: HashMap<usize, usize>,
     pub spawners: HashMap<usize, usize>,
     pub heat_rects: HashMap<usize, usize>,
@@ -79,6 +83,8 @@ pub struct Linked {
     pub node_rigidbodies: HashMap<usize, usize>,
     /// The PlayAudioAtRandom on the instance's parent (`ambient_audio`), which MapConfig.Reinitialise configures.
     pub parent_audio: Option<usize>,
+    /// The translated components (tools/translator) by (object, component index).
+    pub translated: HashMap<(usize, usize), super::translated::TBehaviour>,
 }
 
 /// The clone's Transform as a physical object's.
@@ -349,6 +355,16 @@ fn presentation_call(prefab: &Prefab, file: usize, call: &Value) -> bool {
 /// Transform or SpriteRenderer (AnimationCurve/Gradient, no Random), which is presentation over a subtree without
 /// colliders or bodies.
 pub(super) fn check_rewritten_at(prefab: &Prefab, o: usize, class: &str) {
+    // Update reads IsBeingUsedContinuously into private counters and calls ForceSetProgress on its TrivialAnimationBehaviour:
+    // presentation when that animation is.
+    if class == "TrivialAnimationActivationBehaviour" {
+        let Some((_, Component::Script { fields, .. })) = prefab.objects[o].components.iter().find(|(_, c)| matches!(c, Component::Script { class: k, .. } if k == class)) else { unreachable!() };
+        let target = fields.get("AnimationBehaviour").and_then(Value::pptr).filter(|p| !p.is_null()).unwrap_or_else(|| unimplemented!("TrivialAnimationActivationBehaviour with a null AnimationBehaviour (NullReferenceException)"));
+        let (to, tc) = prefab.index.iter().find(|(k, _)| k.path_id == target.path_id).map(|(_, v)| *v).expect("TrivialAnimationActivationBehaviour.AnimationBehaviour outside the prefab");
+        let Component::Script { class: animation, .. } = &prefab.objects[to].components[tc].1 else { unimplemented!("TrivialAnimationActivationBehaviour.AnimationBehaviour is no script") };
+        check_rewritten_at(prefab, to, animation);
+        return;
+    }
     if matches!(class, "TranslationAnimationBehaviour" | "RotationAnimationBehaviour" | "ColorAnimationBehaviour") {
         fn physics(prefab: &Prefab, o: usize) -> bool {
             prefab.objects[o].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_))) || prefab.objects[o].children.iter().any(|&x| physics(prefab, x))
@@ -382,7 +398,7 @@ pub(super) fn check_rewritten(class: &str) {
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
         | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
-        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" => {}
+        | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
         // SmoothLineControllerBehaviour only sets LineRenderer positions and width.
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
@@ -406,6 +422,9 @@ pub(super) fn check_rewritten(class: &str) {
         | "GlowingHotMetalBehaviour" | "FuseBoxBehaviour" | "RectangleAudioSourceBehaviour" | "PoliceBoxBehaviour"
         // Update stores ParticleSystem.isEmitting in IsPlaying (read when serialising); Start plays or stops that particle system.
         | "ParticleSystemSerialisationHelper" => {}
+        // Start adds a context menu button and sets AudioSource.enabled on its Sources.
+        "MuteBehaviour" => {}
+        name if super::translated::CLASSES.contains(&name) => {}
         _ => {
             let messages = super::lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == class).map_or(&[][..], |(_, m)| *m);
             if !messages.is_empty() {
@@ -1226,6 +1245,7 @@ impl Game {
             machinery.insert(o, self.machinery.len());
             self.machinery.push(m);
         }
+        let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
             if let Some((c, enabled, v)) = script(prefab, o, "GeneratorBehaviour") {
@@ -1286,6 +1306,70 @@ impl Game {
                 }
                 ray_guns.insert(o, self.ray_guns.len());
                 self.ray_guns.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "BulbBehaviour") {
+                let mut x = super::devices::Bulb::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.Phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("BulbBehaviour.PhysicalBehaviour is null")?;
+                x.OtherPart = l.object(field(v, "OtherPart")?)?;
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                bulbs.insert(o, self.bulbs.len());
+                self.bulbs.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ThrusterbedBehaviour") {
+                let mut x = super::thruster::Thrusterbed::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = *l.arenas.physical.get(&o).ok_or("ThrusterbedBehaviour without a PhysicalBehaviour")?;
+                x.LayersToBurn = field(field(v, "LayersToBurn")?, "m_Bits")?.i64().ok_or("LayersToBurn.m_Bits")? as u32;
+                x.StartupStrengthCurve = Some(curve(field(v, "StartupStrengthCurve")?)?);
+                thrusterbeds.insert(o, self.thrusterbeds.len());
+                self.thrusterbeds.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "PistonBehaviour") {
+                let mut x = super::piston::Piston::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("PistonBehaviour.PhysicalBehaviour is null")?;
+                x.Head = l.in_arena(field(v, "PistonHead")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("PistonBehaviour.PistonHead is null")?;
+                let m = l.object(field(v, "DamagableMachinery")?)?.ok_or("PistonBehaviour.DamagableMachinery is null")?;
+                x.Machinery = *machinery.get(&m).ok_or("PistonBehaviour: no DamagableMachineryBehaviour on its object")?;
+                if l.object(field(v, "Slider")?)? != Some(o) {
+                    unimplemented!("PistonBehaviour.Slider on another object");
+                }
+                pistons.insert(o, self.pistons.len());
+                self.pistons.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "FlamethrowerBehaviour") {
+                let mut x = super::flamethrower::Flamethrower::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.phys = *l.arenas.physical.get(&o).ok_or("FlamethrowerBehaviour without a PhysicalBehaviour")?;
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                let particle = field(v, "particlePrefab")?.pptr().ok_or("particlePrefab")?;
+                if !particle.is_null() {
+                    let r = db.resolve(file, particle).ok_or("FlamethrowerBehaviour.particlePrefab outside the data")?;
+                    let effect = db.prefab(r)?;
+                    if effect.objects[0].tag != super::water::POOLABLE_TAG && effect.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("FlamethrowerBehaviour: a particlePrefab with physics (its pose)");
+                    }
+                    x.particlePrefab = Some(r);
+                }
+                let mut at = l.object(field(v, "Muzzle")?)?.ok_or("FlamethrowerBehaviour.Muzzle is null")?;
+                while at != o {
+                    x.Muzzle.push(inst.objects[at].trs);
+                    at = inst.objects[at].parent.ok_or("FlamethrowerBehaviour.Muzzle is outside the flamethrower")?;
+                }
+                if x.Muzzle.is_empty() {
+                    unimplemented!("FlamethrowerBehaviour.Muzzle on the flamethrower's own object");
+                }
+                flamethrowers.insert(o, self.flamethrowers.len());
+                self.flamethrowers.push(x);
             }
         }
         let mut fire_maps = HashMap::new();
@@ -1490,7 +1574,54 @@ impl Game {
             }
             self.people.push(p);
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None })
+        // The translated classes (tools/translator): each component with its plain fields, then its links.
+        let mut translated = HashMap::new();
+        for o in 0..n {
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                let Component::Script { class, enabled, fields: v, .. } = comp else { continue };
+                if !super::translated::CLASSES.contains(&class.as_str()) {
+                    continue;
+                }
+                let physics = std::iter::once(o).chain(inst.descendants(o)).any(|d| prefab.objects[d].components.iter().any(|(_, x)| matches!(x, Component::Collider2D(_) | Component::Rigidbody2D(_))));
+                let b = self.tr_new(class, v, inst.objects[o].components[c], *enabled, l.arenas.physical.get(&o).copied(), physics)?;
+                translated.insert((o, c), b);
+            }
+        }
+        for (&(o, c), &b) in &translated {
+            use super::translated::{LinkKind as K, LinkVal as V};
+            let Component::Script { class, fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
+            for &(name, kind) in super::translated::link_fields(class) {
+                let x = field(v, name)?;
+                let val = match kind {
+                    K::Physical => V::Physical(l.in_arena(x, &l.arenas.physical, "PhysicalBehaviour")?),
+                    K::Rigidbody => V::Physical(match l.object(x)? {
+                        None => None,
+                        Some(t) => Some(*l.arenas.physical.get(&t).unwrap_or_else(|| unimplemented!("{class}.{name}: a Rigidbody2D without a PhysicalBehaviour"))),
+                    }),
+                    K::Script(want) => V::Script(match x.pptr().ok_or(name)? {
+                        p if p.is_null() => None,
+                        p => {
+                            let at = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or_else(|| format!("{class}.{name} outside the prefab"))?;
+                            let t = *translated.get(&at).ok_or_else(|| format!("{class}.{name}: not a translated component"))?;
+                            if t.class() != want {
+                                return Err(format!("{class}.{name}: a {} for a {want}", t.class()));
+                            }
+                            Some(t)
+                        }
+                    }),
+                    // An inline value (a Gradient, an AnimationCurve) is never null.
+                    K::Present => V::Present(x.pptr().is_none_or(|p| !p.is_null())),
+                    K::Len => V::Len(x.array().ok_or(name)?.len()),
+                    K::Prefab => V::Prefab(match x.pptr().ok_or(name)? {
+                        p if p.is_null() => None,
+                        p => Some(db.resolve(file, p).ok_or_else(|| format!("{class}.{name} outside the data"))?),
+                    }),
+                    K::Mask => V::Mask(field(x, "m_Bits")?.i64().ok_or("m_Bits")? as u32),
+                };
+                self.tr_link(b, name, val);
+            }
+        }
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -1760,8 +1891,10 @@ impl Game {
                             "SingleFloodlightBehaviour" => self.floodlight_on_disable(linked.floodlights[&d], inst),
                             "SpikeGrenadeBehaviour" => self.spike_grenade_on_disable(linked.spike_grenades[&d]),
                             "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
+                            "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
                             // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
                             "ActivateIfTutorial" | "ActivateIfFancyEffects" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "DebrisComponent" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
+                            name if super::translated::CLASSES.contains(&name) => self.tr_on_disable(linked.translated[&(d, k)]),
                             c if super::lifecycle::LIFECYCLE.iter().any(|(k, m)| *k == c && !m.contains(&"OnDisable")) => {}
                             _ => unimplemented!("{class}.OnDisable"),
                         }
@@ -1771,6 +1904,13 @@ impl Game {
                     }
                     for (&d, &w) in &linked.waters {
                         self.waters[w].active = inst.objects[d].active;
+                    }
+                }
+                name if super::translated::CLASSES.contains(&name) => {
+                    let b = linked.translated[&(o, c)];
+                    self.tr_awake(b);
+                    if *enabled {
+                        self.tr_on_enable(b);
                     }
                 }
                 "LiquidContainerController" => self.liquid_container_awake(linked.liquid_containers[&o]),
@@ -1912,6 +2052,11 @@ impl Game {
                 "SpikeGrenadeBehaviour" => Some(Behaviour::SpikeGrenade(linked.spike_grenades[&o])),
                 "HeatingElementBehaviour" => Some(Behaviour::HeatingElement(linked.heating_elements[&o])),
                 "TemperatureRayGunBehaviour" => Some(Behaviour::RayGun(linked.ray_guns[&o])),
+                "BulbBehaviour" => Some(Behaviour::Bulb(linked.bulbs[&o])),
+                "ThrusterbedBehaviour" => Some(Behaviour::Thrusterbed(linked.thrusterbeds[&o])),
+                "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
+                "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
+                name if super::translated::CLASSES.contains(&name) => Some(Behaviour::Translated(linked.translated[&(o, c)])),
                 _ => None,
             };
             if let Some(b) = behaviour {
@@ -2057,6 +2202,20 @@ impl Game {
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
+                "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
+                "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
+                // Start reads Slider.limits: the component's state, taken from the spawn when the Start runs.
+                "PistonBehaviour" => {
+                    let mut joints = self.autofix_components(prefab, inst, linked, o);
+                    joints.sliders.retain(|a| a.object == o);
+                    if joints.sliders.len() != 1 {
+                        unimplemented!("PistonBehaviour without exactly one SliderJoint2D on its object");
+                    }
+                    joints.hinges.clear();
+                    joints.fixeds.clear();
+                    self.autofix_joints.push(joints);
+                    PendingStart::Piston(linked.pistons[&o], self.autofix_joints.len() - 1)
+                }
                 "RandomCarTextureBehaviour" => PendingStart::CarTexture(self.random_car_textures.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
                 "DisintegrationCounterBehaviour" if linked.person.is_some() && o == 0 => continue,
                 "DisintegrationCounterBehaviour" => PendingStart::DisintegrationCounter(inst.objects[o].components[c]),
@@ -2092,6 +2251,10 @@ impl Game {
                         original_ids: std::sync::Arc::new(db.resource_load_order()?),
                     })
                 }
+                name if super::translated::CLASSES.contains(&name) => match linked.translated[&(o, c)] {
+                    b if b.has_start() => PendingStart::Translated(b),
+                    _ => continue,
+                },
                 _ => continue,
             };
             self.pending_starts.push(start);

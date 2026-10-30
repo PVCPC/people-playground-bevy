@@ -268,6 +268,8 @@ impl Game {
                         "ExplosionSoundBehviour" | "AudioSourceTimeScaleBehaviour" | "DeregisterBehaviour" | "ExistInDetailView" => {}
                         // DetectorBehaviour.OnDestroy removes its ContinuousActivationBehaviour listener, which sends nothing received.
                         "DetectorBehaviour" => {}
+                        // BulbBehaviour.OnDestroy: Object.Destroy(OtherPart), a child (destroyed with the hierarchy already) until Break detaches it.
+                        "BulbBehaviour" => {}
                         // GetComponentsInChildren on the destroyed (inactive) GameObject finds no collider.
                         "NoChildrenCollide" => {}
                         "FirearmBehaviour" => {
@@ -278,6 +280,12 @@ impl Game {
                         "MachineGunBehaviour" => {
                             let m = g.machine_guns.iter().position(|x| x.id == cid).expect("the MachineGunBehaviour");
                             g.emitter_dispose(super::ballistics::Shooter::MachineGun(m));
+                        }
+                        name if super::translated::CLASSES.contains(&name) => {
+                            // Only an awakened component (in behaviour_of) gets OnDestroy.
+                            if let Some(&(_, super::Behaviour::Translated(t))) = g.behaviour_of.get(&cid) {
+                                g.tr_on_destroy(t);
+                            }
                         }
                         c if !super::declares(c, "OnDestroy") => {}
                         c => unimplemented!("{c}.OnDestroy"),
@@ -439,6 +447,7 @@ impl Game {
             Step::FirearmShoot(f) => self.firearm_shoot(f),
             Step::LaunchRoutine(l) => self.launcher_launch_routine(l),
             Step::SpikeIgnite(i) => self.spike_grenade_resume(i),
+            Step::BulbBreak(i) => self.bulb_break(i),
             Step::ShrapnelEndOfFrame(at, n) => {
                 self.coroutine_seq += 1;
                 self.fixed_update_waits.push(Coroutine { seq: self.coroutine_seq, at: self.time.timeAsDouble, owner: c.owner, step: Step::ShrapnelEmit(at, n) });
@@ -510,6 +519,8 @@ pub enum Step {
     ShrapnelEmit([f32; 2], i32),
     /// SpikeGrenadeBehaviour.IgniteRoutine after its WaitForSeconds(Delay): the `Game::spike_grenades` index.
     SpikeIgnite(usize),
+    /// BulbBehaviour.Shot's WaitAFrame after its WaitForSeconds(0.05): the `Game::bulbs` index.
+    BulbBreak(usize),
 }
 
 #[derive(Clone, Debug)]

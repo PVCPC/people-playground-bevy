@@ -205,6 +205,8 @@ script! {
         OverrideImpactSounds: usize = 0,
         /// The AudioSource AddComponent'ed in Awake (non-static objects).
         audioSource: bool = true,
+        /// ContinuousActivationTracker, one DeltaInt per channel (Awake).
+        ContinuousActivationTracker: [super::continuous::DeltaInt; 3] = [super::continuous::DeltaInt { Value: 0, PreviousValue: 0, PreviousValueFixed: 0 }; 3],
     }
 }
 

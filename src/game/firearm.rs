@@ -92,7 +92,21 @@ impl Game {
         if g.Automatic && g.AutomaticFireInterval > 0.0 {
             g.clock.IntervalSeconds = g.AutomaticFireInterval;
         }
-        // Phys.IsBeingUsedContinuously(): nothing in the rewrite calls UseContinuous, so the tracker is empty.
+        let g = &self.firearms[f];
+        if g.Automatic && g.physical.is_some_and(|p| self.used_continuously(p)) && !g.IgnoreUse && g.shotIndex != 0 {
+            self.firearm_shoot_continuous(f);
+        }
+    }
+
+    /// FirearmBehaviour.ShootContinuous: the loop condition calls CalculateCycleCount(Time.deltaTime) on every pass.
+    pub fn firearm_shoot_continuous(&mut self, f: usize) {
+        if self.firearms[f].Automatic {
+            let mut i = 0;
+            while i < self.firearms[f].clock.calculate_cycle_count(self.time.deltaTime) {
+                self.firearm_shoot(f);
+                i += 1;
+            }
+        }
     }
 
     /// FirearmBehaviour.Use

@@ -60,9 +60,13 @@ impl Game {
         }
     }
 
-    /// ProjectileLauncherBehaviour.Update: phys.IsBeingUsedContinuously() is false, as nothing in the rewrite calls
-    /// UseContinuous, so the timer stays.
-    pub fn launcher_update(&mut self, _l: usize) {}
+    /// ProjectileLauncherBehaviour.Update
+    pub fn launcher_update(&mut self, l: usize) {
+        let x = &self.launchers[l];
+        if self.used_continuously(x.physical) && x.IsAutomatic {
+            self.launchers[l].automaticTimer += self.time.deltaTime;
+        }
+    }
 
     /// ProjectileLauncherBehaviour.FixedUpdate
     pub fn launcher_fixed_update(&mut self, l: usize) {

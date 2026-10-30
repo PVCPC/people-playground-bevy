@@ -238,7 +238,7 @@ impl Game {
     /// (OverlapColliderQuery2D, 180bf1240 and Overlap2DQueryBase::RunQuery): AutoSyncTransforms, then b2World::QueryAABB
     /// over the union of every child's ComputeAABB, ReportFixture's filters as `overlap_query` (the filter's depth
     /// and normal-angle tests are off), and IsFixtureValid: any child of the query shapes against the other shape's
-    /// children. The hits are sorted by z with std::sort (insertion sort up to 32 elements).
+    /// children. The hits are sorted by z with std::sort (`sort::msvc_sort`), after the query collider's own are dropped.
     pub(super) fn overlap_collider(&mut self, query: &[crate::b2::world::FixtureId], mask: u32) -> Vec<(Option<usize>, i32)> {
         self.sync_pending();
         let shapes: Vec<(&Shape, crate::b2::math::Transform)> = query.iter().map(|&f| self.world.fixture(f)).map(|fx| (&fx.shape, self.world.body(fx.body).xf)).collect();
@@ -253,23 +253,28 @@ impl Game {
             }
         }
         let Some(aabb) = aabb else { return Vec::new() };
-        let hits = self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, _, xf| {
+        let mut hits = self.overlap_query_unsorted(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, _, xf| {
             shapes.iter().any(|&(shape, xa)| (0..shape.child_count()).any(|ca| (0..other.child_count()).any(|cb| shape.test_overlap(ca, &xa, other, cb, xf))))
         });
         // ReportFixture skips the query collider's own fixtures.
         let own: Vec<i32> = query.iter().map(|&f| self.world.fixture(f).collider.id).collect();
-        let hits: Vec<_> = hits.into_iter().filter(|h| !own.contains(&h.1)).collect();
-        if hits.len() > 32 {
-            unimplemented!("Collider2D.OverlapCollider with more than 32 hits (std::sort is not a stable insertion sort)");
-        }
-        hits
+        hits.retain(|h| !own.contains(&h.1));
+        super::sort::msvc_sort(&mut hits, |a, b| a.2 < b.2);
+        hits.into_iter().map(|(ph, c, _)| (ph, c)).collect()
     }
 
     /// The overlap queries' shared filter: sensors skipped (QueriesHitTriggers off), the layer mask, the depth
-    /// range on the Transform's z, each collider once, then a stable sort by z. The callers run PhysicsQuery2D's
+    /// range on the Transform's z, each collider once, then std::sort by z (`sort::msvc_sort`). The callers run PhysicsQuery2D's
     /// AutoSyncTransforms (Physics2DSettings.autoSyncTransforms is on) before querying.
     /// The hits as (the collider's physical, or None for a GameObject without one; the Collider2D id).
     pub(super) fn overlap_query(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<(Option<usize>, i32)> {
+        let mut hits = self.overlap_query_unsorted(fixtures, mask, min_depth, max_depth, test);
+        super::sort::msvc_sort(&mut hits, |a, b| a.2 < b.2);
+        hits.into_iter().map(|(ph, c, _)| (ph, c)).collect()
+    }
+
+    /// `overlap_query` before the sort: the hits with their z, in the broadphase's report order.
+    fn overlap_query_unsorted(&self, fixtures: Vec<(crate::b2::world::FixtureId, usize)>, mask: u32, min_depth: f32, max_depth: f32, test: impl Fn(&Shape, usize, &crate::b2::math::Transform) -> bool) -> Vec<(Option<usize>, i32, f32)> {
         let mut hits: Vec<(Option<usize>, i32, f32)> = Vec::new();
         for (f, child) in fixtures {
             let fx = self.world.fixture(f);
@@ -297,8 +302,7 @@ impl Game {
                 hits.push((ph, fx.collider.id, z));
             }
         }
-        hits.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-        hits.into_iter().map(|(ph, c, _)| (ph, c)).collect()
+        hits
     }
 
     /// Transform.position of a bare collider's GameObject: its local position through its chain, then the anchor's.
@@ -455,7 +459,8 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_)))) => out.push(b),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_)))) => out.push(b),
+                        Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(b),
                         _ => unimplemented!("{class}.Use"),
                     }
                 }
@@ -469,6 +474,7 @@ impl Game {
                 Behaviour::Launcher(l) => self.launcher_use(l),
                 Behaviour::Bell(b) => self.bell_use(b),
                 Behaviour::MachineGun(m) => self.machine_gun_use(m),
+                Behaviour::Translated(t) => self.tr_use(t),
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
                 Behaviour::Led(i) => self.led_use(i),
                 Behaviour::Detector(i) => self.detector_use(i),
@@ -476,6 +482,9 @@ impl Game {
                 Behaviour::Floodlight(i) => self.floodlight_use(i),
                 Behaviour::SpikeGrenade(i) => self.spike_grenade_use(i),
                 Behaviour::HeatingElement(i) => self.heating_element_use(i),
+                Behaviour::Bulb(i) => self.bulb_use(i),
+                Behaviour::Thrusterbed(i) => self.thrusterbed_use(i),
+                Behaviour::Piston(i) => self.piston_use(i),
                 _ => unreachable!(),
             }
         }
@@ -750,12 +759,14 @@ impl Game {
         }
         self.move_to_mouse();
         if self.input.down("activateDirect") {
-            unimplemented!("activateDirect on the selection: Utils.Activations.SendOnce / Use");
+            for p in self.tool.as_ref().unwrap().rawSelection.clone() {
+                if !self.physicals[p].destroyed {
+                    self.activate_direct(p);
+                }
+            }
         }
+        // The UseContinuous broadcast is ContinuousActivationBehaviour's (continuous.rs).
         self.tool.as_mut().unwrap().shouldSendContinuousUseMessage = self.input.held("activateDirect");
-        if self.tool.as_ref().unwrap().shouldSendContinuousUseMessage {
-            unimplemented!("ContinuousActivationBehaviour: UseContinuous");
-        }
         if self.input.held("delete") {
             unimplemented!("SelectionController.UserDeleteSelection");
         }

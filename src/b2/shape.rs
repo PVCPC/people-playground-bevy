@@ -314,6 +314,20 @@ impl Polygon {
         p
     }
 
+    /// b2PolygonShape::SetAsBox(hx, hy, center, angle) (180bb5870): the box's corners and normals turned by the
+    /// CRT sinf/cosf of `angle`, the corners then moved to `center`.
+    pub fn set_as_box_angle(hx: f32, hy: f32, center: Vec2, angle: f32, radius: f32) -> Self {
+        let mut p = Self::set_as_box(hx, hy, Vec2::new(0.0, 0.0), radius);
+        p.centroid = center;
+        let (s, c) = (crate::unity::sinf(angle), crate::unity::cosf(angle));
+        for i in 0..4 {
+            let (v, n) = (p.vertices[i], p.normals[i]);
+            p.vertices[i] = Vec2::new(v.x * c - v.y * s + center.x, v.x * s + v.y * c + center.y);
+            p.normals[i] = Vec2::new(n.x * c - n.y * s, n.x * s + n.y * c);
+        }
+        p
+    }
+
     /// b2PolygonShape::Set (180bb4b90). The radius stays at the caller's value.
     pub fn from_points(points: &[Vec2], radius: f32) -> Self {
         let Some(mut vertices) = (points.len() >= 3).then(|| weld_and_hull(points)).flatten() else {

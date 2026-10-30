@@ -69,6 +69,8 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
         Start::Recording(_) => None,
     };
     let item = g.catalog_selected.clone();
+    // PP_HOLD=N (with a --target): the item is dragged from frame 62 and "activateDirect" is held for N frames from 64.
+    let hold: i32 = std::env::var("PP_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut ground = 0.0;
     let mut item_physical = 0;
     for n in 0..1800 {
@@ -83,7 +85,14 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
             }
             for (key, at) in [("spawnRight", &[30, 60][..]), ("activateDirect", &[64])] {
                 let down = at.contains(&(n + 1));
-                g.input.controls.insert(key.into(), crate::game::tool::Control { down, held: down, up: at.contains(&n) });
+                let (held, up) = match key {
+                    "activateDirect" if hold > 0 => ((63..63 + hold).contains(&n), n == 63 + hold),
+                    _ => (down, at.contains(&n)),
+                };
+                g.input.controls.insert(key.into(), crate::game::tool::Control { down, held, up });
+            }
+            if hold > 0 {
+                g.input.controls.insert("drag".into(), crate::game::tool::Control { down: n == 61, held: n >= 61, up: false });
             }
             g.input.mouse = match n {
                 ..59 => [g.BoundingBox.center[0] + 3.0, ground + 1.2, 0.0],

@@ -286,7 +286,7 @@ impl Game {
 
     /// Transform.position/rotation of the physicals under body `p`'s Transform once it moved: their local poses
     /// through the new chain.
-    fn refresh_nested(&mut self, p: usize) {
+    pub(super) fn refresh_nested(&mut self, p: usize) {
         let Some(node) = self.body_node(p) else { return };
         for q in 0..self.physicals.len() {
             let mut n = self.physicals[q].parent;
@@ -320,7 +320,7 @@ impl Game {
     }
 
     /// The physical's Transform ancestors, direct parent first.
-    fn parent_chain(&self, p: usize) -> Vec<transform::Trs> {
+    pub(super) fn parent_chain(&self, p: usize) -> Vec<transform::Trs> {
         let mut chain = Vec::new();
         let mut n = self.physicals[p].parent;
         while let Some(i) = n {
@@ -551,6 +551,9 @@ impl Game {
             }
             if let Some(s) = g.sticky_grenades.iter().position(|s| s.physical == Some(p) && s.after_physical == after) {
                 v.push((g.sticky_grenades[s].index, S::Sticky(s)));
+            }
+            if let Some(b) = g.bulbs.iter().position(|b| b.Phys == p && b.after_physical == after) {
+                v.push((g.bulbs[b].index, S::Bulb(b)));
             }
             v.sort_by_key(|&(i, _)| i);
             v

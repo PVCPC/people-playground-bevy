@@ -122,7 +122,7 @@ pub struct RayHit2D {
 }
 
 /// Vector3.normalized: the magnitude is (float)Math.Sqrt(x * x + y * y + z * z), in double.
-fn normalized3(v: [f32; 3]) -> [f32; 3] {
+pub(super) fn normalized3(v: [f32; 3]) -> [f32; 3] {
     let m = (d(v[0]) * v[0] + d(v[1]) * v[1] + d(v[2]) * v[2]).0.sqrt() as f32;
     if m > 1e-5 { [v[0] / m, v[1] / m, v[2] / m] } else { [0.0; 3] }
 }
@@ -224,6 +224,15 @@ impl Game {
         self.ray_query(start, end, mask, f32::NEG_INFINITY, f32::INFINITY).len().min(8)
     }
 
+    /// Physics2D.LinecastNonAlloc(start, end, buffer[n], layerMask): the hits, nearest first.
+    pub(super) fn linecast_hits(&mut self, start: V, end: V, mask: u32, buffer: usize) -> Vec<RayHit2D> {
+        let hits = self.ray_query(start, end, mask, f32::NEG_INFINITY, f32::INFINITY);
+        if hits.len() > buffer {
+            unimplemented!("Physics2D.LinecastNonAlloc with more hits than its buffer holds");
+        }
+        hits
+    }
+
     /// Physics2D.OverlapCircleAll / OverlapCircleNonAlloc (OverlapCircleQuery2D, 180bf11a0): AutoSyncTransforms, a
     /// b2CircleShape at `center` against the fixtures in its AABB (b2TestOverlap), ReportFixture's filters as
     /// `overlap_query`. The hits as (the collider's physical, the Collider2D id).
@@ -235,15 +244,11 @@ impl Game {
         let shape = Shape::Circle(Circle { radius, p: center });
         let identity = Transform::default_identity();
         let aabb = shape.compute_aabb(&identity, 0);
-        let hits = self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf));
-        if hits.len() > 32 {
-            unimplemented!("Physics2D.OverlapCircle with more than 32 hits (std::sort is not a stable insertion sort)");
-        }
-        hits
+        self.overlap_query(self.world.query_aabb(&aabb), mask, f32::NEG_INFINITY, f32::INFINITY, |other, child, xf| shape.test_overlap(0, &identity, other, child, xf))
     }
 
     /// The Rigidbody2D a b2 body belongs to (Collider2D.attachedRigidbody); None for a static collider's own body.
-    fn rigidbody_of_body(&self, body: BodyId) -> Option<super::Rigidbody> {
+    pub(super) fn rigidbody_of_body(&self, body: BodyId) -> Option<super::Rigidbody> {
         self.physicals.iter().find(|p| !p.destroyed && p.rigidbody.body == body).map(|p| p.rigidbody.clone()).or_else(|| self.node_rigidbodies.iter().find(|n| n.rigidbody.body == body).map(|n| n.rigidbody.clone()))
     }
 
@@ -641,7 +646,7 @@ impl Game {
     /// receivers among the rewritten scripts).
     fn broadcast_on_fragment_hit(&mut self, collider: i32, game_object: i32, force: f32) {
         let Some(p) = self.physical_of_collider(collider) else {
-            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour"]) {
+            if self.bare_colliders[&collider].receives(&["DestroyableBehaviour", "DamagableMachineryBehaviour", "ExplosiveBehaviour", "TyreDeflationBehaviour", "GlowtubeBehaviour", "BulbBehaviour"]) {
                 unimplemented!("BroadcastMessage OnFragmentHit to the scripts of a collider without a PhysicalBehaviour");
             }
             return;
@@ -656,7 +661,7 @@ impl Game {
                 }
                 for k in 0..inst.objects[x].components.len() {
                     if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_)) {
+                        if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_)) {
                             out.push(b);
                         }
                     }
@@ -672,6 +677,7 @@ impl Game {
                 Behaviour::Tyre(t) => self.tyre_on_fragment_hit(t, force),
                 // GlowtubeBehaviour.OnFragmentHit
                 Behaviour::Glowtube(g) => self.glowtube_break(g),
+                Behaviour::Bulb(b) => self.bulb_on_fragment_hit(b),
                 _ => unreachable!(),
             }
         }
