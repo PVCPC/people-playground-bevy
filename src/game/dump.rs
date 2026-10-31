@@ -981,6 +981,7 @@ impl Game {
                 (Phase::Fixed, B::SentryTurretGun(i)) => self.sentry_gun_fixed_update(i),
                 (Phase::Update, B::SentryTurretGun(i)) => self.sentry_gun_update(i),
                 (Phase::Update, B::IonBolt(i)) => self.ion_bolt_update(i),
+                (Phase::Update, B::RandomEvent(i)) => self.random_event_update(i),
                 (Phase::Fixed, B::Decimator(i)) => self.decimator_fixed_update(i),
                 (Phase::Fixed, B::ImmobilityField(i)) => self.immobility_field_fixed_update(i),
                 (Phase::Fixed, B::LightningGun(i)) => self.lightning_gun_fixed_update(i),

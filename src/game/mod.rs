@@ -63,6 +63,7 @@ pub mod laser_turret;
 pub mod sentry_turret;
 pub mod ion_bolt;
 pub mod player_prefs;
+pub mod random_event;
 pub mod decimator;
 pub mod immobility_field;
 pub mod javelin;
@@ -1272,6 +1273,8 @@ pub enum Behaviour {
     SentryTurretGun(usize),
     /// IonBoltBehaviour.Update: the `Game::ion_bolts` index.
     IonBolt(usize),
+    /// RandomEventBehaviour.Update: the `Game::random_events` index.
+    RandomEvent(usize),
     Decimator(usize),
     ImmobilityField(usize),
     /// LightningGunBehaviour.Update/FixedUpdate: the `Game::lightning_guns` index.
@@ -1365,6 +1368,7 @@ impl Behaviour {
             Behaviour::SentryTurret(_) => "SentryTurretBehaviour",
             Behaviour::SentryTurretGun(_) => "SentryTurretGunBehaviour",
             Behaviour::IonBolt(_) => "IonBoltBehaviour",
+            Behaviour::RandomEvent(_) => "RandomEventBehaviour",
             Behaviour::Decimator(_) => "DecimatorBehaviour",
             Behaviour::ImmobilityField(_) => "ImmobilityFieldBehaviour",
             Behaviour::LightningGun(_) => "LightningGunBehaviour",
@@ -1510,6 +1514,8 @@ pub struct Game {
     pub generic_pools: Vec<pool::PrefabPool>,
     pub universal_bells: Vec<universal_bell::UniversalBell>,
     pub toggleable_mirrors: Vec<mirror::ToggleableMirror>,
+    /// RendererScene nodes: a SpriteRenderer id with its node order (AddRenderer).
+    pub renderer_nodes: HashMap<i32, u32>,
     pub foliages: Vec<foliage::Foliage>,
     pub break_joint_on_burns: Vec<breakjoint::BreakJointOnBurn>,
     pub break_joint_on_shots: Vec<breakjoint::BreakJointOnShot>,
@@ -1605,6 +1611,7 @@ pub struct Game {
     pub sentry_turrets: Vec<sentry_turret::SentryTurret>,
     pub sentry_guns: Vec<sentry_turret::SentryTurretGun>,
     pub ion_bolts: Vec<ion_bolt::IonBolt>,
+    pub random_events: Vec<random_event::RandomEvent>,
     pub energy_swords: Vec<energy_sword::EnergySword>,
     /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
     pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,

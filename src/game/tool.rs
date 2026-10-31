@@ -1476,6 +1476,17 @@ mod tests {
     }
 
     #[test]
+    fn foliage_renders_in_the_games_order() {
+        let Some((g, _)) = spawned("Small Bush") else { return };
+        let first = g.foliages[0].id;
+        let mut order: Vec<usize> = (0..g.foliages.len()).collect();
+        order.sort_by_key(|&f| g.renderer_nodes[&g.renderers[g.foliages[f].renderer].id]);
+        // The OnWillRenderObject order in reference-probe/game/foliage.txt, as ids below the first leaf's.
+        let ids: Vec<i32> = order.iter().map(|&f| g.foliages[f].id - first).collect();
+        assert_eq!(ids, [-144, -78, -14, -40, 0, -130, -92]);
+    }
+
+    #[test]
     fn atom_bomb_heats_a_human_and_leaves() {
         let Some((mut g, bomb)) = spawned("Atom Bomb") else { return };
         let at = g.physicals[bomb].transform.position;
@@ -1629,6 +1640,17 @@ mod tests {
         assert!(g.physicals[turret].destroyed || !g.physicals[turret].in_world, "the turret was not destroyed");
         assert!(live(&g) >= before, "the debris did not replace the turret ({before} -> {})", live(&g));
         assert!(g.sentry_turrets[s].exploded, "Explode did not run");
+    }
+
+    /// A map light's OnGroup is switched on when the light activates (MapLightBehaviour.UpdateActivated).
+    #[test]
+    fn map_light_group_turns_on_when_its_light_activates() {
+        let Some(game) = crate::game_assets::find_game(None).ok() else { return };
+        let mut g = new_game(&game, "Default", None, None, 0).unwrap();
+        frames(&mut g, 900);
+        let light = g.map_lights.iter().position(|m| m.Activated).expect("a map light activated");
+        let id = g.map_lights[light].on_group.expect("an OnGroup");
+        assert!(g.with_component_instance(id, |_, inst, o| inst.objects[o].active), "the OnGroup stayed off");
     }
 
     #[test]

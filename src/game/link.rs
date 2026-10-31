@@ -130,6 +130,7 @@ pub struct Linked {
     pub sentry_turrets: HashMap<usize, usize>,
     pub sentry_guns: HashMap<usize, usize>,
     pub ion_bolts: HashMap<usize, usize>,
+    pub random_events: HashMap<usize, usize>,
     pub emps: HashMap<usize, usize>,
     pub decimators: HashMap<usize, usize>,
     pub immobility_fields: HashMap<usize, usize>,
@@ -618,6 +619,8 @@ pub(super) fn check_rewritten(class: &str) {
         // sentry_turret.rs: the root's state machine and the gun's aim and fire; Explode is the EMP, burning and shot paths.
         "SentryTurretBehaviour" => {}
         "SentryTurretGunBehaviour" => {}
+        // random_event.rs: Update draws once per frame while on; Events dispatch only on an exact 0 draw (not ported).
+        "RandomEventBehaviour" => {}
         // emp.rs: Use runs Activate; Awake's Killzone clone is presentation (no collider, sized for rendering).
         "EMPBehaviour" => {}
         // decimator.rs
@@ -1176,6 +1179,10 @@ impl Game {
             load_values(m.fields(), v)?;
             // A serialized array is never null.
             m.switches = Some(array(v, "Switches")?.len());
+            // OnGroup: the GameObject's Transform (its first component), which SetActive reaches through the instance.
+            let group = l.object(field(v, "OnGroup")?)?;
+            m.on_group = group.map(|go| inst.objects[go].components[0]);
+            m.on_group_active = group.is_some_and(|go| inst.objects[go].active);
             m.hasAudio = l.object(field(v, "AudioSource")?)?.is_some();
             map_lights.insert(o, self.map_lights.len());
             self.map_lights.push(m);
@@ -3349,6 +3356,7 @@ impl Game {
         let mut sentry_turrets = HashMap::new();
         let mut sentry_guns = HashMap::new();
         let mut ion_bolts = HashMap::new();
+        let mut random_events = HashMap::new();
         let mut emps = HashMap::new();
         let mut decimators = HashMap::new();
         let mut immobility_fields = HashMap::new();
@@ -3640,6 +3648,13 @@ impl Game {
                 ion_bolts.insert(o, self.ion_bolts.len());
                 self.ion_bolts.push(x);
             }
+            if let Some((c, enabled, _)) = script(prefab, o, "RandomEventBehaviour") {
+                let mut x = super::random_event::RandomEvent::default();
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                random_events.insert(o, self.random_events.len());
+                self.random_events.push(x);
+            }
             for class in ["AtomBombBehaviour", "SeismicChargeBehaviour"] {
                 if let Some((c, enabled, v)) = script(prefab, o, class) {
                     let mut x = super::prefab_bomb::PrefabBomb { id: inst.objects[o].components[c], enabled, ..Default::default() };
@@ -3777,7 +3792,7 @@ impl Game {
             let go = self.sentry_guns[i].sentry_object;
             self.sentry_guns[i].sentry = *sentry_turrets.get(&go).ok_or("SentryTurretGunBehaviour.sentryBehaviour is not a SentryTurretBehaviour")?;
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts, random_events,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -4448,6 +4463,7 @@ impl Game {
                 "SentryTurretBehaviour" => Some(Behaviour::SentryTurret(linked.sentry_turrets[&o])),
                 "SentryTurretGunBehaviour" => Some(Behaviour::SentryTurretGun(linked.sentry_guns[&o])),
                 "IonBoltBehaviour" => Some(Behaviour::IonBolt(linked.ion_bolts[&o])),
+                "RandomEventBehaviour" => Some(Behaviour::RandomEvent(linked.random_events[&o])),
                 "EMPBehaviour" => Some(Behaviour::Emp(linked.emps[&o])),
                 "DecimatorBehaviour" => Some(Behaviour::Decimator(linked.decimators[&o])),
                 "ImmobilityFieldBehaviour" => Some(Behaviour::ImmobilityField(linked.immobility_fields[&o])),

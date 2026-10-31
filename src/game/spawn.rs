@@ -483,7 +483,12 @@ impl Game {
                         self.point_effector_create(&insts[n], o, c, e);
                         self.point_effector_awake(&insts[n], &prefab, o, c);
                     }
-                    // Transform, SpriteRenderer and the unread classes make no physics state.
+                    // Renderer::AddToManager: RendererScene::AddRenderer (1805d4890) appends a node.
+                    Component::SpriteRenderer(_) if insts[n].objects[o].active => {
+                        let (id, next) = (insts[n].objects[o].components[c], self.renderer_nodes.len() as u32);
+                        self.renderer_nodes.insert(id, next);
+                    }
+                    // Transform and the unread classes make no physics state.
                     _ => {}
                 }
             }

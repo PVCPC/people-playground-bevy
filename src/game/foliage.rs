@@ -45,10 +45,13 @@ impl Game {
 
     /// OnWillRenderObject of the leaves the camera draws, in renderer order: their SpriteRenderer is enabled and active
     /// in the hierarchy, and its bounds overlap the orthographic view (`view` None: everything is drawn).
-    // ponytail: arena (instantiation) order stands in for Unity's culling order; it matters only when two leaves
-    // deactivate in one frame (b2 free-list order), so compare against a recording of a burning bush if that shows.
+    // ponytail: renderer order is the node order at spawn (reference-probe/game/foliage.txt). RendererScene::RemoveRenderer
+    // (1805e5410) later moves its last node into the hole, for every renderer kind, and those moves are not tracked; the
+    // order then differs only when two leaves deactivate in one frame (b2 free-list order).
     pub fn foliage_will_render(&mut self, view: Option<([f32; 2], [f32; 2])>) {
-        for f in 0..self.foliages.len() {
+        let mut order: Vec<usize> = (0..self.foliages.len()).collect();
+        order.sort_by_key(|&f| self.renderer_nodes.get(&self.renderers[self.foliages[f].renderer].id).copied());
+        for f in order {
             let r = &self.renderers[self.foliages[f].renderer];
             if !r.visible {
                 continue;
