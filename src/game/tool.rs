@@ -410,6 +410,23 @@ impl Game {
         [v[0], v[1], v[2]]
     }
 
+    /// Transform.rotation of a physical object: CalculateGlobalRotation up its chain.
+    fn transform_rotation(&self, p: usize) -> [f32; 4] {
+        let chain = self.local_chain(p);
+        let (leaf, parents) = chain.split_last().unwrap();
+        parents.iter().rev().fold(leaf.q, |q, node| crate::unity::transform::global_rotation(node, q))
+    }
+
+    /// Transform.up of a physical object: rotation * Vector3.up.
+    pub fn transform_up(&self, p: usize) -> [f32; 3] {
+        mathf::rotate(self.transform_rotation(p), [0.0, 1.0, 0.0])
+    }
+
+    /// Transform.right of a physical object: rotation * Vector3.right.
+    pub fn transform_right(&self, p: usize) -> [f32; 3] {
+        mathf::rotate(self.transform_rotation(p), [1.0, 0.0, 0.0])
+    }
+
     /// Transform.lossyScale of a physical object.
     pub fn lossy_scale(&self, p: usize) -> [f32; 3] {
         let mut nodes = self.local_chain(p);

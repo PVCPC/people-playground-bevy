@@ -291,7 +291,7 @@ impl Game {
         let (p, recoil, impact_force, layers, impact) = (s.physical, s.RecoilForce, s.ImpactForce, s.LayersToHit, s.Impact);
         // (0f - RecoilForce) * transform.lossyScale.x * transform.right: the Vector3 is a Vector2 as a force.
         let scale = self.lossy_scale(p)[0];
-        let right = self.physicals[p].transform.right();
+        let right = self.transform_right(p);
         let k = (0.0 - recoil) * scale;
         let rb = self.physicals[p].rigidbody.clone();
         let position = self.scifi40_barrel_position(i);

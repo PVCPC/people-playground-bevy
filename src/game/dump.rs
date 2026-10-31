@@ -342,8 +342,7 @@ impl Game {
             limb_bodies.push(id);
         }
 
-        // dump10's chain was the root alone, without parent links: treated as an older recording.
-        let chain: Vec<&Record> = s.of("TransformChain").filter(|r| r.get("parent").is_some()).collect();
+        let chain: Vec<&Record> = s.of("TransformChain").collect();
         for r in &chain {
             let v3 = |k: &str| -> Result<[f32; 4], String> {
                 let [x, y, z]: [f32; 3] = floats(r.req(k)?);
@@ -483,8 +482,9 @@ impl Game {
                 breakForce: f(r.req("breakForce")?),
                 breakTorque: f(r.req("breakTorque")?),
                 connected: Some(limb_bodies[connected]),
-                anchor: [0.0; 2],
-                connectedAnchor: [0.0; 2],
+                // A recording from before the anchors were dumped never reads them.
+                anchor: r.get("anchor").map_or([0.0; 2], floats),
+                connectedAnchor: r.get("connectedAnchor").map_or([0.0; 2], floats),
                 enabled: r.req("enabled")? == "1",
                 destroyed: false,
                 destroy_at: None,
@@ -513,7 +513,6 @@ impl Game {
                 h.joint = Some(id);
             }
             let _ = rig;
-            // ponytail: the recorder does not dump m_JointBreakLimits; finite-limit hinges list in hinge order.
             if h.breakForce != f32::INFINITY || h.breakTorque != f32::INFINITY {
                 g.joint_break_limits.push(super::BreakJoint::Hinge(g.hinges.len()));
             }
@@ -583,10 +582,49 @@ impl Game {
             g.grips.push(gr);
         }
         let _ = grip_ids;
-        // ponytail: restoring a recording whose gore strings hold their SpringJoint2D is not written (the live game makes
-        // them through PrepareGoreBits); such recordings are refused.
-        if s.of("GoreStringBehaviour").any(|r| r.get("Joint").is_some_and(|j| j != "null")) {
-            return Err("gore string joints are not rewritten yet".into());
+        // The gore strings holding a SpringJoint2D: its b2DistanceJoint, breakForce, the SetBreakForce coroutine's wake and the tissue strings. DestroyJoint
+        // cleared the tissue strings of a joint whose delayed Destroy is pending.
+        for r in s.of("GoreStringBehaviour") {
+            let Some(id) = reference(r.req("Joint")?) else { continue };
+            let spring = s.of("SpringJoint2D").find(|j| j.id == id).ok_or("a gore string joint without its SpringJoint2D")?;
+            let l = limb_by_name(&r.name).ok_or("gore string without limb")?;
+            let other = g.limbs[l].gore.Other.ok_or("a gore string joint without Other")?;
+            let joint = match &restored {
+                Some(rs) => rs.joints[&format!("{}#{}", spring.name, spring.id)],
+                None => physics::restore_distance(&mut g.world, &words(spring.req("joint")?), limb_bodies[l], limb_bodies[other]),
+            };
+            let now = g.time.fixedTimeAsDouble.min(g.time.timeAsDouble);
+            let gore = &mut g.limbs[l].gore;
+            gore.joint = Some(joint);
+            gore.breakForce = f(spring.req("breakForce")?);
+            gore.break_at = r.get("wake").map(|w| f64::from_bits(u64::from_str_radix(w, 16).unwrap()));
+            gore.lineData = r.get("tissue").map(|t| {
+                t.trim_matches(['[', ']']).split(';').filter(|x| !x.is_empty()).map(|t| {
+                    let v: Vec<f32> = t.split(',').map(|x| f(x.split_once(':').unwrap().1)).collect();
+                    super::limb::TissueString { Pos1: v[0], Pos2: v[1], Strength: v[2], Thickness: v[3], ThicknessRatio: v[4] }
+                }).collect()
+            });
+            if gore.lineData.is_none() {
+                gore.destroy_at = Some(now);
+            }
+        }
+        // PhysicsScene2D.m_JointBreakLimits. A recording from before the list was dumped holds the spawn order, the
+        // hinges by descending id, until a limit changes.
+        let hinge_ids: Vec<i32> = s.of("HingeJoint2D").map(|r| r.id).collect();
+        match s.of("JointBreakLimits").next() {
+            Some(r) => {
+                g.joint_break_limits = r.req("ids")?.trim_matches(['[', ']']).split(';').filter(|x| !x.is_empty()).map(|id| {
+                    let id: i32 = id.parse().unwrap();
+                    match hinge_ids.iter().position(|&h| h == id) {
+                        Some(h) => super::BreakJoint::Hinge(h),
+                        None => super::BreakJoint::Spring(s.of("SpringJoint2D").find(|j| j.id == id).and_then(|j| limb_by_name(&j.name)).expect("a break limit's joint")),
+                    }
+                }).collect();
+            }
+            None => g.joint_break_limits.sort_by_key(|k| match k {
+                super::BreakJoint::Hinge(h) => std::cmp::Reverse(hinge_ids[*h]),
+                _ => unreachable!(),
+            }),
         }
 
         for r in s.of("CirculationBehaviour") {
@@ -746,15 +784,8 @@ impl Game {
                 [lossy[0], lossy[1], 1.0]
             }
         };
-        // Older recordings lack the chain: the limbs hang off the root, spawned at the origin unrotated.
-        // ponytail: their group objects (FrontLeg, ...) are missing, so limb Transforms can be an ulp off there.
         if g.transform_nodes.is_empty() {
-            let [sx, sy, sz] = p.localScale;
-            let trs = Trs { t: [0.0; 4], q: [0.0, 0.0, 0.0, 1.0], s: [sx, sy, sz, 0.0] };
-            g.transform_nodes.push(TransformNode { id: 0, trs, parent: None });
-            for &l in &p.Limbs {
-                g.physicals[g.limbs[l].PhysicalBehaviour].parent = Some(0);
-            }
+            return Err("a recording without its TransformChain (dump11 and later have it)".into());
         }
         g.people.push(p);
         // The recorded Person's behaviours (all execution order 0): the root's, each limb's components, the
@@ -770,14 +801,19 @@ impl Game {
             }
             g.behaviours.add(0, super::Behaviour::GoreString(l));
         }
-        for s in 0..g.splats.len() {
-            g.behaviours.add(0, super::Behaviour::Splat(s));
+        // The records are in hierarchy order; the managers hold the clones in creation order, descending id.
+        let mut splats: Vec<(i32, usize)> = s.of("FancyBloodSplatController").enumerate().map(|(i, r)| (r.id, i)).collect();
+        splats.sort_by_key(|x| std::cmp::Reverse(x.0));
+        for (_, i) in splats {
+            g.behaviours.add(0, super::Behaviour::Splat(i));
         }
         for l in 0..g.gforces.len() {
             g.behaviours.add(0, super::Behaviour::GForce(l));
         }
-        for b in 0..g.bleeding.len() {
-            g.behaviours.add(0, super::Behaviour::Bleeding(b));
+        let mut bleeding: Vec<(i32, usize)> = s.of("BleedingParticleBehaviour").enumerate().map(|(i, r)| (r.id, i)).collect();
+        bleeding.sort_by_key(|x| std::cmp::Reverse(x.0));
+        for (_, i) in bleeding {
+            g.behaviours.add(0, super::Behaviour::Bleeding(i));
         }
         if let Some(r) = s.of("ToolControllerBehaviour").next() {
             g.tool = Some(load_tool(&g, s, r, restored.as_ref().ok_or("a tool without the b2 world")?)?);
@@ -946,6 +982,7 @@ impl Game {
                 (Phase::Fixed, B::Thrusterbed(i)) => self.thrusterbed_fixed_update(i),
                 (Phase::Fixed, B::PointLiquid(i)) => self.point_liquid_fixed_update(i),
                 (Phase::Fixed, B::Piston(i)) => self.piston_fixed_update(i),
+                (Phase::Fixed, B::MapLift(i)) => self.map_lift_fixed_update(i),
                 (Phase::Update, B::Flamethrower(i)) => self.flamethrower_update(i),
                 (Phase::Fixed, B::Rocket(i)) => self.rocket_fixed_update(i),
                 (Phase::Update, B::Rocket(i)) => self.rocket_update(i),
@@ -1243,6 +1280,21 @@ fn rig_poses(rig: &HumanRig, limbs: &[Limb]) -> Result<Vec<RagdollPose>, String>
 /// Compares every dumped field of the rewritten scripts with a snapshot; returns the mismatches.
 pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     let mut out = Vec::new();
+    // m_JointBreakLimits, by joint.
+    if let Some(r) = s.of("JointBreakLimits").next() {
+        let ours: Vec<String> = g.joint_break_limits.iter().map(|k| match k {
+            super::BreakJoint::Hinge(h) => {
+                let limb = g.limbs.iter().find(|l| l.Joint == Some(*h)).map(|l| &g.physicals[l.PhysicalBehaviour].name);
+                s.of("HingeJoint2D").find(|r| Some(&r.name) == limb).map_or("?".into(), |r| r.id.to_string())
+            }
+            super::BreakJoint::Spring(l) => s.of("SpringJoint2D").find(|j| j.name == g.physicals[g.limbs[*l].PhysicalBehaviour].name).map_or("?".into(), |j| j.id.to_string()),
+            k => format!("{k:?}"),
+        }).collect();
+        let theirs = r.get("ids").unwrap_or("");
+        if theirs != format!("[{}]", ours.join(";")) {
+            out.push(format!("JointBreakLimits: game {theirs} ours [{}]", ours.join(";")));
+        }
+    }
     let mut particles = Vec::new();
     let mut check = |what: String, fields: Vec<(&'static str, &mut dyn Field)>, r: &Record| {
         for (name, field) in fields {
@@ -1696,6 +1748,13 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 if let Some((_, limb)) = prev.snap.iter().find(|(k, _)| k == "crush") {
                     let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
                     g.limb_crush(l);
+                }
+                // The recorder's scripted LimbBehaviour.Slice (PPG_SLICE).
+                if let Some((_, limbs)) = prev.snap.iter().find(|(k, _)| k == "slice") {
+                    for limb in limbs.split(',') {
+                        let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
+                        g.limb_slice(l);
+                    }
                 }
                 // The recorder's scripted pull on the PPG_STAB item (PPG_STAB_PULL): its velocity set before the step.
                 if let Some((_, v)) = prev.snap.iter().find(|(k, _)| k == "pull") {

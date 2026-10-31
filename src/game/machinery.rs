@@ -137,6 +137,14 @@ impl Game {
         }
     }
 
+    /// DamagableMachineryBehaviour.BreakPermanently: when not Indestructible and not Destroyed, OnEMPHit, then CanRepair is off.
+    pub(super) fn machinery_break_permanently(&mut self, m: usize) {
+        if !self.machinery[m].Indestructible && !self.machinery[m].Destroyed {
+            self.machinery_on_emp_hit(m);
+            self.machinery[m].CanRepair = false;
+        }
+    }
+
     /// DamagableMachineryBehaviour.ForceBreak
     pub(super) fn machinery_force_break(&mut self, m: usize) {
         let mc = &mut self.machinery[m];

@@ -334,7 +334,7 @@ impl Game {
         if dvx * dvx + dvy * dvy > 110.0 && old[0] * old[0] + old[1] * old[1] < velocity[0] * velocity[0] + velocity[1] * velocity[1] {
             self.sentry_panic(i);
         }
-        let up = self.physicals[p].transform.up();
+        let up = self.transform_up(p);
         let gravity = self.world.gravity;
         let gn = {
             let len = (gravity.x * gravity.x + gravity.y * gravity.y).sqrt();

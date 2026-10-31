@@ -95,6 +95,7 @@ pub struct Linked {
     pub bulbs: HashMap<usize, usize>,
     pub thrusterbeds: HashMap<usize, usize>,
     pub pistons: HashMap<usize, usize>,
+    pub map_lifts: HashMap<usize, usize>,
     pub flamethrowers: HashMap<usize, usize>,
     pub rockets: HashMap<usize, usize>,
     pub airfoils: HashMap<usize, usize>,
@@ -387,6 +388,8 @@ pub enum EventCall {
     SetBreakForce(i32, f32),
     SetUseEventEnabled(i32, bool),
     /// Behaviour.set_enabled(false) on a DamagableMachineryBehaviour.
+    /// DamagableMachineryBehaviour.BreakPermanently by the machinery's component id.
+    MachineryBreakPermanently(i32),
     DisableMachinery(i32),
     /// JetEngineBehaviour.ForceShutoff by its component id.
     JetForceShutoff(i32),
@@ -396,6 +399,10 @@ pub enum EventCall {
     LiquidSpread(i32),
     /// FlamethrowerBehaviour.AffectAoe by its component id.
     FlamethrowerAoe(i32),
+    /// MapLiftBehaviour.SetFloor(index) by the lift's component id.
+    MapLiftSetFloor(i32, i32),
+    /// MapLiftBehaviour.EmergencyStop by the lift's component id.
+    MapLiftEmergencyStop(i32),
 }
 
 /// UseEventTrigger: Use runs Event while enabled and (not OnlyOnce or never used). Nothing sets its Action.
@@ -414,7 +421,7 @@ pub struct UseEvent {
 fn event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance, what: &str, animations: bool) -> Result<Vec<EventCall>, String> {
     match try_event_calls(prefab, file, event, inst, animations)? {
         Ok(calls) => Ok(calls),
-        Err(method) => unimplemented!("{what}: a persistent call beyond audio, particles, CarBehaviour, DetachFromParent.Detach, ActOnDestroy.Clear, InstantiateObjectBehaviour.Instantiate, AddForceBehaviour.AddRelativeForce, PhysicalBehaviour.HaltNextPropagation, set_enabled of a DeleteAfterTime, RandomForceAtStart, UseEventTrigger or DamagableMachineryBehaviour, Joint2D.set_breakForce and Rigidbody2D.set_simulated(true), WakeUp and AddTorque ({method})"),
+        Err(method) => unimplemented!("{what}: a persistent call beyond audio, particles, CarBehaviour, DetachFromParent.Detach, ActOnDestroy.Clear, InstantiateObjectBehaviour.Instantiate, AddForceBehaviour.AddRelativeForce, PhysicalBehaviour.HaltNextPropagation, set_enabled of a DeleteAfterTime, RandomForceAtStart, UseEventTrigger or DamagableMachineryBehaviour, Joint2D.set_breakForce and Rigidbody2D.set_simulated(true), WakeUp, AddTorque, MapLiftBehaviour.SetFloor and EmergencyStop, DamagableMachineryBehaviour.BreakPermanently ({method})"),
     }
 }
 
@@ -429,6 +436,7 @@ fn try_event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance,
         let method = string(call, "m_MethodName")?;
         let on = call.get("m_Arguments").and_then(|a| a.get("m_BoolArgument")).and_then(Value::bool);
         let number = call.get("m_Arguments").and_then(|a| a.get("m_FloatArgument")).and_then(Value::f32);
+        let int = call.get("m_Arguments").and_then(|a| a.get("m_IntArgument")).and_then(Value::i64);
         let target = call_target(prefab, file, call);
         let kept = target.and_then(|(o, c)| match &prefab.objects[o].components[c].1 {
             Component::Script { class, fields, .. } => match (class.as_str(), method.as_str()) {
@@ -437,6 +445,9 @@ fn try_event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance,
                 ("ActOnDestroy", "Clear") => Some(EventCall::ClearDestroyWith(inst.objects[o].components[0])),
                 ("AddForceBehaviour", "AddRelativeForce") if number.is_some() => Some(EventCall::AddRelativeForce(inst.objects[o].components[c], number.unwrap())),
                 ("InstantiateObjectBehaviour", "Instantiate") => Some(EventCall::Instantiate(inst.objects[o].components[c])),
+                ("MapLiftBehaviour", "SetFloor") if int.is_some() => Some(EventCall::MapLiftSetFloor(inst.objects[o].components[c], int.unwrap() as i32)),
+                ("MapLiftBehaviour", "EmergencyStop") => Some(EventCall::MapLiftEmergencyStop(inst.objects[o].components[c])),
+                ("DamagableMachineryBehaviour", "BreakPermanently") => Some(EventCall::MachineryBreakPermanently(inst.objects[o].components[c])),
                 ("PhysicalBehaviour", "HaltNextPropagation") => Some(EventCall::HaltNextPropagation(inst.objects[o].components[c])),
                 ("DamagableMachineryBehaviour", "set_enabled") if on == Some(false) => Some(EventCall::DisableMachinery(inst.objects[o].components[c])),
                 ("JetEngineBehaviour", "ForceShutoff") => Some(EventCall::JetForceShutoff(inst.objects[o].components[c])),
@@ -507,6 +518,8 @@ fn presentation_call(prefab: &Prefab, file: usize, call: &Value) -> bool {
         // Its LateUpdate only drives an AudioSource (see check_rewritten).
         Component::Script { class, .. } => class == "RectangleAudioSourceBehaviour"
             || (class == "StickyGrenadeBehaviour" && string(call, "m_MethodName").is_ok_and(|m| m == "StartBlinking"))
+            // PhysicalBehaviour.PlayClipOnce: the AudioSource's PlayOneShot (audio only).
+            || (class == "PhysicalBehaviour" && string(call, "m_MethodName").is_ok_and(|m| m == "PlayClipOnce"))
             // Refresh: LightSprite.enabled = GlowingSprites.Contains(ObjectSprite.sprite).
             || (class == "JackOLaternBehaviour" && string(call, "m_MethodName").is_ok_and(|m| m == "Refresh")),
         _ => false,
@@ -734,6 +747,8 @@ pub(super) fn check_rewritten(class: &str) {
         // Use and Update are rewritten (excalibur.rs); Awake, the glow and the sounds are presentation. CastSpell and
         // the fireball stop there.
         "ExcaliburBehaviour" => {}
+        // FixedUpdate, SetFloor, EmergencyStop and the joint are rewritten (map_lift.rs); the audio is presentation.
+        "MapLiftBehaviour" => {}
         // FixedUpdate, OnDisable and OnDestroy are rewritten (sharp_on_all_sides.rs, soft_connect.rs).
         "SharpOnAllSidesBehaviour" => {}
         // Start sets the static Instance that the bolt's lightning calls Emit on (lightning.rs); it has no other state.
@@ -1642,10 +1657,17 @@ impl Game {
             let parent = inst.objects[o].parent.unwrap_or_else(|| unimplemented!("FancyBloodSplatController without a parent (initialParent.position: NullReferenceException)"));
             // The nearest physical above the splat, and no transform node or body above it.
             let mut nearest = None;
+            // A Transform node that is the initialParent (a bare Rigidbody2D's transform, driven by its body) is the
+            // attachment: its chain positions the splat. Nodes further up are not modelled.
+            let mut node_attach = None;
             let mut up = Some(o);
             while let Some(t) = up {
-                if l.arenas.node.contains_key(&t) {
-                    unimplemented!("FancyBloodSplatController under a Transform node or body");
+                // The splat's own Transform is not an ancestor. Nodes above the nearest physical are part of its chain.
+                if t != o && nearest.is_none() && l.arenas.node.contains_key(&t) {
+                    if t != parent || node_attach.is_some() {
+                        unimplemented!("FancyBloodSplatController under a Transform node or body other than its initialParent");
+                    }
+                    node_attach = Some(l.arenas.node[&t]);
                 }
                 if let Some(&p) = l.arenas.physical.get(&t) {
                     if t == o {
@@ -1663,6 +1685,10 @@ impl Game {
                 Some((t, p)) if inst.objects[parent].parent == Some(t) => Some((p, inst.objects[parent].trs, inst.objects[o].trs.q)),
                 Some(_) => unimplemented!("FancyBloodSplatController more than one Transform below its physical (its initialParent's pose is not modelled)"),
             };
+            if let Some(n) = node_attach {
+                x.attached = None;
+                x.attached_node = Some((n, inst.objects[o].trs.q));
+            }
             x.parent_position = inst.position(parent);
             x.rotation = inst.rotation(o);
             x.started = false;
@@ -2651,6 +2677,7 @@ impl Game {
         let (mut physics_guns, mut activator_electrodes) = (HashMap::new(), HashMap::new());
         let (mut activation_toggles, mut power_gauges) = (HashMap::new(), HashMap::new());
         let (mut torches, mut flares) = (HashMap::new(), HashMap::new());
+        let mut map_lifts = HashMap::new();
         let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers, mut rockets) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
@@ -2769,6 +2796,20 @@ impl Game {
                 }
                 pistons.insert(o, self.pistons.len());
                 self.pistons.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "MapLiftBehaviour") {
+                let mut x = super::map_lift::MapLift::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Floors = array(v, "Floors")?.iter().map(|f| f.f32().ok_or("MapLiftBehaviour.Floors element is not a float")).collect::<Result<_, _>>()?;
+                let m = l.object(field(v, "damagableMachinery")?)?.ok_or("MapLiftBehaviour.damagableMachinery is null")?;
+                x.Machinery = *machinery.get(&m).ok_or("MapLiftBehaviour: no DamagableMachineryBehaviour on its object")?;
+                if l.object(field(v, "joint")?)? != Some(o) {
+                    unimplemented!("MapLiftBehaviour.joint on another object");
+                }
+                map_lifts.insert(o, self.map_lifts.len());
+                self.map_lifts.push(x);
             }
             if let Some((c, enabled, v)) = script(prefab, o, "FlamethrowerBehaviour") {
                 let mut x = super::flamethrower::Flamethrower::default();
@@ -3792,7 +3833,7 @@ impl Game {
             let go = self.sentry_guns[i].sentry_object;
             self.sentry_guns[i].sentry = *sentry_turrets.get(&go).ok_or("SentryTurretGunBehaviour.sentryBehaviour is not a SentryTurretBehaviour")?;
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts, random_events,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, map_lifts, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts, random_events,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3855,6 +3896,9 @@ impl Game {
             EventCall::LiquidSpread(id) => self.liquid_spread(id),
             EventCall::FlamethrowerAoe(id) if self.destroyed_components.contains(&id) => {}
             EventCall::FlamethrowerAoe(id) => self.flamethrower_affect_aoe(id),
+            EventCall::MapLiftSetFloor(id, _) | EventCall::MapLiftEmergencyStop(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::MapLiftSetFloor(id, floor) => self.map_lift_set_floor(id, floor),
+            EventCall::MapLiftEmergencyStop(id) => self.map_lift_emergency_stop(id),
             // DetachFromParent.Detach: transform.parent = null.
             EventCall::Detach(id) => self.set_parent_null_of(id, |_, _, _| {}),
             // ActOnDestroy.Clear: DestroyWith = null. A destroyed ActOnDestroy (its entry is gone) is a destroyed target: the call is skipped.
@@ -3893,6 +3937,11 @@ impl Game {
             EventCall::DisableMachinery(id) => {
                 let m = self.machinery.iter().position(|m| m.id == id).expect("a DamagableMachineryBehaviour in the arena");
                 self.behaviours.remove(Behaviour::Machinery(m));
+            }
+            EventCall::MachineryBreakPermanently(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::MachineryBreakPermanently(id) => {
+                let m = self.machinery.iter().position(|m| m.id == id).expect("a DamagableMachineryBehaviour in the arena");
+                self.machinery_break_permanently(m);
             }
             EventCall::JetForceShutoff(id) if self.destroyed_components.contains(&id) => {}
             EventCall::JetForceShutoff(id) => self.jet_engine_force_shutoff(id),
@@ -4346,7 +4395,7 @@ impl Game {
                     };
                     let joints = v.get("Joints").and_then(Value::array).unwrap().iter().filter_map(|j| local(j.pptr().unwrap())).filter(|&(jo, _)| jo == o);
                     let joints = joints.filter_map(|k| self.break_joint_key(inst, k)).collect();
-                    // OnBreak: ExplosiveBehaviour.ForceImmediateExplosion, audio and particles.
+                    // OnBreak: ExplosiveBehaviour.ForceImmediateExplosion, DamagableMachineryBehaviour.BreakPermanently, audio and particles.
                     let mut explosives = Vec::new();
                     let mut calls = Vec::new();
                     for call in invoked_calls(v.get("OnBreak").unwrap()) {
@@ -4360,7 +4409,10 @@ impl Game {
                                 let intensity = call.get("m_Arguments").and_then(|a| a.get("m_FloatArgument")).and_then(Value::f32).unwrap();
                                 calls.push(EventCall::AddRelativeForce(inst.objects[to].components[tc], intensity));
                             }
-                            _ => unimplemented!("JointBreakSoundBehaviour.OnBreak: a persistent call beyond ExplosiveBehaviour.ForceImmediateExplosion, CarBehaviour, AddForceBehaviour.AddRelativeForce, audio and particles"),
+                            Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "DamagableMachineryBehaviour") && string(call, "m_MethodName").unwrap() == "BreakPermanently" => {
+                                calls.push(EventCall::MachineryBreakPermanently(inst.objects[to].components[tc]));
+                            }
+                            _ => unimplemented!("JointBreakSoundBehaviour.OnBreak: a persistent call beyond ExplosiveBehaviour.ForceImmediateExplosion, CarBehaviour, AddForceBehaviour.AddRelativeForce, DamagableMachineryBehaviour.BreakPermanently, audio and particles"),
                         }
                     }
                     let cars = car_calls(prefab, file, v.get("OnBreak").unwrap(), inst);
@@ -4429,6 +4481,7 @@ impl Game {
                 "BulbBehaviour" => Some(Behaviour::Bulb(linked.bulbs[&o])),
                 "ThrusterbedBehaviour" => Some(Behaviour::Thrusterbed(linked.thrusterbeds[&o])),
                 "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
+                "MapLiftBehaviour" => Some(Behaviour::MapLift(linked.map_lifts[&o])),
                 "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
                 "LaunchedRocketBehaviour" => Some(Behaviour::Rocket(linked.rockets[&o])),
                 "FancyBloodSplatController" => Some(Behaviour::Splat(self.splats.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap())),
@@ -4658,6 +4711,17 @@ impl Game {
                     joints.fixeds.clear();
                     self.autofix_joints.push(joints);
                     PendingStart::Piston(linked.pistons[&o], self.autofix_joints.len() - 1)
+                }
+                "MapLiftBehaviour" => {
+                    let mut joints = self.autofix_components(prefab, inst, linked, o);
+                    joints.sliders.retain(|a| a.object == o);
+                    if joints.sliders.len() != 1 {
+                        unimplemented!("MapLiftBehaviour without exactly one SliderJoint2D on its object");
+                    }
+                    joints.hinges.clear();
+                    joints.fixeds.clear();
+                    self.autofix_joints.push(joints);
+                    PendingStart::MapLift(linked.map_lifts[&o], self.autofix_joints.len() - 1)
                 }
                 "RandomCarTextureBehaviour" => PendingStart::CarTexture(self.random_car_textures.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
                 "DisintegrationCounterBehaviour" if linked.person.is_some() && o == 0 => continue,

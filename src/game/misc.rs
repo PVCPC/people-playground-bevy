@@ -251,6 +251,9 @@ script! {
         /// A bleeding particle's splat: the limb's physical object, the bleeding particle's local Transform and
         /// the controller's local rotation under it. None for a BloodExplosion's (unparented at Start).
         attached: Option<(usize, crate::unity::transform::Trs, [f32; 4])> = None,
+        /// A splat whose initialParent is a Transform node (a bare Rigidbody2D's): that node and the controller's local
+        /// rotation. Its pose is the node's chain (the node's body drives it).
+        attached_node: Option<(usize, [f32; 4])> = None,
         /// False between Instantiate and the delayed Start (loaded scenes are already started).
         started: bool = true,
         destroyed: bool = false,
@@ -546,6 +549,8 @@ pub enum PendingStart {
     Thrusterbed(usize),
     /// PistonBehaviour.Start: the `Game::pistons` index and the `autofix_joints` entry holding its SliderJoint2D.
     Piston(usize, usize),
+    /// MapLiftBehaviour's pending start: the `Game::map_lifts` index and the `autofix_joints` entry holding its SliderJoint2D.
+    MapLift(usize, usize),
     /// RandomCarTextureBehaviour.Start: the `Game::random_car_textures` index.
     CarTexture(usize),
     /// ExistInDetailView.Start / IgnoreParentSize.Start: the component's instance id.
@@ -1053,6 +1058,14 @@ impl Game {
                     let f = self.adopt_prefab_joint(&a);
                     self.piston_start(i, f);
                 }
+                PendingStart::MapLift(i, joints) => {
+                    let a = std::mem::take(&mut self.autofix_joints[joints]).sliders.remove(0);
+                    if a.slot.is_none() {
+                        unimplemented!("MapLiftBehaviour.Start: a SliderJoint2D that was never created");
+                    }
+                    let f = self.adopt_prefab_joint(&a);
+                    self.map_lifts[i].joint = Some(f);
+                }
                 PendingStart::CarTexture(t) => self.random_car_texture_set_to_index(t),
                 PendingStart::ExistInDetailView(id) => self.exist_in_detail_view_start(id),
                 PendingStart::FirearmAttachmentPoint => {
@@ -1101,7 +1114,7 @@ impl Game {
         let Some(b) = self.pool_request_blood_puff(position) else { return };
         // localScale *= size (presentation); eulerAngles = (0, 0, z): the emitter's rotation (its local one is identity).
         let half = z * mathf::DEG2RAD * 0.5;
-        self.splats[self.blood_puffs[b].splat].rotation = [0.0, 0.0, half.sin(), half.cos()];
+        self.splats[self.blood_puffs[b].splat].rotation = crate::unity::transform::normalize([0.0, 0.0, crate::unity::sinf(half), crate::unity::cosf(half)]);
         // BroadcastMessage("OnImpactCreated") down the object: a limb's CirculationBehaviour.
         if let Some(l) = self.limbs.iter().position(|l| l.PhysicalBehaviour == p) {
             let original = self.original_blood_color(l);
@@ -1174,6 +1187,7 @@ impl Game {
             destroyed: false,
             CollisionLayers: 10752,
             attached: None,
+            attached_node: None,
             parent_person: None,
             id: 0,
         });
@@ -1298,7 +1312,7 @@ impl Game {
             });
             let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| Some(l.PhysicalBehaviour) == owner && l.Person == person));
             // collider.transform.root != initialParent.root: a splat hung under a physical compares with that physical's root.
-            let parent_root = self.splats[s].attached.map(|(p, _, _)| self.root_id(p));
+            let parent_root = self.splats[s].attached.map(|(p, _, _)| self.root_id(p)).or_else(|| self.splats[s].attached_node.map(|(n, _)| self.node_root_id(n)));
             let same_root = same_root || parent_root.is_some_and(|r| owner.is_some_and(|q| self.root_id(q) == r));
             if colour[3] > 0.05 && !same_root {
                 // SendMessage("Decal") to the collider's GameObject.
@@ -1341,7 +1355,24 @@ impl Game {
     }
 
     /// initialParent.position of a splat that moves with its limb.
+    /// The Transform id of a node's root: the top of its parent chain.
+    pub(super) fn node_root_id(&self, n: usize) -> i32 {
+        let mut t = n;
+        while let Some(up) = self.transform_nodes[t].parent {
+            t = up;
+        }
+        self.transform_nodes[t].id
+    }
+
     pub(super) fn update_splat_pose(&mut self, s: usize) {
+        if let Some((n, _)) = self.splats[s].attached_node {
+            let mut v = [0.0f32; 4];
+            for node in self.node_chain(n).iter().rev() {
+                v = crate::unity::transform::global_position(node, v);
+            }
+            self.splats[s].parent_position = [v[0], v[1], v[2]];
+            return;
+        }
         let Some((p, bleeding, _)) = self.splats[s].attached else { return };
         let mut v = bleeding.t;
         for node in self.local_chain(p).iter().rev() {
@@ -1355,6 +1386,13 @@ impl Game {
         use crate::unity::transform::rotate_direction;
         let sp = &self.splats[s];
         let mut v = [v[0], v[1], 0.0, 0.0];
+        if let Some((n, local_rotation)) = sp.attached_node {
+            v = rotate_direction(local_rotation, None, v);
+            for node in self.node_chain(n).iter().rev() {
+                v = rotate_direction(node.q, Some(node.s), v);
+            }
+            return [v[0], v[1], v[2]];
+        }
         match sp.attached {
             None => v = rotate_direction(sp.rotation, None, v),
             Some((p, bleeding, local_rotation)) => {
@@ -1389,7 +1427,7 @@ impl Game {
     fn randomised_angle(&mut self, s: usize) -> [f32; 4] {
         let z = self.random.value() * 360.0 * mathf::DEG2RAD * 0.5;
         // EulerToQuaternion (18073d0c0) calls the CRT's single-precision sinf/cosf.
-        let target = [0.0, 0.0, z.sin(), z.cos()];
+        let target = [0.0, 0.0, crate::unity::sinf(z), crate::unity::cosf(z)];
         let t = mathf::clamp01(self.splats[s].AngleRandomisation / 360.0);
         // QuaternionTpl Lerp: dot(identity, target) = target.w; negative flips the target.
         let sign = if target[3] < 0.0 { -1.0 } else { 1.0 };

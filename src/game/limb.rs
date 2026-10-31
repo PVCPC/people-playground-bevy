@@ -1211,6 +1211,7 @@ impl Game {
                     destroyed: false,
                     CollisionLayers: 10752,
                     attached: None,
+                    attached_node: None,
                     parent_person: None,
                     id: 0,
                 });
@@ -1299,7 +1300,8 @@ impl Game {
         }
         self.limbs[l].IsDismembered = true;
         let vector = self.transform_point(p, self.hinges[h].anchor);
-        // CreateImpactEffect: effect prefab only.
+        let up = self.transform_up(p);
+        self.create_impact_effect(p, vector, [up[0], up[1]], 2.0);
         self.skin_add_damage_point(l, super::misc::damage_type::DISMEMBERMENT, vector, 25.0);
         let clips = self.people[self.limbs[l].Person].DismembermentClips;
         // PlayClipOnce(PickRandom()): audio, the draw stays.

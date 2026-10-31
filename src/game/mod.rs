@@ -77,6 +77,7 @@ pub mod signal_converter;
 pub mod flamethrower;
 pub mod rocket;
 pub mod piston;
+pub mod map_lift;
 pub mod thruster;
 pub mod devices;
 pub mod dump;
@@ -1228,6 +1229,7 @@ pub enum Behaviour {
     PointLiquid(usize),
     Thrusterbed(usize),
     Piston(usize),
+    MapLift(usize),
     Flamethrower(usize),
     Rocket(usize),
     BreakJointOnBurn(usize),
@@ -1335,6 +1337,7 @@ impl Behaviour {
             Behaviour::PointLiquid(_) => "PointLiquidTransferBehaviour",
             Behaviour::Thrusterbed(_) => "ThrusterbedBehaviour",
             Behaviour::Piston(_) => "PistonBehaviour",
+            Behaviour::MapLift(_) => "MapLiftBehaviour",
             Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
             Behaviour::Rocket(_) => "LaunchedRocketBehaviour",
             Behaviour::BreakJointOnBurn(_) => "BreakJointOnBurnBehaviour",
@@ -1551,6 +1554,7 @@ pub struct Game {
     pub bulbs: Vec<devices::Bulb>,
     pub thrusterbeds: Vec<thruster::Thrusterbed>,
     pub pistons: Vec<piston::Piston>,
+    pub map_lifts: Vec<map_lift::MapLift>,
     pub flamethrowers: Vec<flamethrower::Flamethrower>,
     pub rockets: Vec<rocket::LaunchedRocket>,
     pub airfoils: Vec<airfoil::Airfoil>,

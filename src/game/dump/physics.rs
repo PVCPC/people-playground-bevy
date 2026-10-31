@@ -236,6 +236,13 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
         let b = *bodies.get(connected).ok_or(format!("slider {} connects to {connected}", h.name))?;
         joints.insert(format!("{}#{}", h.name, h.id), restore_prismatic(&mut world, &words(j), a, b));
     }
+    // A gore string's SpringJoint2D on the limb (body A) connected to Other (body B).
+    for h in s.of("SpringJoint2D") {
+        let gore = s.of("GoreStringBehaviour").find(|g| g.name == h.name).ok_or(format!("spring {} without a gore string", h.name))?;
+        let own = s.of("Rigidbody2D").find(|r| r.name == h.name).ok_or(format!("spring {} without a body", h.name))?;
+        let (a, b) = (bodies[&format!("{}#{}", own.name, own.id)], bodies[gore.req("Other")?.trim_start_matches('@')]);
+        joints.insert(format!("{}#{}", h.name, h.id), restore_distance(&mut world, &words(h.req("joint")?), a, b));
+    }
     // Contacts, list tail first.
     let records: Vec<&Record> = s.of("b2Contact").collect();
     let mut contacts: Vec<ContactId> = vec![usize::MAX; records.len()];
@@ -308,6 +315,21 @@ pub fn restore(s: &Snapshot, gravity: V) -> Result<Restored, String> {
 }
 
 /// A b2RevoluteJoint from its recorded words (0x98..0x130), with the warm-start impulses and limit state.
+/// b2DistanceJoint words from 0x98: frequency, damping, bias, anchors, gamma, impulse, length.
+pub(super) fn restore_distance(world: &mut World, w: &[u32], a: BodyId, b: BodyId) -> JointId {
+    let fl = |i: usize| f32::from_bits(w[i]);
+    let def = crate::b2::distance_joint::DistanceDef {
+        local_anchor_a: V::new(fl(3), fl(4)),
+        local_anchor_b: V::new(fl(5), fl(6)),
+        length: fl(9),
+        frequency_hz: fl(0),
+        damping_ratio: fl(1),
+    };
+    let id = world.create_joint(def, a, b, false);
+    world.joints[id].as_mut().unwrap().distance_mut().impulse = fl(8);
+    id
+}
+
 fn restore_revolute(world: &mut World, w: &[u32], a: BodyId, b: BodyId) -> JointId {
     let fl = |i: usize| f32::from_bits(w[i]);
     let def = crate::b2::revolute::RevoluteDef {

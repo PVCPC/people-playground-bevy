@@ -409,7 +409,7 @@ impl Game {
         self.all_limb_loop_checks(person);
         self.attached_limb_loop_checks(person);
         let head = self.people[person].Head.unwrap();
-        let up = self.physicals[self.limbs[head].PhysicalBehaviour].transform.up();
+        let up = self.transform_up(self.limbs[head].PhysicalBehaviour);
         let dir = if self.circulations[head].InternalBleedingIntensity > 0.5 {
             let n = mathf::perlin2_mapped(self.time.time, self.people[person].seed);
             normalized([up[0] + n[0] * 0.7, up[1] + n[1] * 0.7, up[2] + 0.0 * 0.7])

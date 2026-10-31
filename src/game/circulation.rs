@@ -480,6 +480,7 @@ impl Game {
                 CollisionLayers: 10752,
                 // The extraDecals child's local rotation is identity.
                 attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
+                attached_node: None,
                 parent_person: parent.map(|l| self.limbs[l].Person),
                 id: 0,
             });
