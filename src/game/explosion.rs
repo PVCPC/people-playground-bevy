@@ -63,6 +63,9 @@ script! {
         before_destroyable: bool = false,
         /// The component's index on its GameObject.
         index: usize = 0,
+        /// Added at run time (AddComponent) to its physical's GameObject: in none of its clone's component lists.
+        added: bool = false,
+        Tag: String = String::new(),
     }
 }
 
@@ -90,6 +93,9 @@ script! {
         added_to: Option<i32> = None,
     }
 }
+
+/// The "nitro" tag (TagManager's eleventh user tag).
+const NITRO_TAG: u16 = 20010;
 
 /// ExplosionCreator.EffectSize
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -288,7 +294,98 @@ impl Game {
 
     /// Whether the explosive's GameObject is active and not destroyed (a coroutine dies with it).
     fn explosive_alive(&mut self, e: usize) -> bool {
+        self.explosive_check_added(e);
         !self.destroyed_components.contains(&self.explosives[e].id) && self.explosive_active(e)
+    }
+
+    /// An added explosive leaves with its destroyed GameObject (it is in none of the clone's component lists).
+    fn explosive_check_added(&mut self, e: usize) {
+        let s = &self.explosives[e];
+        if s.added && let Some(p) = s.physical && self.physicals[p].destroyed && self.destroyed_components.insert(s.id) {
+            let id = s.id;
+            if let Some((_, b)) = self.behaviour_of.remove(&id) {
+                self.behaviours.remove(b);
+            }
+        }
+    }
+
+    /// GetComponents<ExplosiveBehaviour>() on physical `p`'s GameObject, in component order (added ones last).
+    pub(super) fn explosives_on(&mut self, p: usize) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.explosives.len()).filter(|&e| self.explosives[e].physical == Some(p)).collect();
+        for &e in &v {
+            self.explosive_check_added(e);
+        }
+        v.retain(|&e| !self.destroyed_components.contains(&self.explosives[e].id));
+        v.sort_by_key(|&e| self.explosives[e].index);
+        v
+    }
+
+    /// The explosives added at run time to physical `p`'s GameObject, in the order they were added.
+    pub(super) fn added_explosives_on(&mut self, p: usize) -> Vec<usize> {
+        let mut v = self.explosives_on(p);
+        v.retain(|&e| self.explosives[e].added);
+        v
+    }
+
+    /// GameObject.AddComponent<ExplosiveBehaviour>() on physical `p`'s GameObject: a new instance id, Awake
+    /// (GetComponent<PhysicalBehaviour>, BlockingLayers 0 becomes the default mask), the manager lists, and Start
+    /// before its first update.
+    fn add_explosive(&mut self, p: usize) -> usize {
+        let id = self.allocate_instance_id();
+        let count = self.with_component_instance(self.physicals[p].id, |_, inst, o| inst.objects[o].components.len());
+        let added = self.explosives.iter().filter(|x| x.added && x.physical == Some(p)).count();
+        self.explosives.push(Explosive { id, physical: Some(p), BlockingLayers: 10752, index: count + added, added: true, ..Default::default() });
+        let e = self.explosives.len() - 1;
+        let b = Behaviour::Explosive(e);
+        // ExplosiveBehaviour's MonoScript execution order is 0.
+        self.behaviour_of.insert(id, (0, b));
+        self.behaviours.add(0, b);
+        self.pending_starts.push(super::misc::PendingStart::Explosive(e));
+        e
+    }
+
+    /// Nitroglycerine.OnEnterContainer (hand-written for tools/iltrans, HANDWRITTEN_MEMBERS): unless the GameObject's
+    /// first ExplosiveBehaviour passes CompareTag("nitro") (the GameObject's tag), it gains a new one.
+    pub fn nitroglycerine_on_enter_container(&mut self, _this: usize, o: super::container::Owner) {
+        let p = self.nitro_physical(o);
+        let first = self.explosives_on(p).first().copied();
+        let tagged = first.is_some() && self.with_component_instance(self.physicals[p].id, |_, inst, x| inst.prefab.objects[x].tag) == NITRO_TAG;
+        if tagged {
+            return;
+        }
+        let e = self.add_explosive(p);
+        let limb = self.limbs.iter().any(|l| l.PhysicalBehaviour == p);
+        let s = &mut self.explosives[e];
+        s.Tag = "nitro".into();
+        s.Range = 5.0;
+        s.Delay = 0.0;
+        s.FragmentationRayCount = 8;
+        // container.GetComponent<LimbBehaviour>(): a CirculationBehaviour's GameObject has its LimbBehaviour.
+        s.DestroyOnExplode = limb;
+        s.ShouldCreateKillzone = false;
+        s.ArmOnUse = false;
+        s.MinChargeToExplode = 4.0;
+        s.ExplodesOnFragmentHit = true;
+        s.ImpactForceThreshold = 2.0;
+        s.DismemberChance = 0.2;
+        s.ExplodeBurnProgressThreshold = 0.5;
+    }
+
+    /// Nitroglycerine.OnExitContainer: Object.Destroy of the GameObject's first ExplosiveBehaviour when its Tag is
+    /// "nitro".
+    pub fn nitroglycerine_on_exit_container(&mut self, _this: usize, o: super::container::Owner) {
+        let p = self.nitro_physical(o);
+        if let Some(&e) = self.explosives_on(p).first() && self.explosives[e].Tag == "nitro" {
+            let id = self.explosives[e].id;
+            self.tr_destroy_component(id, 0.0);
+        }
+    }
+
+    fn nitro_physical(&self, o: super::container::Owner) -> usize {
+        if let super::container::Owner::Flask(f) = o && self.flasks[f].Phys.is_none() {
+            unimplemented!("Nitroglycerine: AddComponent<ExplosiveBehaviour> on a flask without a PhysicalBehaviour");
+        }
+        self.container_physical(o)
     }
 
     /// StartCoroutine(Explode(delay, forceDoubleCheck)) up to its first yield (WaitForSeconds).
@@ -345,6 +442,10 @@ impl Game {
 
     /// ExplosiveBehaviour.FixedUpdate
     pub fn explosive_fixed_update(&mut self, e: usize) {
+        if self.explosives[e].added && !self.explosive_alive(e) {
+            // Gone with its GameObject, or the GameObject is inactive (the manager skips it).
+            return;
+        }
         let s = &self.explosives[e];
         let Some(p) = s.physical.map(|p| &self.physicals[p]) else { return };
         if p.Temperature >= s.TemperatureLimit || (s.ExplodeBurnProgressThreshold < 1.0 && p.BurnProgress > s.ExplodeBurnProgressThreshold) || p.Charge() > s.MinChargeToExplode {
@@ -423,7 +524,8 @@ impl Game {
         if self.explosives[e].DestroyOnExplode {
             self.explosive_disable_colliders(e);
         }
-        // TryGetComponent<LimbBehaviour> is always false: an ExplosiveBehaviour on a limb stops at link time.
+        // TryGetComponent<LimbBehaviour>: StatManager.UnlockAchievement only.
+        let limb = p.and_then(|p| self.limbs.iter().position(|l| l.PhysicalBehaviour == p));
         let position = self.explosive_position(e);
         let under_water = p.is_some_and(|p| self.physicals[p].IsUnderWater) | self.is_point_under_water([position[0], position[1]]);
         let s = &self.explosives[e];
@@ -442,7 +544,10 @@ impl Game {
         if s.BurnPower > 0.001 || s.ShockwaveLiftForce > 0.01 || s.AffectVictimTemperature.abs() > 1.0 {
             self.explosive_affect_victims(e, position, ex.Position);
         }
-        // TryGetComponent<BloodContainer>: only a CirculationBehaviour on a limb is one that can be spawned.
+        // TryGetComponent<BloodContainer>(out c): c.ClearLiquid()
+        if let Some(c) = p.and_then(|p| self.physical_container(p)) {
+            self.clear_liquid(c);
+        }
         let s = &self.explosives[e];
         if !under_water {
             if let Some(vfx) = s.VFXOverride {
@@ -451,9 +556,14 @@ impl Game {
         }
         let s = &self.explosives[e];
         if s.DestroyOnExplode {
-            self.destroy_object(id);
+            match limb {
+                Some(l) => self.limb_crush(l),
+                None => self.destroy_object(id),
+            }
         } else if disintegrate {
-            if let Some(p) = p.filter(|&p| self.physicals[p].Disintegratable && !self.physicals[p].isDisintegrated) {
+            if let Some(l) = limb {
+                self.limb_crush(l);
+            } else if let Some(p) = p.filter(|&p| self.physicals[p].Disintegratable && !self.physicals[p].isDisintegrated) {
                 self.physical_disintegrate(p);
             }
             if let Some(k) = self.explosives[e].Killzone {
@@ -467,7 +577,11 @@ impl Game {
 
     /// Collider2D.enabled = false on GetComponentsInChildren<Collider2D>() (the active objects below).
     fn explosive_disable_colliders(&mut self, e: usize) {
-        let id = self.explosives[e].id;
+        // An added one finds its GameObject through its PhysicalBehaviour.
+        let id = match self.explosives[e] {
+            Explosive { added: true, physical: Some(p), .. } => self.physicals[p].id,
+            ref s => s.id,
+        };
         // The active objects below, depth first, each object's components in order.
         let colliders: Vec<i32> = self.with_component_instance(id, |_, inst, o| {
             fn collect(inst: &super::spawn::Instance, x: usize, out: &mut Vec<i32>) {
@@ -531,6 +645,20 @@ impl Game {
                 self.physicals[v].Temperature = mathf::lerp(t, temperature, heat);
             }
         }
+    }
+
+    /// ExplosionCreator.Explode(center, force): DismemberChance 0.025, Range force * 2.5, 24 fragment rays
+    /// (LargeExplosionParticles is presentation).
+    pub fn explosion_creator_explode_at(&mut self, center: [f32; 3], force: f32) {
+        self.explosion_creator_explode(ExplosionParameters {
+            FragmentationRayCount: 24,
+            Position: center,
+            Range: force * 2.5,
+            FragmentForce: force,
+            CreateParticlesAndSound: true,
+            DismemberChance: 0.025,
+            ..Default::default()
+        });
     }
 
     /// ExplosionCreator.Explode(ex)
@@ -683,8 +811,11 @@ impl Game {
                 if !inst.objects[x].active {
                     continue;
                 }
-                for k in 0..inst.objects[x].components.len() {
-                    if let Some(&(_, b)) = g.behaviour_of.get(&inst.objects[x].components[k]) {
+                let added = g.explosives.iter().enumerate().filter(|(_, s)| s.added && s.physical.is_some_and(|p| inst.objects[x].components.contains(&g.physicals[p].id))).map(|(e, _)| e);
+                let added: Vec<i32> = added.map(|e| g.explosives[e].id).collect();
+                for k in 0..inst.objects[x].components.len() + added.len() {
+                    let cid = inst.objects[x].components.get(k).copied().unwrap_or_else(|| added[k - inst.objects[x].components.len()]);
+                    if let Some(&(_, b)) = g.behaviour_of.get(&cid) {
                         if matches!(b, Behaviour::Destroyable(_) | Behaviour::Machinery(_) | Behaviour::Explosive(_) | Behaviour::Tyre(_) | Behaviour::Glowtube(_) | Behaviour::Bulb(_) | Behaviour::Syringe(_) | Behaviour::Balloon(_))
                             || matches!(b, Behaviour::Translated(t) if super::translated::receives(t.class(), "OnFragmentHit"))
                         {
@@ -723,8 +854,13 @@ impl Game {
 
     /// Object.Instantiate(prefab, position, identity). Returns the clone root's Transform id.
     pub(super) fn spawn_prefab(&mut self, source: ObjRef, position: [f32; 3]) -> i32 {
+        self.spawn_prefab_rotated(source, position, [0.0, 0.0, 0.0, 1.0])
+    }
+
+    /// Object.Instantiate(prefab, position, rotation). Returns the clone root's Transform id.
+    pub(super) fn spawn_prefab_rotated(&mut self, source: ObjRef, position: [f32; 3], rotation: [f32; 4]) -> i32 {
         let mut db = self.assets.take().expect("Instantiate without the game's data");
-        let spawned = db.prefab(source).and_then(|prefab| self.spawn(&mut db, &prefab, position, [0.0, 0.0, 0.0, 1.0], None));
+        let spawned = db.prefab(source).and_then(|prefab| self.spawn(&mut db, &prefab, position, rotation, None));
         self.assets = Some(db);
         let (inst, _) = spawned.unwrap_or_else(|e| panic!("Instantiate: {e}"));
         let id = inst.objects[0].components[0];

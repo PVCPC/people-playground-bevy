@@ -173,6 +173,8 @@ script! {
         driven_by: Option<usize> = None,
         onCollisionStayBuffer: [Option<ColliderBoolPair>; 8] = [None; 8],
         LocalColliderGridPoints: Option<Vec<[f32; 2]>> = None,
+        /// HoldingPositions (local points a GripBehaviour can hold; a person's dump has none).
+        HoldingPositions: Vec<[f32; 3]> = Vec::new(),
         stabWoundCount: u32 = 0,
         /// Indices into Game.penetration_arena.
         penetrations: Vec<usize> = Vec::new(),
@@ -663,7 +665,7 @@ impl Game {
     }
 
     /// PhysicalBehaviour.GetRandomGridPoint
-    fn random_grid_point(&mut self, p: usize) -> [f32; 2] {
+    pub(super) fn random_grid_point(&mut self, p: usize) -> [f32; 2] {
         match &self.physicals[p].LocalColliderGridPoints {
             None => [0.0, 0.0],
             Some(points) => {
@@ -909,6 +911,27 @@ impl Game {
         chunk.iter().copied().filter(|&o| !self.physicals[o].isDisintegrated).collect()
     }
 
+    /// Global.GetPhysicsObjectsNearPositionAccurate(position, radius) at accuracy 1: for each cell of a CeilToInt(radius)
+    /// square around the position, GetChunkNear(cell, 0) (one Random.insideUnitCircle draw each) and the chunk's objects
+    /// that are not disintegrated, a chunk met again yielding its objects again. The iterator is lazy, but its
+    /// callers draw nothing, so the order of the draws is the same.
+    pub(super) fn physics_objects_near_position_accurate(&mut self, position: [f32; 2], radius: f32) -> Vec<usize> {
+        self.refresh_physical_chunks();
+        let res = radius.ceil() as i32;
+        let half = res as f32 * 0.5;
+        let mut out = Vec::new();
+        for x in 0..res {
+            for y in 0..res {
+                let v = [(d(position[0]) - half + x as f32).f(), (d(position[1]) - half + y as f32).f()];
+                let key = self.chunk_near([v[0], v[1], 0.0], 0.0);
+                if let Some(chunk) = self.physical_chunks.get(&key) {
+                    out.extend(chunk.iter().copied().filter(|&o| !self.physicals[o].isDisintegrated));
+                }
+            }
+        }
+        out
+    }
+
     /// Global.GetPhysicsObjectsNear. The game's iterator reads the chunk live; nothing in
     /// AffectSurroundings changes chunk membership, so a copy is the same.
     fn physics_objects_near(&mut self, me: usize) -> Vec<usize> {
@@ -1076,7 +1099,7 @@ impl Game {
         for ob in &self.splash_pools[pool].prefab.objects {
             for (_, c) in &ob.components {
                 if let crate::assets::db::Component::Script { class, .. } = c {
-                    if !matches!(class.as_str(), "ExplosionSoundBehviour" | "PoolableParticleSystemHelper" | "PoolableSizeHelper" | "ActivateIfFancyEffects" | "Optout") {
+                    if !matches!(class.as_str(), "ExplosionSoundBehviour" | "PoolableParticleSystemHelper" | "PoolableSizeHelper" | "ActivateIfFancyEffects" | "Optout" | "AudioSourceTimeScaleBehaviour") {
                         unimplemented!("{what}: a pooled effect with a {class}");
                     }
                 }
@@ -1505,6 +1528,9 @@ impl Game {
                         d.joint = None;
                     }
                 }
+            } else if self.attachment_joint_cleanup(j) {
+                // The HingeJoint2D of a FirearmAttachmentPointBehaviour (it destroyed the b2 joint itself).
+                continue;
             } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(j)) {
                 // FixedJoint2D / SliderJoint2D
                 self.fixed_joints[f].joint = None;

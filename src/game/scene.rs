@@ -244,6 +244,7 @@ impl Game {
                         }
                     }
                     g.metal_scrape = Some((prefab.objects.iter().map(|o| 1 + o.components.len()).sum(), draws));
+                    g.holle_man_prefab = v.get("HolleManPrefab").and_then(Value::pptr).and_then(|p| db.resolve(s.game_object.file, p));
                     g.bullet_crack_clips = v.get("BulletCrackClips").and_then(Value::array).ok_or("Global.BulletCrackClips")?.len();
                 }
                 // VideoSettingsInitBehaviour.Start: Sync.
@@ -298,6 +299,17 @@ impl Game {
                 "DistantSoundBehaviour" => {
                     for (i, name) in ["SmallDistantExplosions", "LargeDistantExplosions", "LargerDistantExplosions", "SmallDistantFirearms", "MediumDistantFirearms", "LargeDistantFirearms"].iter().enumerate() {
                         g.distant_sounds[i] = v.get(name).and_then(Value::array).ok_or_else(|| format!("DistantSoundBehaviour.{name}"))?.len();
+                    }
+                }
+                // Awake sets Instance; Get draws from ShatterMasks (the Textures' red channel is all GetPolygon reads).
+                "ProceduralShatterMaterialPool" => {
+                    for t in v.get("ShatterMasks").and_then(Value::array).ok_or("ProceduralShatterMaterialPool.ShatterMasks")? {
+                        let r = t.pptr().and_then(|p| db.resolve(s.game_object.file, p)).ok_or("ProceduralShatterMaterialPool.ShatterMasks: a null texture")?;
+                        let tex = crate::assets::components::Texture2D::read(db.data(r))?;
+                        let rgba = tex.rgba(&db.data_dir)?;
+                        // GetPixels(): byte / 255f, rows from the bottom.
+                        let red = rgba.chunks(4).map(|c| c[0] as f32 / 255.0).collect();
+                        g.shatter.shatter_masks.push(super::shatter::Texture { instance_id: r.path_id as i32, width: tex.width as usize, height: tex.height as usize, red });
                     }
                 }
                 // Awake only sets Instance.

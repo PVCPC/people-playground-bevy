@@ -41,8 +41,17 @@ impl Game {
         None
     }
 
+    /// BaseBoltBehaviour.DoHitCheck's raycast for a bolt whose ShouldReflect is false: the hit for OnHit (the caller then
+    /// sets the position to hit.point), None for no hit or a NaN hit point.
+    pub(super) fn base_bolt_cast(&mut self, id: i32, distance: f32, layers: u32) -> Option<RayHit2D> {
+        let (position, rotation) = self.with_component_instance(id, |_, inst, o| (inst.position(o), inst.rotation(o)));
+        let right = mathf::rotate(rotation, [1.0, 0.0, 0.0]);
+        let hit = self.raycast(V::new(position[0], position[1]), [right[0], right[1]], distance, layers | ENERGY_LAYERS, f32::NEG_INFINITY, f32::INFINITY);
+        hit.filter(|h| !h.point.x.is_nan())
+    }
+
     /// transform.position += transform.right * num
-    fn base_bolt_advance(&mut self, id: i32, num: f32) {
+    pub(super) fn base_bolt_advance(&mut self, id: i32, num: f32) {
         let (position, rotation) = self.with_component_instance(id, |_, inst, o| (inst.position(o), inst.rotation(o)));
         let right = mathf::rotate(rotation, [1.0, 0.0, 0.0]);
         let to = [position[0] + right[0] * num, position[1] + right[1] * num, position[2] + right[2] * num];

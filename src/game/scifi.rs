@@ -211,14 +211,15 @@ impl Game {
     /// SendMessage("Slice", DontRequireReceiver) to a physical object's GameObject: every component with the method, in
     /// order.
     pub(super) fn send_slice(&mut self, p: usize) {
-        let classes: Vec<String> = self.with_component_instance(self.physicals[p].id, |_, inst, o| {
-            inst.prefab.objects[o].components.iter().filter_map(|(_, c)| match c {
-                crate::assets::db::Component::Script { class, .. } if SLICE_RECEIVERS.contains(&class.as_str()) => Some(class.clone()),
+        let classes: Vec<(String, i32)> = self.with_component_instance(self.physicals[p].id, |_, inst, o| {
+            inst.prefab.objects[o].components.iter().enumerate().filter_map(|(k, (_, c))| match c {
+                crate::assets::db::Component::Script { class, .. } if SLICE_RECEIVERS.contains(&class.as_str()) => Some((class.clone(), inst.objects[o].components[k])),
                 _ => None,
             }).collect()
         });
-        for class in classes {
+        for (class, id) in classes {
             match class.as_str() {
+                "BreakJointOnShotBehaviour" => self.break_joint_on_shot_slice(id),
                 "LimbBehaviour" => {
                     let l = self.limbs.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's LimbBehaviour");
                     self.limb_slice(l);
@@ -301,7 +302,7 @@ impl Game {
             self.physical_disintegrate(value);
             self.create_pulse_explosion_with([point[0], point[1], 0.0], impact_force / 2.0, 1.0, false, true);
         } else {
-            self.send_shot(hit.collider, Some(value), normal, point, 15.0, false);
+            self.send_shot(hit.collider, Some(value), normal, point, 15.0, false, None);
             let k = 0.0 - impact_force;
             let rb = self.physicals[value].rigidbody.clone();
             rb.add_impulse_at_position(&mut self.world, [normal[0] * k, normal[1] * k], point);

@@ -3,7 +3,6 @@
 //! classes pass. Start only sets the static Instance. The LineRenderer vertices and the pooled line are presentation.
 #![allow(non_snake_case)]
 
-use super::explosion::ExplosionParameters;
 use super::{mathf, Game};
 use crate::b2::math::Vec2 as V;
 
@@ -50,22 +49,12 @@ impl Game {
         let ph = &mut self.physicals[p];
         ph.charge = ph.Charge() + 20.0;
         ph.Temperature += 100.0;
-        // ExplosionCreator.Explode(center, force): DismemberChance 0.025, Range force * 2.5, 24 fragment rays.
-        let force = 2.0f32;
-        self.explosion_creator_explode(ExplosionParameters {
-            FragmentationRayCount: 24,
-            Position: [point[0], point[1], 0.0],
-            Range: force * 2.5,
-            FragmentForce: force,
-            CreateParticlesAndSound: true,
-            DismemberChance: 0.025,
-            ..Default::default()
-        });
+        self.explosion_creator_explode_at([point[0], point[1], 0.0], 2.0);
     }
 
     /// PhysicalBehaviour.GetClosestPointTo: the nearest Collider2D.ClosestPoint over its non-trigger colliders, else the
     /// object's position.
-    fn physical_closest_point(&mut self, p: usize, point: V) -> [f32; 2] {
+    pub(super) fn physical_closest_point(&mut self, p: usize, point: V) -> [f32; 2] {
         self.sync_pending();
         let pos = self.physicals[p].transform.position;
         let mut best = [pos[0], pos[1]];

@@ -28,14 +28,31 @@ pub enum Owner {
     Flask(usize),
     /// SyringeBehaviour or a subclass: the `Game::syringes` index.
     Syringe(usize),
+    /// ValveBehaviour: the `Game::valves` index (valve.rs).
+    Valve(usize),
+    /// BloodTankBehaviour: the `Game::blood_tanks` index (blood_tank.rs).
+    BloodTank(usize),
 }
 
 impl Game {
+    /// The PhysicalBehaviour on the container's GameObject (its transform).
+    pub fn container_physical(&self, o: Owner) -> usize {
+        match o {
+            Owner::Circulation(l) => self.limbs[l].PhysicalBehaviour,
+            Owner::Flask(f) => self.flasks[f].Phys.unwrap_or_else(|| unimplemented!("BloodContainer.transform of a flask without a PhysicalBehaviour")),
+            Owner::Syringe(s) => self.syringes[s].Phys,
+            Owner::Valve(v) => self.valves[v].physical,
+            Owner::BloodTank(t) => self.blood_tanks[t].physical,
+        }
+    }
+
     pub fn bc(&self, o: Owner) -> &BloodContainer {
         match o {
             Owner::Circulation(l) => &self.circulations[l].base,
             Owner::Flask(f) => &self.flasks[f].base,
             Owner::Syringe(s) => &self.syringes[s].base,
+            Owner::Valve(v) => &self.valves[v].base,
+            Owner::BloodTank(t) => &self.blood_tanks[t].base,
         }
     }
 
@@ -44,6 +61,8 @@ impl Game {
             Owner::Circulation(l) => &mut self.circulations[l].base,
             Owner::Flask(f) => &mut self.flasks[f].base,
             Owner::Syringe(s) => &mut self.syringes[s].base,
+            Owner::Valve(v) => &mut self.valves[v].base,
+            Owner::BloodTank(t) => &mut self.blood_tanks[t].base,
         }
     }
 
@@ -51,16 +70,30 @@ impl Game {
     fn container_enabled(&self, o: Owner) -> bool {
         match o {
             Owner::Circulation(l) => self.circulations[l].enabled,
+            Owner::Valve(v) => self.valves[v].enabled,
+            Owner::BloodTank(t) => self.blood_tanks[t].enabled,
             Owner::Flask(_) | Owner::Syringe(_) => true,
         }
     }
 
-    /// Limits: CirculationBehaviour's (0, 1), FlaskBehaviour's (0, Capacity), GasTankBehaviour's (0, 20), SyringeBehaviour's (0, 1.4).
+    /// Limits: CirculationBehaviour's (0, 1), FlaskBehaviour's (0, Capacity), GasTankBehaviour's (0, 20), SyringeBehaviour's (0, 1.4),
+    /// ValveBehaviour's (0, 0.5).
     pub fn container_limits(&self, o: Owner) -> [f32; 2] {
         match o {
             Owner::Circulation(_) => [0.0, 1.0],
             Owner::Flask(f) => [0.0, self.flasks[f].limit],
             Owner::Syringe(_) => [0.0, 1.4],
+            Owner::Valve(_) => [0.0, 0.5],
+            // BloodTankBehaviour.Limits
+            Owner::BloodTank(_) => [0.0, 14.0],
+        }
+    }
+
+    /// AllowPressureTransfer: a ValveBehaviour's is ValvePosition > 0.5; every other subclass rewritten is true.
+    fn container_allows_pressure(&self, o: Owner) -> bool {
+        match o {
+            Owner::Valve(v) => self.valves[v].ValvePosition > 0.5,
+            _ => true,
         }
     }
 
@@ -220,23 +253,57 @@ impl Game {
     fn container_pressure(&self, o: Owner) -> i32 {
         match o {
             Owner::Syringe(s) => self.syringes[s].PressureMode,
+            // BloodTankBehaviour.Pressure: Push for Push, Pull for Pull and Drain, None for Idle.
+            Owner::BloodTank(t) => match self.blood_tanks[t].Mode {
+                0 => 0,
+                1 | 3 => 1,
+                _ => 2,
+            },
             _ => 2,
         }
     }
 
-    /// BloodContainer.Update. AllowPressureTransfer is true in every subclass rewritten.
+    /// BloodContainer.CopyTo(amount, target, proportional): each liquid, its share of the amount (by raw amount when
+    /// proportional), added to the target without taking it from this container.
+    pub fn copy_to(&mut self, o: Owner, amount: f32, target: Owner, proportional: bool) {
+        if !self.container_enabled(o) || !self.container_enabled(target) || amount <= mathf::EPSILON {
+            return;
+        }
+        let total = self.bc(o).TotalLiquidAmount;
+        for key in self.bc(o).LiquidDistribution.keys() {
+            let raw = self.bc(o).LiquidDistribution.get(key).unwrap().raw;
+            let num = if proportional { raw / total } else { 1.0 };
+            // CopyTo(liquid, amount * num, target): target.AddLiquid when both are enabled and the amount is above epsilon.
+            let share = amount * num;
+            if !(share <= mathf::EPSILON) {
+                self.add_liquid(target, key, share);
+            }
+        }
+    }
+
+    /// BloodContainer.Update.
     pub fn blood_container_update(&mut self, o: Owner) {
         let dt = self.time.deltaTime;
         let scaled = self.scaled_liquid_amount(o);
         let pressure = self.container_pressure(o);
+        let allow_pressure = self.container_allows_pressure(o);
         let c = self.bc_mut(o);
         c.timer += dt;
-        // CalculatePressureFromContents
-        c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, scaled, mathf::lerp_factor_dt(0.6, dt));
-        match pressure {
-            0 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, 4096.0, mathf::lerp_factor_dt(0.95, dt)),
-            1 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, -4096.0, mathf::lerp_factor_dt(0.95, dt)),
-            _ => {}
+        if allow_pressure {
+            // CalculatePressureFromContents
+            c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, scaled, mathf::lerp_factor_dt(0.6, dt));
+            match pressure {
+                0 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, 4096.0, mathf::lerp_factor_dt(0.95, dt)),
+                1 => c.MeasuredPressure = mathf::lerp(c.MeasuredPressure, -4096.0, mathf::lerp_factor_dt(0.95, dt)),
+                _ => {}
+            }
+        } else {
+            // The pressure is not lerped: Push 4096, Pull -4096, else CalculatePressureFromContents.
+            c.MeasuredPressure = match pressure {
+                0 => 4096.0,
+                1 => -4096.0,
+                _ => scaled,
+            };
         }
         if c.timer > 1.0 {
             c.timer = 0.0;
@@ -273,6 +340,16 @@ impl Game {
         }
     }
 
+    /// BloodContainer.ClearLiquid
+    pub fn clear_liquid(&mut self, o: Owner) {
+        for liquid in self.bc(o).LiquidDistribution.keys() {
+            self.on_liquid_exit(o, liquid);
+        }
+        let c = self.bc_mut(o);
+        c.LiquidDistribution = CsDict::default();
+        c.TotalLiquidAmount = 0.0;
+    }
+
     /// OnLiquidExit
     fn on_liquid_exit(&mut self, o: Owner, liquid: usize) {
         self.liquid_on_exit_container(liquid, o);
@@ -286,6 +363,41 @@ impl Game {
 
     fn liquid_unwritten(liquid: usize, hook: &str) -> ! {
         unimplemented!("{}.{hook}", LIQUIDS[liquid].1)
+    }
+
+    /// ExoticLiquid.OnUpdate (hand-written for tools/iltrans, HANDWRITTEN_MEMBERS): container.StartCoroutine of a
+    /// DelayCoroutine.
+    pub fn exotic_liquid_on_update(&mut self, this: usize, c: Owner) {
+        let r = self.random.value();
+        if !(r > 0.8 / mathf::clamp(self.get_amount(c, this), 0.5, 2.0)) {
+            return;
+        }
+        // PhysicalObjectsInWorldByTransform.TryGetValue(container.transform)
+        let p = match c {
+            Owner::Flask(f) => self.flasks[f].Phys,
+            _ => Some(self.container_physical(c)),
+        };
+        let Some(p) = p.filter(|&p| self.physicals[p].in_world) else { return };
+        let delay = self.random.value() * 0.4;
+        let owner = self.container_id(c);
+        self.start_wait(owner, delay, super::destroyable::Step::ExoticFlash(p));
+        if self.random.value() as f64 > 0.8 {
+            self.physicals[p].charge = self.physicals[p].Charge() + 0.5;
+        }
+        let t = self.random.value() * 5.0;
+        self.physicals[p].Temperature -= t;
+    }
+
+    /// ExoticLiquid.OnUpdate's delayed action: phys.rigidbody.AddForce(Random.insideUnitCircle), then Instantiate
+    /// Prefabs/Exotic flash at container.transform.TransformPoint(phys.GetRandomGridPoint()) + insideUnitCircle * 2.
+    pub(super) fn exotic_flash(&mut self, p: usize) {
+        let force = self.random.inside_unit_circle();
+        let rb = self.physicals[p].rigidbody.clone();
+        rb.add_force(&mut self.world, force);
+        let local = self.random_grid_point(p);
+        let point = self.transform_point(p, local);
+        let u = self.random.inside_unit_circle();
+        self.spawn_resource("Prefabs/Exotic flash", [point[0] + u[0] * 2.0, point[1] + u[1] * 2.0, 0.0]);
     }
 
     /// Liquid.OnEnterContainer

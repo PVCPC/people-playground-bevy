@@ -32,8 +32,8 @@ script! {
         DebrisPrefab: Option<ObjRef> = None,
         /// The physical whose Rigidbody2D VelocityAncestor is.
         VelocityAncestor: Option<usize> = None,
-        /// OnBreak's persistent calls reach only audio and particle components.
-        OnBreakPresentation: bool = true,
+        /// OnBreak's persistent calls that are not audio or particles.
+        OnBreak: Vec<super::link::EventCall> = Vec::new(),
         /// The component comes after the PhysicalBehaviour on its GameObject (SendMessage order).
         after_physical: bool = true,
         /// The component's index on its GameObject.
@@ -62,16 +62,17 @@ impl Game {
     }
 
     /// The ExplosiveBehaviour on the destroyable's object (TryGetComponent<ExplosiveBehaviour>).
-    pub(super) fn destroyable_explosive(&self, x: usize) -> Option<usize> {
+    pub(super) fn destroyable_explosive(&mut self, x: usize) -> Option<usize> {
         let p = self.destroyables[x].PhysicalBehaviour;
-        self.explosives.iter().position(|e| e.physical == Some(p))
+        self.explosives_on(p).first().copied()
     }
 
     /// DestroyableBehaviour.Update
     pub fn destroyable_update(&mut self, x: usize) {
+        let explosive = self.destroyable_explosive(x);
         let s = &self.destroyables[x];
         let p = &self.physicals[s.PhysicalBehaviour];
-        if p.SimulateTemperature && p.Temperature >= s.TemperatureLimit && !self.destroyable_explosive(x).is_some_and(|e| self.explosives[e].TemperatureLimit >= p.Temperature) {
+        if p.SimulateTemperature && p.Temperature >= s.TemperatureLimit && !explosive.is_some_and(|e| self.explosives[e].TemperatureLimit >= p.Temperature) {
             self.destroyable_break(x, [0.0, 0.0]);
         }
     }
@@ -121,10 +122,10 @@ impl Game {
             return;
         }
         self.destroyables[x].broken = true;
-        let s = &self.destroyables[x];
-        if !s.OnBreakPresentation {
-            unimplemented!("DestroyableBehaviour.OnBreak: a persistent call beyond audio and particles");
+        for call in self.destroyables[x].OnBreak.clone() {
+            self.event_call(call);
         }
+        let s = &self.destroyables[x];
         let source = s.DebrisPrefab.unwrap_or_else(|| unimplemented!("DestroyableBehaviour: Instantiate(null DebrisPrefab) (ArgumentException)"));
         let pose = self.physicals[s.PhysicalBehaviour].transform.clone();
         let mut db = self.assets.take().expect("DestroyableBehaviour.Break without the game's data");
@@ -296,7 +297,8 @@ impl Game {
                         "LaserBehaviour" => {}
                         // BulbBehaviour.OnDestroy: Object.Destroy(OtherPart), a child (destroyed with the hierarchy already) until Break detaches it.
                         "BulbBehaviour" => {}
-                        // FirearmAttachmentPointBehaviour.OnDestroy: Object.Destroy(FirearmAttachment); Start rejects a prefab with one.
+                        // FirearmAttachmentPointBehaviour.OnDestroy: Object.Destroy(FirearmAttachment), the component, queued: its object
+                        // is destroyed in this pass already (a firearm's child) or it was never connected (null).
                         "FirearmAttachmentPointBehaviour" => {}
                         // GetComponentsInChildren on the destroyed (inactive) GameObject finds no collider.
                         "NoChildrenCollide" => {}
@@ -348,6 +350,8 @@ impl Game {
                     }
                     g.behaviour_of.remove(&cid);
                 }
+                // The CheckOnDestroyAttachment that FirearmAttachmentBehaviour.Awake added.
+                g.check_on_destroy_attachment(key);
                 // An ActOnDestroy added at run time is the object's last component.
                 if g.act_on_destroy.contains_key(&key) {
                     g.act_on_destroy_run(key);
@@ -386,6 +390,9 @@ pub struct AttachedClone {
     pub id: i32,
     pub parent: AttachParent,
     pub local: crate::unity::transform::Trs,
+    /// A live Rigidbody2D object re-parented under it (`physical_set_parent`): its own body moves it, not the parent's
+    /// Transform; only SetActive and Destroy go through the parent.
+    pub driven: bool,
 }
 
 impl Game {
@@ -411,7 +418,7 @@ impl Game {
             AttachParent::Physical(p) => self.physicals[p].transform_id,
             AttachParent::Bare(c) => self.with_component_instance(c, |_, inst, o| inst.objects[o].components[0]),
         };
-        self.attached_clones.entry(key).or_default().push(AttachedClone { id, parent, local });
+        self.attached_clones.entry(key).or_default().push(AttachedClone { id, parent, local, driven: false });
     }
 
     /// The attached clones' world poses: the parent's Transform chain applied to the stored local TRS, after the
@@ -427,7 +434,7 @@ impl Game {
         let mut all: Vec<AttachedClone> = self.attached_clones.values().flatten().copied().collect();
         // The map's order is arbitrary: ids give the spawn order.
         all.sort_by_key(|c| std::cmp::Reverse(c.id));
-        for c in all {
+        for c in all.into_iter().filter(|c| !c.driven) {
             let parents = self.attach_parent_nodes(c.parent);
             let (mut v, mut r) = (c.local.t, c.local.q);
             for n in &parents {
@@ -454,14 +461,25 @@ impl Game {
         let mut clones = Vec::new();
         for x in std::iter::once(o).chain(inst.descendants(o)) {
             if let Some(v) = self.attached_clones.get(&inst.objects[x].components[0]).filter(|_| !active || inst.objects[x].active) {
-                clones.extend(v.iter().map(|c| c.id));
+                clones.extend(v.iter().map(|c| (c.id, c.driven)));
             }
         }
-        for id in clones {
+        for (id, driven) in clones {
             if self.destroyed_components.contains(&id) {
                 continue;
             }
-            self.with_component_instance(id, |g, clone, _| {
+            self.with_component_instance(id, |g, clone, o| {
+                if driven {
+                    // A live Rigidbody2D object under it: a full SetActive(false) of the clone with its own OnDisable and body
+                    // cleanup, though only its activeInHierarchy changes (its activeSelf stays).
+                    if !active {
+                        g.set_active_scripts(clone, o, false);
+                        clone.objects[o].self_active = true;
+                    } else if clone.objects[o].self_active && !clone.objects[o].active {
+                        unimplemented!("GameObject.SetActive(true) of a parent whose child Rigidbody2D object was deactivated with it (Joint2D::Activate of the HingeJoint2D it holds)");
+                    }
+                    return;
+                }
                 let prefab = clone.prefab.clone();
                 if !active {
                     let mut scripts = Vec::new();
@@ -618,6 +636,7 @@ impl Game {
             Step::ExplosiveEndOfFrame(e, seq) => self.explosive_end_of_frame(e, seq),
             Step::DestroyableShotBreak(x, normal) => self.destroyable_shot_break(x, normal),
             Step::Bullet(b) => self.bullet_resume(b),
+            Step::AttachmentConnectDelay(pt) => self.attachment_points[pt].ignoreConnect = false,
             Step::LimbCrushEndOfFrame(l) => {
                 self.coroutine_seq += 1;
                 let owner = self.limbs[l].id;
@@ -625,6 +644,7 @@ impl Game {
             }
             Step::LimbCrush(l) => self.limb_crush(l),
             Step::LimbStunNumb(l) => self.limb_stun_numb(l),
+            Step::ExoticFlash(p) => self.exotic_flash(p),
             Step::FirearmShoot(f) => self.firearm_shoot(f),
             Step::LaunchRoutine(l) => self.launcher_launch_routine(l),
             Step::SpikeIgnite(i) => self.spike_grenade_resume(i),
@@ -690,6 +710,8 @@ pub enum Step {
     DestroyableShotBreak(usize, [f32; 2]),
     /// A BallisticIteration coroutine (`Game::bullets`).
     Bullet(usize),
+    /// FirearmAttachmentPointBehaviour.ConnectDelay after its WaitForSeconds(0.75): `ignoreConnect = false` (attachment point).
+    AttachmentConnectDelay(usize),
     /// LimbBehaviour.CrushNextFrame after WaitForEndOfFrame, then after WaitForFixedUpdate.
     LimbCrushEndOfFrame(usize),
     LimbCrush(usize),
@@ -711,6 +733,8 @@ pub enum Step {
     SyringeBreak(usize),
     /// LimbBehaviour.StunImpact's Utils.DelayCoroutine action after its WaitForSeconds: the `Game::limbs` index.
     LimbStunNumb(usize),
+    /// ExoticLiquid.OnUpdate's Utils.DelayCoroutine action: the container's physical.
+    ExoticFlash(usize),
     /// A translated routine (`coroutine::Routine`) by id, and for a yield null / WaitForSeconds the frame count from
     /// which DelayedCallManager::Update runs it (kWaitForNextFrame: the frame it was started in + 1; else i64::MIN).
     Routine(u64, i64),

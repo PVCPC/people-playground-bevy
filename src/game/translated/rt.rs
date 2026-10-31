@@ -313,7 +313,16 @@ impl Game {
         }
         self.stop_all_coroutines(id);
         if let Some((_, b)) = self.behaviour_of.remove(&id) {
-            let super::super::Behaviour::Translated(t) = b else { unreachable!("Destroy(this) of a hand-written script") };
+            let super::super::Behaviour::Translated(t) = b else {
+                // BreakJointOnBurnBehaviour has no OnDisable or OnDestroy.
+                // Nor has an added ExplosiveBehaviour (Nitroglycerine); its Explode coroutines stop with it.
+                assert!(matches!(b, super::super::Behaviour::BreakJointOnBurn(_) | super::super::Behaviour::Explosive(_)), "Destroy(this) of a hand-written script");
+                if let super::super::Behaviour::Explosive(e) = b {
+                    self.explosives[e].coroutines.clear();
+                }
+                self.behaviours.remove(b);
+                return;
+            };
             let running = self.tr_enabled(t) && self.with_component_instance(id, |_, inst, o| inst.objects[o].active);
             self.behaviours.remove(b);
             if running {

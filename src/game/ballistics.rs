@@ -37,7 +37,7 @@ const SHOT_RECEIVERS: &[&str] = &[
 ];
 /// The classes with a Break(Vector2) or Break() method, and their subclasses.
 const BREAK_RECEIVERS: &[&str] = &[
-    "BalloonBehaviour", "BulbBehaviour", "CathodeLightBehaviour", "DamagableMachineryBehaviour", "DestroyableBehaviour", "GlowtubeBehaviour",
+    "BalloonBehaviour", "BulbBehaviour", "CathodeLightBehaviour", "DamagableMachineryBehaviour", "DestroyableBehaviour", "VaseBehaviour", "GlowtubeBehaviour",
     "OldSyringeBehaviour", "SyringeBehaviour", "TelevisionBehaviour", "TyreDeflationBehaviour",
     "AcidSyringe", "AdrenalineSyringe", "BoneEatingPoisonSyringe", "CoagulationSyringe", "DeathSyringe", "EmptySyringe", "FreezeSyringe", "KnockoutSyringe", "LifeSyringe",
     "MendingSyringe", "PainKillerSyringe", "PinkSyringe", "UltraStrengthSyringe", "WaterBreathingSyringe", "ZombieSyringe",
@@ -420,10 +420,10 @@ impl Game {
                     let damage = self.damage_for_distance(f, THICKNESS + b.total) * mathf::clamp01(num);
                     if let Some(prev) = b.previous.filter(|&c| self.collider_exists(c)) {
                         let at = sub(b.origin, mul(b.direction, THICKNESS));
-                        self.send_shot(prev, None, b.direction, at, damage, true);
+                        self.send_shot(prev, None, b.direction, at, damage, true, Some(self.emitter(b.shooter).cartridge));
                         self.bullet_exit_callback(f, at, b.direction);
                     }
-                    self.send_shot(collider, Some(p), mul(b.direction, -1.0), b.origin, damage, false);
+                    self.send_shot(collider, Some(p), mul(b.direction, -1.0), b.origin, damage, false, Some(self.emitter(b.shooter).cartridge));
                     self.bullet_entry_callback(f, b.origin, b.direction, collider);
                     let origin = b.origin;
                     self.bullet_explode(&mut b, origin);
@@ -453,7 +453,7 @@ impl Game {
             if let Some(prev) = b.previous.filter(|&c| self.collider_exists(c)) {
                 let at = sub(b.origin, mul(b.direction, THICKNESS));
                 let damage = self.damage_for_distance(f, THICKNESS + b.total) * mathf::clamp01(num);
-                self.send_shot(prev, None, b.direction, at, damage, true);
+                self.send_shot(prev, None, b.direction, at, damage, true, Some(self.emitter(b.shooter).cartridge));
                 self.bullet_exit_callback(f, at, b.direction);
             }
             let ray = self.raycast(V::new(b.origin[0], b.origin[1]), b.direction, max_range, layers, -0.1, 0.1);
@@ -483,7 +483,7 @@ impl Game {
             let rb = self.physicals[p].rigidbody.clone();
             rb.add_force_at_position(&mut self.world, mul(b.direction, value), b.origin);
             let (point, normal) = ([hit.point.x, hit.point.y], [hit.normal.x, hit.normal.y]);
-            self.send_shot(hit.collider, Some(p), normal, point, damage2, false);
+            self.send_shot(hit.collider, Some(p), normal, point, damage2, false, Some(self.emitter(b.shooter).cartridge));
             let charge = self.emitter(f).Charge;
             let ph = &mut self.physicals[p];
             ph.charge = mathf::max(charge * ph.EnergyWireResistance, ph.Charge());
@@ -661,7 +661,7 @@ impl Game {
             return false;
         }
         if send {
-            self.send_shot(hit.collider, p, [hit.normal.x, hit.normal.y], [hit.point.x, hit.point.y], damage, false);
+            self.send_shot(hit.collider, p, [hit.normal.x, hit.normal.y], [hit.point.x, hit.point.y], damage, false, Some(self.emitter(f).cartridge));
         }
         true
     }
@@ -680,7 +680,8 @@ impl Game {
 
     /// SendMessage("Shot"/"ExitShot", shot) to a GameObject: `physical` when the target is a physical's object, else
     /// the collider's bare object. Every component on it with the method runs (disabled ones too), in order.
-    pub(super) fn send_shot(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool) {
+    /// `cartridge` is Shot.cartridge: a bullet's emitter Cartridge, None for a Shot built without one.
+    pub(super) fn send_shot(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool, cartridge: Option<Cartridge>) {
         let receivers = if exit { EXIT_SHOT_RECEIVERS } else { SHOT_RECEIVERS };
         let Some(p) = physical.or_else(|| self.physical_of_collider(collider)) else {
             if self.bare_colliders[&collider].receives(receivers) {
@@ -711,12 +712,12 @@ impl Game {
                     let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
                     self.balloon_exit_shot(b);
                 }
-                ("DestroyableBehaviour", _) => {
+                ("DestroyableBehaviour" | "VaseBehaviour", _) => {
                     let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");
                     self.destroyable_shot(x, normal, damage);
                 }
                 ("ExplosiveBehaviour", _) => {
-                    let e = self.explosives.iter().position(|e| e.physical == Some(p)).expect("the object's ExplosiveBehaviour");
+                    let e = self.explosives.iter().position(|e| e.physical == Some(p) && !e.added).expect("the object's ExplosiveBehaviour");
                     self.explosive_shot(e);
                 }
                 ("DamagableMachineryBehaviour", _) => {
@@ -753,12 +754,19 @@ impl Game {
                     let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
                     if exit { self.break_syringe(s) } else { self.syringe_shot(s) }
                 }
+                ("BreakJointOnShotBehaviour", false) => self.break_joint_on_shot_shot(id, damage),
                 ("ActOnShot", false) => {
                     let a = self.act_on_shots.iter().position(|a| a.id == id).expect("the object's ActOnShot");
-                    self.act_on_shot_shot(a, damage);
+                    self.act_on_shot_shot(a, damage, cartridge);
                 }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
+            }
+        }
+        // ExplosiveBehaviours added at run time come last on the GameObject (ExplosiveBehaviour has no ExitShot).
+        if !exit {
+            for e in self.added_explosives_on(p) {
+                self.explosive_shot(e);
             }
         }
     }
@@ -773,7 +781,7 @@ impl Game {
         };
         for class in self.receivers_of(self.physicals[p].id, BREAK_RECEIVERS) {
             match class.as_str() {
-                "DestroyableBehaviour" => {
+                "DestroyableBehaviour" | "VaseBehaviour" => {
                     let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");
                     self.destroyable_break(x, velocity);
                 }

@@ -442,12 +442,11 @@ impl Game {
     /// ActivateIfFancyEffects each draw `Chance(1) > Random.value` before reading FancyEffects). `at` is the world
     /// position, `up` the direction of the new transform's up axis. Returns the BleedingParticle's index; the caller
     /// sets the fields CreateBleedingParticle / CreateDismembermentBloodParticle set after the Instantiate.
-    fn instantiate_bleeding_particle(&mut self, parent: usize, at: [f32; 3], up: [f32; 3]) -> usize {
+    fn instantiate_bleeding_particle(&mut self, p: usize, person: usize, parent: Option<usize>, at: [f32; 3], up: [f32; 3]) -> usize {
         use crate::unity::transform::{from_to_rotation_up, set_world, Trs};
         for _ in 0..BLEEDING_PARTICLE_OBJECTS {
             self.allocate_instance_id();
         }
-        let p = self.limbs[parent].PhysicalBehaviour;
         // The world pose under the parent (the prefab's scale is 1), then transform.up = up sets the world rotation.
         let chain: Vec<Trs> = self.local_chain(p).into_iter().rev().collect();
         let ((t, _), _) = set_world(&chain, at, [0.0, 0.0, 0.0, 1.0]);
@@ -471,6 +470,7 @@ impl Game {
                 Size: 0.1,
                 DestroyWhenNoParticles: true,
                 TriggerOnCollide: false,
+                on_collide_tank: None,
                 Decal: "Sparse_blood".into(),
                 particles: Default::default(),
                 parent_position: [0.0; 3],
@@ -480,7 +480,8 @@ impl Game {
                 CollisionLayers: 10752,
                 // The extraDecals child's local rotation is identity.
                 attached: Some((p, local, [0.0, 0.0, 0.0, 1.0])),
-                parent_person: Some(self.limbs[parent].Person),
+                parent_person: parent.map(|l| self.limbs[l].Person),
+                id: 0,
             });
             self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
             let s = self.splats.len() - 1;
@@ -502,10 +503,11 @@ impl Game {
             PulseIntensity: 1.3,
             fakeHeartClock: 0.0,
             CirculationBehaviour: parent,
+            Parent: p,
             PushingTo: None,
             BloodSplatController: splat,
             dripSoundClock: FixedIntervalDistributor::with_rate(0.5),
-            DripSounds: self.people[self.limbs[parent].Person].BleedingDripSounds,
+            DripSounds: self.people[person].BleedingDripSounds,
             visible: false,
             startSpeedMultiplier: 0.0,
             rateOverTimeMultiplier: 0.0,
@@ -524,9 +526,9 @@ impl Game {
             let (c, e) = self.sprite_world_bounds(p);
             let (closest, _) = crate::unity::transform::bounds_closest_point([world_position[0], world_position[1], 0.0], c, e);
             let at = [closest[0] - direction[0] * 0.1, closest[1] - direction[1] * 0.1, 0.0];
-            let b = self.instantiate_bleeding_particle(l, at, [direction[0], direction[1], 0.0]);
+            let b = self.instantiate_bleeding_particle(p, self.limbs[l].Person, Some(l), at, [direction[0], direction[1], 0.0]);
             self.bleeding[b].ShouldBecomeSmokeInWater = self.circulations[l].BleedingPointCount == 0;
-            self.bleeding[b].CirculationBehaviour = l;
+            self.bleeding[b].CirculationBehaviour = Some(l);
             self.bleeding[b].Laminarity = laminarity;
             self.bleeding[b].DripSounds = None;
             self.circulations[l].BleedingParticles.push(b);
@@ -534,22 +536,31 @@ impl Game {
         }
     }
 
-    /// CirculationBehaviour.CreateDismembermentBloodParticle: a particle under the connected (parent) limb at the
-    /// joint's connected anchor, pointing from the parent to this limb. It is on neither BleedingParticles nor
-    /// BleedingPointCount, and keeps the prefab's DripSounds.
+    /// CirculationBehaviour.CreateDismembermentBloodParticle: a particle under the connected body's Transform at the
+    /// joint's connected anchor, pointing from it to this limb. It is on neither BleedingParticles nor
+    /// BleedingPointCount, and keeps the prefab's DripSounds. `transform.GetComponent<CirculationBehaviour>()` is null
+    /// when that body is not a limb: the particle's Update then throws on every frame.
     pub fn create_dismemberment_blood_particle(&mut self, l: usize) {
         if !self.limbs[l].IsAndroid && self.limbs[l].HasJoint {
             let h = self.limbs[l].Joint.expect("MissingReferenceException: HasJoint without a Joint");
-            let parent = self.hinges[h].connected.and_then(|b| self.limb_of_body(b)).unwrap_or_else(|| unimplemented!("CirculationBehaviour.CreateDismembermentBloodParticle: a connectedBody that is not a limb"));
-            let pp = self.limbs[parent].PhysicalBehaviour;
+            let body = self.hinges[h].connected.unwrap_or_else(|| unimplemented!("CirculationBehaviour.CreateDismembermentBloodParticle: NullReferenceException of a hinge connected to the scene (connectedBody is null)"));
+            let parent = self.limb_of_body(body);
+            let pp = match parent {
+                Some(parent) => self.limbs[parent].PhysicalBehaviour,
+                None => self
+                    .physicals
+                    .iter()
+                    .position(|p| !p.destroyed && p.rigidbody.body == body)
+                    .unwrap_or_else(|| unimplemented!("CirculationBehaviour.CreateDismembermentBloodParticle: a connectedBody on a GameObject without a PhysicalBehaviour")),
+            };
             let anchor = self.hinges[h].connectedAnchor;
             let position = self.transform_point3(pp, [anchor[0], anchor[1], 0.0]);
             let (a, b) = (self.physicals[self.limbs[l].PhysicalBehaviour].transform.position, self.physicals[pp].transform.position);
             let up = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-            let particle = self.instantiate_bleeding_particle(parent, position, up);
+            let person = self.limbs[l].Person;
+            let particle = self.instantiate_bleeding_particle(pp, person, parent, position, up);
             // obj.AddComponent<Optout>()
             self.allocate_instance_id();
-            self.bleeding[particle].CirculationBehaviour = parent;
             self.bleeding[particle].PushingTo = Some(l);
             self.bleeding[particle].ShouldBecomeSmokeInWater = true;
             self.bleeding[particle].Laminarity = self.random.value();

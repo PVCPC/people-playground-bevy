@@ -510,6 +510,15 @@ impl Game {
                 self.syringe_lodged(s, stabbing.victim);
                 return;
             }
+            if r == "ExcaliburBehaviour" {
+                self.excalibur_lodged(stabbing.victim);
+                return;
+            }
+            if r.starts_with("Old") {
+                // OldSyringeBehaviour.Lodged adds its abstract PoisonSpreadBehaviour (GetPoisonType); the export has no
+                // concrete OldSyringeBehaviour subclass, so no object carries this receiver.
+                unimplemented!("OldSyringeBehaviour.Lodged: AddComponent of a PoisonSpreadBehaviour subclass (no subclass in the export)");
+            }
             unimplemented!("{}.Lodged", self.physicals[p].lodge_receiver);
         }
     }
@@ -566,9 +575,9 @@ impl Game {
 
     /// LimbBehaviour.IsWorldPointInVitalPart (mindistance = 4f / 35f)
     pub fn is_world_point_in_vital_part(&self, l: usize, world_point: [f32; 2]) -> bool {
-        let Some(bounds) = self.vital_parts.get(&l) else {
-            unimplemented!("LimbBehaviour.VitalParts: not loaded for this limb (Game.vital_parts)")
-        };
+        // `if (VitalParts == null) return false`: a prefab's array is never null (link.rs loads it, empty included); only a
+        // recorded state (dump.rs) can hold a null one, which has no entry.
+        let Some(bounds) = self.vital_parts.get(&l) else { return false };
         let mindistance = 4.0f32 / 35.0;
         let num = mindistance * mindistance;
         let vector = self.inverse_transform_point(self.limbs[l].PhysicalBehaviour, [world_point[0], world_point[1], 0.0]);

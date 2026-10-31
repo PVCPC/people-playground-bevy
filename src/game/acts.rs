@@ -42,6 +42,8 @@ script! {
     links {
         /// GetComponent<LimbBehaviour>() (the limb's index).
         limb: usize = 0,
+        /// spark: the GameObject each spark Instantiate copies.
+        spark: Option<crate::assets::db::ObjRef> = None,
     }
 }
 
@@ -50,7 +52,10 @@ impl Game {
     pub fn android_spark_fixed_update(&mut self, i: usize) {
         let l = self.android_sparks[i].limb;
         if self.limbs[l].Health < self.limbs[l].InitialHealth * 0.1 && self.random.value() > 0.9995 {
-            unimplemented!("AndroidSparkCreator.FixedUpdate: Instantiate(spark, transform.position, identity)");
+            let spark = self.android_sparks[i].spark.unwrap_or_else(|| unimplemented!("AndroidSparkCreator.FixedUpdate: Instantiate(null spark) (ArgumentException)"));
+            // Object.Instantiate(spark, transform.position, Quaternion.identity): the limb object's position.
+            let position = self.physicals[self.limbs[l].PhysicalBehaviour].transform.position;
+            self.spawn_prefab(spark, position);
         }
     }
 }
@@ -74,6 +79,8 @@ pub enum ActTarget {
     Fire(usize),
     /// PhysicalBehaviour.ForceSendUse (`Game::physicals`)
     ForceSendUse(usize),
+    /// A CarBehaviour call (SetHealth or set_enabled(false)) on the car with component id `.0` (car.rs car_invoke).
+    Car(i32, super::car::CarCall),
 }
 
 script! {
@@ -107,6 +114,10 @@ pub enum CollisionScript {
     Torch(usize),
     /// TelevisionBehaviour: OnCollisionEnter2D (television.rs).
     Television(usize),
+    /// WrenchBehaviour: OnCollisionEnter2D only (wrench.rs).
+    Wrench(usize),
+    /// NoCollideWithBodyPart: OnCollisionEnter2D only (no_collide.rs).
+    NoCollideBodyPart(usize),
     Translated(super::translated::TBehaviour),
 }
 
@@ -123,6 +134,8 @@ impl Game {
             CollisionScript::Balloon(_) => {}
             CollisionScript::Torch(t) => self.torch_on_collision_enter(t, c),
             CollisionScript::Television(t) => self.television_on_collision_enter(t, c),
+            CollisionScript::Wrench(w) => self.wrench_on_collision_enter(w, c),
+            CollisionScript::NoCollideBodyPart(n) => self.no_collide_body_part_enter(n, c),
             CollisionScript::Translated(t) => self.tr_on_collision_enter2d(t, c),
         }
     }
@@ -169,6 +182,7 @@ impl Game {
         match t {
             ActTarget::Activate(e) => self.explosive_activate(e),
             ActTarget::Shoot(f) => self.firearm_shoot(f),
+            ActTarget::Car(id, c) => self.car_invoke(id, c),
             ActTarget::Launch(l) => self.launcher_launch(l),
             ActTarget::ForceBreak(m) => self.machinery_force_break(m),
             ActTarget::Blast(b) => self.blaster_shoot(b),
@@ -178,15 +192,15 @@ impl Game {
         }
     }
 
-    /// ActOnShot.Shot. Shot.cartridge is not passed to SendMessage("Shot") here: a CartridgeDamageThreshold above 0
-    /// would need it (an absent or non-negative Damage passes a threshold of 0).
-    pub(super) fn act_on_shot_shot(&mut self, a: usize, damage: f32) {
+    /// ActOnShot.Shot: `base.enabled && damage >= ShotDamageThreshold && (!cartridge || cartridge.Damage >=
+    /// CartridgeDamageThreshold) && Random.value <= Chance`, then the Actions.
+    pub(super) fn act_on_shot_shot(&mut self, a: usize, damage: f32, cartridge: Option<super::ballistics::Cartridge>) {
         let s = &self.act_on_shots[a];
         if !s.enabled || !(damage >= s.ShotDamageThreshold) {
             return;
         }
-        if s.CartridgeDamageThreshold > 0.0 {
-            unimplemented!("ActOnShot.Shot: a CartridgeDamageThreshold above 0 (Shot.cartridge is not carried)");
+        if !cartridge.is_none_or(|c| c.Damage >= s.CartridgeDamageThreshold) {
+            return;
         }
         if self.random.value() <= self.act_on_shots[a].Chance {
             for t in self.act_on_shots[a].targets.clone() {
@@ -359,7 +373,7 @@ impl Game {
     }
 
     /// Object.Destroy(FixedJoint2D): DestroyObjectDelayed queues it at min(fixedTimeAsDouble, the frame's time).
-    fn destroy_joint_delayed(&mut self, f: usize) {
+    pub(super) fn destroy_joint_delayed(&mut self, f: usize) {
         let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
         self.joint_destroys.push((at, f));
     }

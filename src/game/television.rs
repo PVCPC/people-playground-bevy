@@ -38,6 +38,11 @@ impl Game {
         self.random.value();
     }
 
+    /// TelevisionBehaviour.Repair: Broken = false; UpdateActivation is presentation.
+    pub fn television_repair(&mut self, t: usize) {
+        self.televisions[t].Broken = false;
+    }
+
     /// TelevisionBehaviour.Use: `if (!Broken)` Activated flips (UpdateActivation is presentation).
     pub fn television_use(&mut self, t: usize) {
         if !self.televisions[t].Broken {

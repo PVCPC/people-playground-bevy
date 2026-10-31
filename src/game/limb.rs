@@ -72,6 +72,9 @@ script! {
         RegenerateBurnProgressSpeed: f32 = 1.0,
     }
     links {
+        /// ShatteredObjectGenerators (the ShatteredObjectSpriteInitialiser): its Bone, Flesh and Skin generators as
+        /// `Game::shatter_generators` indices; None without the component.
+        ShatteredObjectGenerators: Option<[Option<usize>; 3]> = None,
         name: String = String::new(),
         id: i32 = 0,
         PhysicalBehaviour: usize = 0,
@@ -445,7 +448,12 @@ impl Game {
             self.break_bone_internal(l);
         }
         if self.limbs[l].IsDismembered {
-            unimplemented!("LimbBehaviour.SynchroniseDismemberment from Start: Destroy(Joint) of a dismembered prefab limb");
+            // SynchroniseDismemberment(): Destroy(Joint) if (bool)Joint, then the shared tail.
+            if let Some(h) = self.limbs[l].Joint.filter(|&h| !self.hinges[h].destroyed) {
+                let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+                self.hinges[h].destroy_at.get_or_insert(at);
+            }
+            self.synchronise_dismemberment(l, None);
         }
         if self.limbs[l].HasJoint {
             let h = self.limbs[l].Joint.unwrap();
@@ -831,8 +839,7 @@ impl Game {
         }
         if let Some(g) = self.limbs[l].GripBehaviour {
             if self.grips[g].isHolding && self.prefs.DropOnDeath && !self.limb_is_considered_alive(l) {
-                // ponytail: GripBehaviour.DropObject arrives with holding.
-                unimplemented!("GripBehaviour.DropObject");
+                self.grip_drop(g);
             }
         }
         let p = self.limbs[l].PhysicalBehaviour;
@@ -1089,9 +1096,53 @@ impl Game {
     /// LimbBehaviour.ShatterProcedurally(ShatterFlags.All): Random.value is drawn first.
     fn limb_shatter_procedurally(&mut self, l: usize) {
         let v = self.random.value();
-        if !(self.limbs[l].ShatteredObjectChance < v) && self.prefs.ProceduralFragments {
-            unimplemented!("LimbBehaviour.ShatterProcedurally: ShatteredObjectGenerator.Generate (procedural fragments)");
+        let Some(gens) = self.limbs[l].ShatteredObjectGenerators else { return };
+        if self.limbs[l].ShatteredObjectChance < v || !self.prefs.ProceduralFragments {
+            return;
         }
+        let p = self.limbs[l].PhysicalBehaviour;
+        let brightness = mathf::min(1.0 - self.physicals[p].BurnProgress, 1.0 - self.skins[l].rottenProgress * 0.5);
+        let burn = self.physicals[p].BurnProgress;
+        let acid = self.skins[l].acidProgress;
+        // ShatterFlags.Bone/Flesh/Skin = 1/2/4; All & ~CurrentlyShattered.
+        let flags = 7 & !self.limbs[l].CurrentlyShattered;
+        let visible = [true, acid < 0.85 && burn < 0.78, acid < 0.62 && burn < 0.45];
+        for (k, flag) in [1u8, 2, 4].into_iter().enumerate() {
+            let Some(gi) = gens[k] else { continue };
+            if flags & flag == 0 || !visible[k] {
+                continue;
+            }
+            let r = self.random.range(0.0, 0.1);
+            self.shatter_generators[gi].g.ConnectToRange += r;
+            self.shatter_generators[gi].g.Brightness = brightness;
+            self.limb_generate_gore_bits(l, gi);
+            self.limbs[l].CurrentlyShattered |= flag;
+        }
+    }
+
+    /// `PrepareGoreBits(array, generator.Generate(base.transform, PhysicalBehaviour.rigidbody, array))`.
+    fn limb_generate_gore_bits(&mut self, l: usize, gi: usize) {
+        let mut st = std::mem::take(&mut self.shatter);
+        let mut g = self.shatter_generators[gi].g.clone();
+        // The shards' PhysicalBehaviour.Properties asset joins the arena when first used.
+        let props = self.shatter_generators[gi].properties.clone();
+        g.PartsPhysicalProperties = match self.properties.iter().position(|q| q.name == props.name) {
+            Some(i) => i,
+            None => {
+                self.properties.push(props);
+                self.properties.len() - 1
+            }
+        };
+        // spawn_shard reaches the one remaining gap before anything below the Generate call runs.
+        let p = self.limbs[l].PhysicalBehaviour;
+        let t = self.physicals[p].transform;
+        let to_replace = super::shatter::ToReplace { position: t.position, rotation: t.rotation, lossy_scale: self.lossy_scale(p) };
+        let rb = &self.physicals[p].rigidbody;
+        let source = super::shatter::ShatterSource { name: self.physicals[p].name.clone(), velocity: rb.velocity(&self.world), angular_velocity: rb.angular_velocity(&self.world) };
+        let mut buffer = vec![None; g.PartCount.max(0) as usize];
+        let _ = self.shattered_object_generate(&mut st, &g, Some(to_replace), Some(&source), Some(&mut buffer));
+        self.shatter = st;
+        unimplemented!("LimbBehaviour.PrepareGoreBits: DestroyWith, DisintegrationCounterBehaviour.RegisterPseudoChild, PseudoBloodImpactHelper on limb {l}");
     }
 
     /// LimbBehaviour.Crush
@@ -1133,6 +1184,7 @@ impl Game {
                     Size: 0.3,
                     DestroyWhenNoParticles: true,
                     TriggerOnCollide: false,
+                    on_collide_tank: None,
                     Decal: "Sparse_blood".into(),
                     particles: Default::default(),
                     parent_position: position,
@@ -1142,6 +1194,7 @@ impl Game {
                     CollisionLayers: 10752,
                     attached: None,
                     parent_person: None,
+                    id: 0,
                 });
                 self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
                 let s = self.splats.len() - 1;
@@ -1238,7 +1291,7 @@ impl Game {
 
     /// LimbBehaviour.SynchroniseDismemberment(connectedLimb) (IsDismembered is true here)
     fn synchronise_dismemberment(&mut self, l: usize, connected: Option<usize>) {
-        // Destroy(Joint): the joint is already being destroyed by the break.
+        // Destroy(Joint): the break already destroys the joint; Start queues it before calling this.
         self.limbs[l].HasJoint = false;
         let remove_first = |v: &mut Vec<usize>, x: usize| {
             if let Some(i) = v.iter().position(|&y| y == x) {
@@ -1434,10 +1487,13 @@ impl Game {
         }
     }
 
-    /// DelayedCallManager::Update (180634dd0): the gore strings' due callbacks in time order. The fixed-rate
+    /// DelayedCallManager::Update (180634dd0): the callbacks due when the pass starts, in time order. The fixed-rate
     /// pass (after the physics step) runs only the delayed Destroys; the dynamic one (after Update) also the
-    /// SetBreakForce coroutines.
-    // ponytail: callbacks queued during this pass wait for the next (timeStamp); nothing here queues any.
+    /// SetBreakForce coroutines. A callback queued during the pass is not in this snapshot, so it waits for the next
+    /// pass ("not added during this very pass"). A callback that another one cancelled or re-armed earlier in the pass
+    /// is no longer pending, so it is skipped (the field-backed kinds below). Not rechecked: the tool drags, the object
+    /// and component destroys, the attachment and joint destroys and the coroutine resumes (their owners' cancellation
+    /// within one pass is not modelled here).
     pub fn gore_string_delayed_calls(&mut self, dynamic: bool) {
         let now = self.time.timeAsDouble;
         // (time, kind: 0 break force, 1 gore string destroy, 2 drag joint destroy, 3 person destroy, limb/person)
@@ -1457,6 +1513,12 @@ impl Game {
         due.extend(self.frozen_in_ice_due_destroys(now).into_iter().map(|(t, i)| (t, 4, i)));
         due.extend(self.object_due_destroys(now).into_iter().map(|(t, id)| (t, 5, id as usize)));
         due.extend(self.joint_due_destroys(now).into_iter().map(|(t, f)| (t, 7, f)));
+        for h in 0..self.hinges.len() {
+            if let Some(t) = self.hinges[h].destroy_at.filter(|&t| t <= now) {
+                due.push((t, 10, h));
+            }
+        }
+        due.extend(self.attachment_joint_destroys.iter().filter(|&&(at, _)| at <= now).map(|&(t, j)| (t, 9, j)));
         due.extend(self.component_destroys.iter().filter(|&&(at, _)| at <= now).map(|&(t, id)| (t, 8, id as usize)));
         if dynamic {
             let frame = self.time.frameCount as i64;
@@ -1464,12 +1526,28 @@ impl Game {
         }
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
+            // Still pending: the field that armed it still holds this due time.
+            let pending = match kind {
+                0 => self.limbs[l].gore.break_at == Some(t),
+                1 => self.limbs[l].gore.destroy_at == Some(t),
+                3 => self.people[l].destroy_at == Some(t),
+                4 => self.frozen_in_ice[l].destroy_at == Some(t),
+                10 => self.hinges[l].destroy_at == Some(t),
+                _ => true,
+            };
+            if !pending {
+                continue;
+            }
             if kind == 6 {
                 // Gone if its GameObject was destroyed or deactivated earlier in this pass.
                 if let Some(i) = self.coroutines.iter().position(|c| c.seq == l as u64) {
                     let c = self.coroutines.remove(i);
                     self.resume_coroutine(c);
                 }
+            } else if kind == 10 {
+                self.run_hinge_destroy(l);
+            } else if kind == 9 {
+                self.attachment_run_joint_destroy(l);
             } else if kind == 8 {
                 self.tr_run_component_destroy(l as i32);
             } else if kind == 7 {

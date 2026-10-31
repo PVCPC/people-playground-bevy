@@ -487,33 +487,59 @@ impl Game {
         }
     }
 
-    fn broadcast_use(&mut self, p: usize) {
-        let id = self.physicals[p].id;
-        let receivers: Vec<UseReceiver> = self.with_component_instance(id, |g, inst, start| {
-            let mut out = Vec::new();
-            for x in std::iter::once(start).chain(inst.descendants(start)) {
-                if !inst.objects[x].active {
+    /// The Use receivers BroadcastMessage("Use") reaches from `start` of `inst`: each active object's components in order, its
+    /// children, then the clones parented under it (the last of its children), such as an attachment re-parented below a firearm.
+    fn use_receivers_below(&mut self, inst: &super::spawn::Instance, start: usize) -> Vec<UseReceiver> {
+        let mut out = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        for x in std::iter::once(start).chain(inst.descendants(start)) {
+            while let Some(&top) = open.last() {
+                if inst.descendants(top).contains(&x) {
+                    break;
+                }
+                open.pop();
+                self.attached_use_receivers(inst.objects[top].components[0], &mut out);
+            }
+            open.push(x);
+            if !inst.objects[x].active {
+                continue;
+            }
+            for (k, (_, c)) in inst.prefab.objects[x].components.iter().enumerate() {
+                let crate::assets::db::Component::Script { class, .. } = c else { continue };
+                // PhysicalBehaviour.Use only invokes ModdingApi.Events.OnItemActivated (no mods).
+                if !USE_RECEIVERS.contains(&class.as_str()) || class == "PhysicalBehaviour" {
                     continue;
                 }
-                for (k, (_, c)) in inst.prefab.objects[x].components.iter().enumerate() {
-                    let crate::assets::db::Component::Script { class, .. } = c else { continue };
-                    // PhysicalBehaviour.Use only invokes ModdingApi.Events.OnItemActivated (no mods).
-                    if !USE_RECEIVERS.contains(&class.as_str()) || class == "PhysicalBehaviour" {
-                        continue;
-                    }
-                    if class == "UseEventTrigger" {
-                        out.push(UseReceiver::Event(inst.objects[x].components[k]));
-                        continue;
-                    }
-                    match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_))))=> out.push(UseReceiver::Behaviour(b)),
-                        Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
-                        _ => unimplemented!("{class}.Use"),
-                    }
+                if class == "UseEventTrigger" {
+                    out.push(UseReceiver::Event(inst.objects[x].components[k]));
+                    continue;
+                }
+                match self.behaviour_of.get(&inst.objects[x].components[k]) {
+                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
+                    Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
+                    _ => unimplemented!("{class}.Use"),
                 }
             }
-            out
-        });
+        }
+        while let Some(top) = open.pop() {
+            self.attached_use_receivers(inst.objects[top].components[0], &mut out);
+        }
+        out
+    }
+
+    /// The Use receivers of the clones parented under the Transform `key` (Instantiate(.., parent), or a re-parented body).
+    fn attached_use_receivers(&mut self, key: i32, out: &mut Vec<UseReceiver>) {
+        for c in self.attached_clones.get(&key).cloned().unwrap_or_default() {
+            if !self.destroyed_components.contains(&c.id) {
+                let below = self.with_component_instance(c.id, |g, clone, o| g.use_receivers_below(clone, o));
+                out.extend(below);
+            }
+        }
+    }
+
+    fn broadcast_use(&mut self, p: usize) {
+        let id = self.physicals[p].id;
+        let receivers: Vec<UseReceiver> = self.with_component_instance(id, |g, inst, start| g.use_receivers_below(inst, start));
         for b in receivers {
             let b = match b {
                 UseReceiver::Event(id) => {
@@ -524,9 +550,18 @@ impl Game {
             };
             match b {
                 Behaviour::Firearm(f) => self.firearm_use(f),
+                Behaviour::Grip(g) => self.grip_use(g),
                 Behaviour::Explosive(e) => self.explosive_use(e),
                 Behaviour::Launcher(l) => self.launcher_use(l),
                 Behaviour::Bell(b) => self.bell_use(b),
+                Behaviour::UniversalBell(b) => self.universal_bell_use(b),
+                // A direct activation: channel 0.
+                Behaviour::Valve(v) => self.valve_use(v, 0),
+                Behaviour::TimedGate(g) => self.timed_gate_use(g),
+                Behaviour::HeartMonitor(h) => self.heart_monitor_use(h),
+                Behaviour::Excalibur(e) => self.excalibur_use(e),
+                Behaviour::BloodTank(t) => self.blood_tank_use(t, 0),
+                Behaviour::ArchelixCaster(c) => self.archelix_caster_use(c),
                 Behaviour::MachineGun(m) => self.machine_gun_use(m),
                 Behaviour::Minigun(m) => self.minigun_use(m),
                 // A direct activation: new ActivationPropagation(direct: true, 0, ..).
@@ -551,11 +586,12 @@ impl Game {
                 Behaviour::Display(d) => self.display_use(d),
                 Behaviour::Laser(l) => self.laser_use(l),
                 Behaviour::Television(t) => self.television_use(t),
-                Behaviour::FirearmAttachment(a) | Behaviour::BatteryAttachment(a) => self.firearm_attachment_use(a),
+                Behaviour::FirearmAttachment(a) | Behaviour::BatteryAttachment(a) => self.firearm_attachment_use(a, p),
                 Behaviour::InfraredThermometer(i) => self.infrared_use(i),
                 Behaviour::Blaster(i) => self.blaster_use(i),
                 Behaviour::Beamformer(i) => self.beamformer_use(i),
                 Behaviour::Scifi40(i) => self.scifi40_use(i),
+                Behaviour::HealthGun(i) | Behaviour::FreezeGun(i) => self.effect_gun_use(i),
                 // A direct activation: ActivationPropagation.Direct.
                 Behaviour::SignalConverter(i) => self.signal_converter_use(i, true, 0),
                 _ => unreachable!(),
@@ -876,7 +912,7 @@ impl Game {
     }
 
     /// transform.root.gameObject.name of a physical object whose root Transform is `root`.
-    fn object_name(&mut self, p: usize, root: i32) -> String {
+    pub(super) fn object_name(&mut self, p: usize, root: i32) -> String {
         if let Some(n) = self.object_names.get(&root) {
             return n.clone();
         }

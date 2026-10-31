@@ -239,7 +239,7 @@ impl Game {
         if let Some(l) = self.physical_of_collider(hit.collider).and_then(|p| self.limbs.iter().position(|l| l.PhysicalBehaviour == p)) {
             self.skin_add_damage_point(l, super::misc::damage_type::BURN, point, target * 0.01);
         }
-        self.send_shot(hit.collider, physical, normal, point, damage, false);
+        self.send_shot(hit.collider, physical, normal, point, damage, false, None);
         if let Some(ty) = impact_decal {
             // calculateDecalSize(damage): Max(Pow(damage, 3.35) / Pow(10, 8), 0.15) * DecalSizeMultiplier
             let size = mathf::max(mathf::pow(damage, 3.35) / mathf::pow(10.0, 8.0), 0.15) * decal_multiplier;

@@ -117,16 +117,22 @@ pub fn is_syringe_liquid(class: &str) -> bool {
 impl Game {
     /// Unity's `(bool)container`: the component is not destroyed.
     fn container_alive(&self, o: Owner) -> bool {
-        let id = match o {
+        !self.destroyed_components.contains(&self.container_id(o))
+    }
+
+    /// The BloodContainer component's instance id.
+    pub(super) fn container_id(&self, o: Owner) -> i32 {
+        match o {
             Owner::Circulation(l) => self.limbs[l].id,
             Owner::Flask(f) => self.flasks[f].id,
             Owner::Syringe(s) => self.syringes[s].id,
-        };
-        !self.destroyed_components.contains(&id)
+            Owner::Valve(v) => self.valves[v].id,
+            Owner::BloodTank(t) => self.blood_tanks[t].id,
+        }
     }
 
     /// physical.TryGetComponent<BloodContainer>(): a limb's CirculationBehaviour, a flask or a syringe.
-    fn physical_container(&mut self, q: usize) -> Option<Owner> {
+    pub(super) fn physical_container(&mut self, q: usize) -> Option<Owner> {
         if let Some(l) = self.limbs.iter().position(|x| x.PhysicalBehaviour == q) {
             return Some(Owner::Circulation(l));
         }
@@ -135,6 +141,10 @@ impl Game {
         }
         if let Some(s) = self.syringes.iter().position(|x| x.Phys == q) {
             return Some(Owner::Syringe(s));
+        }
+        // BloodTankBehaviour (blood_tank.rs).
+        if let Some(t) = self.blood_tanks.iter().position(|x| x.physical == q) {
+            return Some(Owner::BloodTank(t));
         }
         let class = self.with_component_instance(self.physicals[q].id, |_, inst, o| {
             inst.prefab.objects[o].components.iter().find_map(|(_, c)| match c {
@@ -398,6 +408,77 @@ impl Game {
             "UltraStrengthSerumLiquid" => self.ultra_strength_on_enter_limb(l),
             "MendingSerum" => self.mending_serum_on_enter_limb(l),
             "PainKillerLiquid" => self.kill_pain(liquid, l),
+            _ if self.limbs[l].SpeciesIdentity == "Android" => {}
+            "MassManipulationPoison" => {
+                let rb = self.physicals[self.limbs[l].PhysicalBehaviour].rigidbody.clone();
+                if rb.detached.is_some() {
+                    unimplemented!("MassManipulationPoison: Rigidbody2D.mass on a body Cleanup destroyed");
+                }
+                let mass = rb.mass(&self.world) * self.random.range_int(-1, 1) as f32;
+                self.body_set_mass(rb.body, mass);
+                let scale = rb.gravity_scale(&self.world) * self.random.range_int(-1, 1) as f32;
+                rb.set_gravity_scale(&mut self.world, scale);
+            }
+            "ExplosionPoison" => {
+                let position = self.physicals[self.limbs[l].PhysicalBehaviour].transform.position;
+                let under_water = self.is_point_under_water([position[0], position[1]]);
+                let big = self.random.value() > 0.9;
+                let dismember = self.random.value();
+                self.create_explosion_with_water(
+                    under_water,
+                    super::explosion::ExplosionParameters {
+                        FragmentationRayCount: 32,
+                        Position: position,
+                        Range: 9.0,
+                        FragmentForce: 25.0,
+                        CreateParticlesAndSound: true,
+                        EffectSize: if big { super::explosion::EffectSize::Large } else { super::explosion::EffectSize::Medium },
+                        DismemberChance: dismember,
+                        BallisticShrapnelCount: 0,
+                    },
+                );
+            }
+            "SizeManipulationPoison" => {
+                let p = self.limbs[l].PhysicalBehaviour;
+                let x = self.random.range(0.952381, 1.05) * self.physicals[p].transform.localScale[0];
+                let y = self.random.range(0.952381, 1.05) * self.physicals[p].transform.localScale[1];
+                // new Vector3(x, y): z is 0.
+                self.physical_set_local_scale(p, [x, y, 0.0]);
+            }
+            "CirculationPoison" => {
+                let r = self.random.range_int(-1, 1).abs() as f32;
+                self.circulations[l].BleedingRate *= r;
+                let r = self.random.range_int(-1, 1) as f32;
+                self.circulations[l].BloodLossRateMultiplier += r * 0.2;
+                let r = self.random.range_int(-1, 1) as f32;
+                self.circulations[l].IsPump ^= r > 0.9;
+                let r = self.random.range_int(-1, 1) as f32;
+                self.circulations[l].WasInitiallyPumping ^= r > 0.7;
+                let r = self.random.range_int(0, 8) as f32;
+                self.circulations[l].InternalBleedingIntensity *= r;
+                let r = (self.random.range_int(-1, 1) * 8) as f32;
+                self.limbs[l].Vitality *= r;
+                let r = (self.random.range_int(-1, 1) * 8) as f32;
+                self.limbs[l].ImpactPainMultiplier *= r;
+                let r = self.random.range_int(-1, 1) as f32;
+                let acid = self.skins[l].acidProgress + r * 0.05;
+                self.skins[l].set_acid(acid);
+                let r = self.random.range_int(-1, 1) as f32;
+                self.skins[l].intensityMultiplier += r * 0.5;
+                let r = self.random.range_int(-1, 1) as f32;
+                let rotten = self.skins[l].rottenProgress + r * 0.05;
+                self.skins[l].set_rotten(rotten);
+                // (double)Random.value > 0.5
+                let r = self.random.value();
+                self.limbs[l].HasLungs ^= d(r).0 > 0.5;
+                let r = self.random.value();
+                self.limbs[l].LungsPunctured ^= d(r).0 > 0.5;
+            }
+            "TissueDeconstructionAgent" => {
+                if self.random.value() > 0.8 {
+                    self.limb_slice(l);
+                }
+            }
             c => unimplemented!("{c}.OnEnterLimb"),
         }
     }
@@ -454,7 +535,7 @@ impl Game {
     }
 
     /// The limb's object: its GameObject id and its CirculationBehaviour's instance id (StartCoroutine's owner).
-    fn limb_object(&mut self, l: usize) -> (i32, i32) {
+    pub(super) fn limb_object(&mut self, l: usize) -> (i32, i32) {
         self.with_component_instance(self.limbs[l].id, |_, inst, o| {
             let k = inst.prefab.objects[o].components.iter().position(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "CirculationBehaviour"));
             (inst.objects[o].game_object, inst.objects[o].components[k.expect("a limb's CirculationBehaviour")])

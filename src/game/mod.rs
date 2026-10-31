@@ -22,6 +22,7 @@ pub mod airfoil;
 pub mod stunner;
 pub mod blaster;
 pub mod scifi;
+pub mod effect_gun;
 pub mod soap;
 pub mod power_hammer;
 pub mod balloon;
@@ -29,7 +30,15 @@ pub mod metronome;
 pub mod button;
 pub mod laser;
 pub mod attachment;
+pub mod reparent;
 pub mod television;
+pub mod wrench;
+pub mod valve;
+pub mod no_collide;
+pub mod heart_monitor;
+pub mod excalibur;
+pub mod blood_tank;
+pub mod timed_gate;
 pub mod display;
 pub mod activation_toggle;
 pub mod gauge;
@@ -55,7 +64,17 @@ pub mod bell;
 pub mod machinegun;
 pub mod minigun;
 pub mod accelerator;
+pub mod archelix;
+pub mod pool;
 pub mod bolt;
+pub mod universal_bell;
+pub mod mirror;
+pub mod foliage;
+pub mod breakjoint;
+pub mod shake;
+pub mod gorse;
+pub mod glow;
+pub mod liquid_spread;
 pub mod lightning;
 pub mod translated;
 pub mod limb;
@@ -76,6 +95,7 @@ pub mod tool;
 pub mod undo;
 pub mod clear;
 pub mod gear;
+pub mod grip;
 pub mod water;
 
 use crate::b2::{
@@ -733,6 +753,25 @@ impl Rigidbody {
     pub fn gravity_scale(&self, w: &World) -> f32 {
         if self.detached.is_some() { self.detached_props[2] } else { w.body(self.body).gravity_scale }
     }
+    /// Rigidbody2D.gravityScale = v (Rigidbody2D::SetGravityScale 180c23620): clamped to ±1e6; a change of more than
+    /// 1e-6 reaches the body, and a nonzero scale then wakes it.
+    pub fn set_gravity_scale(&self, w: &mut World, v: f32) {
+        let v = if -1_000_000.0 > v { -1_000_000.0 } else if 1_000_000.0 < v { 1_000_000.0 } else { v };
+        if self.detached.is_some() {
+            unimplemented!("Rigidbody2D.gravityScale on a body Cleanup destroyed");
+        }
+        let old = w.body(self.body).gravity_scale;
+        if (v - old).abs() <= 1e-6 {
+            if v != old {
+                unimplemented!("Rigidbody2D.gravityScale: m_GravityScale apart from the body's (a change within 1e-6)");
+            }
+            return;
+        }
+        w.body_mut(self.body).gravity_scale = v;
+        if v != 0.0 {
+            wake_for_joint(w, self.body);
+        }
+    }
     pub fn mass(&self, w: &World) -> f32 {
         self.detached.unwrap_or_else(|| w.body(self.body).rigidbody).mass
     }
@@ -845,6 +884,8 @@ pub struct Hinge {
     pub enabled: bool,
     /// The component was destroyed (a broken joint).
     pub destroyed: bool,
+    /// A pending Object.Destroy(Joint): the DelayedCallManager time it runs at.
+    pub destroy_at: Option<f64>,
 }
 
 /// b2Body::SetAwake(true) as the joint setters inline it: the sleep timer always restarts.
@@ -1021,8 +1062,10 @@ pub struct Renderer {
     pub id: i32,
     /// flipX/flipY, drawMode, size.
     pub draw: ([bool; 2], i32, [f32; 2]),
-    /// GameObject.activeInHierarchy and Renderer.enabled at instantiation.
+    /// GameObject.activeInHierarchy and Renderer.enabled (SetActive keeps it current).
     pub visible: bool,
+    /// SpriteRenderer::GetSpriteBounds: the local bounds (center, extents).
+    pub bounds: ([f32; 3], [f32; 3]),
 }
 
 /// The object owning a Rigidbody2D: a physical, or a `node_rigidbodies` entry.
@@ -1101,6 +1144,15 @@ pub enum Behaviour {
     Minigun(usize),
     Accelerator(usize),
     AcceleratorBolt(usize),
+    ArchelixCaster(usize),
+    ArchelixBolt(usize),
+    UniversalBell(usize),
+    Valve(usize),
+    TimedGate(usize),
+    HeartMonitor(usize),
+    Excalibur(usize),
+    BloodTank(usize),
+    ToggleableMirror(usize),
     PointToVelocity(usize),
     AndroidSpark(usize),
     Car(usize),
@@ -1123,6 +1175,9 @@ pub enum Behaviour {
     Piston(usize),
     Flamethrower(usize),
     Rocket(usize),
+    BreakJointOnBurn(usize),
+    SoundOnShake(usize),
+    GorseDrooling(usize),
     Airfoil(usize),
     Stunner(usize),
     Balloon(usize),
@@ -1145,6 +1200,8 @@ pub enum Behaviour {
     Blasterbolt(usize),
     Beamformer(usize),
     Scifi40(usize),
+    HealthGun(usize),
+    FreezeGun(usize),
     Translated(translated::TBehaviour),
 }
 
@@ -1187,6 +1244,9 @@ impl Behaviour {
             Behaviour::Piston(_) => "PistonBehaviour",
             Behaviour::Flamethrower(_) => "FlamethrowerBehaviour",
             Behaviour::Rocket(_) => "LaunchedRocketBehaviour",
+            Behaviour::BreakJointOnBurn(_) => "BreakJointOnBurnBehaviour",
+            Behaviour::SoundOnShake(_) => "SoundOnShakeBehaviour",
+            Behaviour::GorseDrooling(_) => "GorseDroolingBehaviour",
             Behaviour::Airfoil(_) => "AirfoilBehaviour",
             Behaviour::Stunner(_) => "StunnerBehaviour",
             Behaviour::Balloon(_) => "BalloonBehaviour",
@@ -1206,6 +1266,8 @@ impl Behaviour {
             Behaviour::Blasterbolt(_) => "BlasterboltBehaviour",
             Behaviour::Beamformer(_) => "BeamformerBehaviour",
             Behaviour::Scifi40(_) => "GenericScifiWeapon40Behaviour",
+            Behaviour::HealthGun(_) => "HealthGunBehaviour",
+            Behaviour::FreezeGun(_) => "FreezeGunBehaviour",
             Behaviour::SignalConverter(_) => "SignalConverterBehaviour",
             // Every subclass has the lifecycle of SyringeBehaviour.
             Behaviour::Syringe(_) => "SyringeBehaviour",
@@ -1218,6 +1280,15 @@ impl Behaviour {
             Behaviour::Minigun(_) => "MinigunBehaviour",
             Behaviour::Accelerator(_) => "AcceleratorGunBehaviour",
             Behaviour::AcceleratorBolt(_) => "AcceleratorBoltBehaviour",
+            Behaviour::ArchelixCaster(_) => "ArchelixCasterBehaviour",
+            Behaviour::ArchelixBolt(_) => "ArchelixCasterBoltBehaviour",
+            Behaviour::UniversalBell(_) => "UniversalBellBehaviour",
+            Behaviour::Valve(_) => "ValveBehaviour",
+            Behaviour::TimedGate(_) => "TimedGateBehaviour",
+            Behaviour::HeartMonitor(_) => "HeartMonitorBehaviour",
+            Behaviour::Excalibur(_) => "ExcaliburBehaviour",
+            Behaviour::BloodTank(_) => "BloodTankBehaviour",
+            Behaviour::ToggleableMirror(_) => "ToggleableMirrorBehaviour",
             Behaviour::Translated(t) => t.class(),
         }
     }
@@ -1318,6 +1389,22 @@ pub struct Game {
     pub miniguns: Vec<minigun::Minigun>,
     pub accelerators: Vec<accelerator::Accelerator>,
     pub accelerator_bolts: Vec<accelerator::AcceleratorBolt>,
+    pub archelix_casters: Vec<archelix::ArchelixCaster>,
+    pub archelix_bolts: Vec<archelix::ArchelixBolt>,
+    /// PoolGenerator's pools of script-bearing prefabs (pool.rs).
+    pub generic_pools: Vec<pool::PrefabPool>,
+    pub universal_bells: Vec<universal_bell::UniversalBell>,
+    pub toggleable_mirrors: Vec<mirror::ToggleableMirror>,
+    pub foliages: Vec<foliage::Foliage>,
+    pub break_joint_on_burns: Vec<breakjoint::BreakJointOnBurn>,
+    pub break_joint_on_shots: Vec<breakjoint::BreakJointOnShot>,
+    pub sound_on_shakes: Vec<shake::SoundOnShake>,
+    pub gorse_droolings: Vec<gorse::GorseDrooling>,
+    pub gorse_projectiles: Vec<gorse::GorseProjectile>,
+    pub glows: Vec<glow::GlowInTheDark>,
+    pub liquid_spreads: Vec<liquid_spread::LiquidSpreadAoE>,
+    /// The fixedTime at which the last one-shot of each AudioSource (component id) ends, for AudioSource.isPlaying.
+    pub audio_playing_until: HashMap<i32, f64>,
     /// The translated classes' components (tools/translator).
     pub tr: translated::Translated,
     pub explosives: Vec<explosion::Explosive>,
@@ -1363,6 +1450,13 @@ pub struct Game {
     /// FirearmAttachmentPointBehaviour components.
     pub attachment_points: Vec<attachment::AttachmentPoint>,
     pub televisions: Vec<television::Television>,
+    pub wrenches: Vec<wrench::Wrench>,
+    pub valves: Vec<valve::Valve>,
+    pub no_collide_body_parts: Vec<no_collide::NoCollideWithBodyPart>,
+    pub timed_gates: Vec<timed_gate::TimedGate>,
+    pub heart_monitors: Vec<heart_monitor::HeartMonitor>,
+    pub excaliburs: Vec<excalibur::Excalibur>,
+    pub blood_tanks: Vec<blood_tank::BloodTank>,
     pub displays: Vec<display::Display>,
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,
@@ -1370,6 +1464,7 @@ pub struct Game {
     pub blasterbolts: Vec<blaster::Blasterbolt>,
     pub beamformers: Vec<scifi::Beamformer>,
     pub scifi40s: Vec<scifi::Scifi40>,
+    pub effect_guns: Vec<effect_gun::EffectGun>,
     pub act_on_shots: Vec<acts::ActOnShot>,
     pub signal_converters: Vec<signal_converter::SignalConverter>,
     pub syringe_explosions: Vec<syringe::SyringeExplosion>,
@@ -1415,6 +1510,10 @@ pub struct Game {
     pub dwacds: Vec<destroyable::DestroyWhenAllChildrenDestroyed>,
     /// level1's DistantSoundBehaviour clip counts, by SoundType - 1 (SmallExplosion .. LargeFirearm).
     pub distant_sounds: [usize; 6],
+    /// ProceduralShatterMaterialPool / ShatteredColliderShapeCache statics.
+    pub shatter: shatter::ShatterState,
+    /// The ShatteredObjectGenerators of the loaded Persons' limbs.
+    pub shatter_generators: Vec<shatter::GeneratorSource>,
     /// Coroutines waiting in WaitForSeconds, resumed by the dynamic delayed-call pass.
     pub coroutines: Vec<destroyable::Coroutine>,
     pub do_at_time_onces: Vec<destroyable::DoAtTimeOnce>,
@@ -1426,6 +1525,8 @@ pub struct Game {
     pub component_destroys: Vec<(f64, i32)>,
     /// Object.Destroy(FixedJoint2D) calls queued for the delayed-call pass: (time, `fixed_joints` index).
     pub joint_destroys: Vec<(f64, usize)>,
+    /// The queued Object.Destroy calls of a FirearmAttachmentPointBehaviour's HingeJoint2D: (time, b2 joint).
+    pub attachment_joint_destroys: Vec<(f64, crate::b2::world::JointId)>,
     /// The manager entry of each registered script component (by instance id), for SetActive.
     pub behaviour_of: HashMap<i32, (i32, Behaviour)>,
     /// Every BloodPuff the pool created and its ObjectPoolBehaviour (None until PoolGenerator.Ensure).
@@ -1530,6 +1631,8 @@ pub struct Game {
     /// A clone of Global.MetalScrapePrefab: the instance ids it takes (objects and components) and the
     /// Random.value draws its ActivateIfFancyEffects Awakes make; None when the scene was not loaded from data.
     pub metal_scrape: Option<(usize, usize)>,
+    /// Global.HolleManPrefab: the zombie easter egg instantiated when a zombie head dies (person.rs).
+    pub holle_man_prefab: Option<crate::assets::db::ObjRef>,
     /// The modelled managed heap's base for this session (PhysicalBehaviour hash codes); None: the fixed test base.
     pub heap_base: Option<u64>,
     /// Physics2DSettings.m_DefaultMaterial's (friction, bounciness); None without one.

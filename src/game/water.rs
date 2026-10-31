@@ -92,8 +92,9 @@ pub struct SplashPool {
     pub sound: Option<usize>,
     /// The ParticleSystems on each prefab object.
     pub particle_systems: Vec<usize>,
-    /// The root ParticleSystem's lengthInSec (a poolable prefab's).
+    /// The root ParticleSystem's lengthInSec (a poolable prefab's), and the clock's speed (simulationSpeed).
     pub duration: f64,
+    pub speed: f32,
     /// The ActivateIfFancyEffects on active objects, in Awake order, with their Chance: each Awake of a clone whose
     /// ancestors stayed active draws Random.value and deactivates the object unless `Chance > value && FancyEffects`.
     pub fancy: Vec<(usize, f32)>,
@@ -145,12 +146,15 @@ impl Game {
         let poolable = root.tag == POOLABLE_TAG;
         // PoolableParticleSystemHelper.Awake sets the stop action to Callback.
         let helper = root.components.iter().any(|(_, c)| matches!(c, Component::Script { class, .. } if class == "PoolableParticleSystemHelper"));
+        let mut speed = 1.0f32;
         let duration = match root.components.iter().find(|(_, c)| matches!(c, Component::Other(PARTICLE_SYSTEM))) {
             Some(&(r, _)) if poolable => {
                 let ps = crate::assets::components::ParticleSystemHead::read(db.data(r)).map_err(|e| format!("ParticleSystem: {e}"))?;
-                if (ps.stop_action != 3 && !helper) || ps.looping || ps.simulation_speed != 1.0 {
-                    unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback at simulationSpeed 1 (stopAction {}, looping {}, simulationSpeed {}): OnParticleSystemStopped fires once emission ended and the last particle died, which depends on the native particle RNG's startLifetime draws", root.name, ps.stop_action, ps.looping, ps.simulation_speed);
+                if (ps.stop_action != 3 && !helper) || ps.looping {
+                    unimplemented!("{}: a poolable root ParticleSystem that is not a one-shot with the stop callback (stopAction {}, looping {}): OnParticleSystemStopped fires once emission ended and the last particle died, which depends on the native particle RNG's startLifetime draws", root.name, ps.stop_action, ps.looping);
                 }
+                // The system's clock runs at simulationSpeed.
+                speed = ps.simulation_speed;
                 ps.length_in_sec as f64
             }
             _ => 0.0,
@@ -161,6 +165,7 @@ impl Game {
             sound,
             particle_systems,
             duration,
+            speed,
             fancy,
             original_ids: Arc::new(db.resource_load_order()?),
             prefab: Arc::new(prefab),
@@ -284,7 +289,7 @@ impl Game {
                 if !item.active || item.destroyed {
                     continue;
                 }
-                item.particle_time += dt as f64;
+                item.particle_time += (dt * pool.speed) as f64;
                 if item.particle_time >= pool.duration {
                     item.active = false;
                     pool.pool.available.add(i);

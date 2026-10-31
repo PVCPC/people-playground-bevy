@@ -1,0 +1,48 @@
+//! Translated from the liquid Tritium in Assembly-CSharp.dll by tools/iltrans: do not edit.
+#![allow(non_snake_case, unused_mut, unused_variables, unused_labels, unused_parens, unused_braces, unreachable_code, unreachable_patterns, dead_code, unused_imports, unused_assignments)]
+
+use super::rt;
+use crate::game::{mathf, Game};
+
+impl Game {
+    /// Tritium.OnUpdate
+    pub fn tritium_on_update(&mut self, this: usize, mut container: crate::game::container::Owner) {
+        let mut circulationBehaviour: Option<usize> = None;
+        let mut speciesIdentity: String = String::new();
+        if !({ circulationBehaviour = match container { crate::game::container::Owner::Circulation(l) => Some(l), _ => None }; circulationBehaviour.is_some() }) {
+            return;
+        }
+        speciesIdentity = self.limbs[rt::nn(circulationBehaviour)].SpeciesIdentity.clone();
+        if ({ let _ = speciesIdentity; true } && (speciesIdentity == "Android")) {
+            self.limbs[rt::nn(circulationBehaviour)].BaseStrength = mathf::lerp(self.limbs[rt::nn(circulationBehaviour)].BaseStrength, 18.0, 0.5);
+            return;
+        }
+        if ((self.physicals[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].PhysicalBehaviour))].Temperature as f64) < (40.0 as f64)) {
+            self.physicals[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].PhysicalBehaviour))].Temperature = ((((self.physicals[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].PhysicalBehaviour))].Temperature as f64) + (self.random.value() as f64))) as f32);
+        }
+        if (self.limbs[rt::nn(circulationBehaviour)].RoughClassification == 0) {
+            if ((self.random.value() as f64) > (0.9950000047683716 as f64)) {
+                { let a1 = ((((self.limbs[rt::nn(circulationBehaviour)].Health as f64) + (1.0 as f64))) as f32); self.limb_damage(rt::nn(circulationBehaviour), a1) };
+            }
+            if ((self.random.value() as f64) > 0.9) {
+                { let a2 = ((((self.random.value() as f64) * (60.0 as f64))) as f32); self.add_pain(rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].Person)), a2) };
+            }
+            self.people[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].Person))].Consciousness = ((((self.people[rt::nn(Some(self.limbs[rt::nn(circulationBehaviour)].Person))].Consciousness as f64) * (0.9900000095367432 as f64))) as f32);
+        }
+        return;
+    }
+
+    /// Tritium.OnEnterLimb
+    pub fn tritium_on_enter_limb(&mut self, this: usize, mut limb: Option<usize>) {
+        if self.limbs[rt::nn(limb)].HasBrain {
+            if self.people[rt::nn(Some(self.limbs[rt::nn(limb)].Person))].Braindead {
+                self.limbs[rt::nn(limb)].Health = ((((self.limbs[rt::nn(limb)].Health as f64) + (0.10000000149011612 as f64))) as f32);
+                self.people[rt::nn(Some(self.limbs[rt::nn(limb)].Person))].Braindead = false;
+            }
+            if self.people[rt::nn(Some(self.limbs[rt::nn(limb)].Person))].BrainDamaged {
+                self.people[rt::nn(Some(self.limbs[rt::nn(limb)].Person))].BrainDamaged = false;
+            }
+        }
+        return;
+    }
+}

@@ -113,12 +113,22 @@ script! {
 
 script! {
     Grip {
+        GripPosition: [f32; 3] = [0.0; 3],
         isHolding: bool = false,
+        NearestHoldingPos: [f32; 2] = [0.0; 2],
+        Anchor: [f32; 2] = [0.0; 2],
+        ConnectedAnchor: [f32; 2] = [0.0; 2],
     }
     links {
+        /// The component's instance id (its coroutine's owner).
+        id: i32 = 0,
         PhysicalBehaviour: usize = 0,
         /// The held PhysicalBehaviour.
         CurrentlyHolding: Option<usize> = None,
+        /// joint: the `Game::fixed_joints` entry of the FixedJoint2D CreateJoint added (kept after its Destroy).
+        joint: Option<usize> = None,
+        /// CollidersToIgnore: the root's colliders as Start found them.
+        CollidersToIgnore: Vec<i32> = Vec::new(),
     }
 }
 
@@ -135,8 +145,10 @@ script! {
         fakeHeartClock: f32 = 0.0,
     }
     links {
-        /// CirculationBehaviour / PushingTo as limb indices.
-        CirculationBehaviour: usize = 0,
+        /// CirculationBehaviour / PushingTo as limb indices (CirculationBehaviour null under a parent that is not a limb).
+        CirculationBehaviour: Option<usize> = None,
+        /// The physical whose Transform the particle hangs under.
+        Parent: usize = 0,
         PushingTo: Option<usize> = None,
         BloodSplatController: Option<usize> = None,
         dripSoundClock: FixedIntervalDistributor = FixedIntervalDistributor::with_rate(0.5),
@@ -245,6 +257,10 @@ script! {
         CollisionLayers: u32 = 0,
         /// The person whose hierarchy initialParent is in; None for a BloodExplosion, a root of its own.
         parent_person: Option<usize> = None,
+        /// The component's instance id when instantiated from a prefab (0: modelled by its spawner).
+        id: i32 = 0,
+        /// The BloodTankBehaviour whose OnCollide listener this splat calls (blood_tank.rs); None without one.
+        on_collide_tank: Option<usize> = None,
     }
 }
 
@@ -418,6 +434,9 @@ pub struct AutofixJoints {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PendingStart {
     Splat(usize),
+    /// BloodTankBehaviour.Start (blood_tank.rs).
+    BloodTank(usize),
+    Glow(usize),
     /// A spawned Person's scripts (`Game::spawn`), by arena index. PersonBehaviour.Start runs before its first
     /// LateUpdate; the rest after the LateUpdate phase.
     Person(usize),
@@ -429,6 +448,7 @@ pub enum PendingStart {
     Limb(usize),
     /// ConnectedNodeBehaviour with its serialized SerialisableConnectedNodes (None when null).
     Node(usize, Option<Vec<bool>>),
+    /// GripBehaviour.Start with the root's colliders (CollidersToIgnore).
     Grip(usize),
     /// GoreStringBehaviour with its serialized CreateJointOnStart.
     GoreString(usize, bool),
@@ -436,6 +456,13 @@ pub enum PendingStart {
     Water(usize),
     Machinery(usize),
     Destroyable(usize),
+    /// UniversalBellBehaviour.Start: the note's sound arrays (universal_bell.rs).
+    UniversalBell(usize),
+    /// TimedGateBehaviour.Start: a busy gate resumes DoLag (timed_gate.rs).
+    TimedGate(usize),
+    /// ArchelixCasterBehaviour.Start and ArchelixCasterBoltBehaviour.Start (archelix.rs).
+    ArchelixCaster(usize),
+    ArchelixBolt(usize),
     FireMap(usize),
     /// DetachFromParentOnStart.Start: its component id and DestroyIfParentDestroyed.
     DetachFromParent(i32, bool),
@@ -502,6 +529,8 @@ pub enum PendingStart {
     Metronome(usize),
     /// MaintainScaleSignBehaviour.Start: EnsureScaling, by the component's instance id.
     MaintainScale(i32),
+    Foliage(usize),
+    LiquidSpread(usize),
     /// ActivationToggleBehaviour.Start (UpdateActivation): `Game::activation_toggles`.
     ActivationToggle(usize),
     /// GaugeBehaviour.Start for a PowerGauge: `Game::power_gauges`.
@@ -570,14 +599,6 @@ impl Game {
         self.skins[l].damagePoints = vec![[0.0, 0.0, 0.0, damage_type::NONE as f32]; 128];
     }
 
-    /// GripBehaviour.Start. CollidersToIgnore (the root's colliders) is only read by Attach, which is not rewritten.
-    /// Awake adds the pause listener (modding API).
-    pub fn grip_start(&mut self, g: usize) {
-        if self.grips[g].isHolding && self.grips[g].CurrentlyHolding.is_some() {
-            unimplemented!("GripBehaviour.Attach");
-        }
-    }
-
     /// NodeController.Update over NodeController.Nodes (HashSet, insertion order).
     pub fn node_controller_update(&mut self) {
         for n in &mut self.nodes {
@@ -613,25 +634,6 @@ impl Game {
         g.velocity = v;
         g.acceleration = [g.velocity[0] - g.velocityLastFrame[0], g.velocity[1] - g.velocityLastFrame[1]];
         g.sustainedAcceleration = mathf::v2_lerp(g.sustainedAcceleration, g.acceleration, 0.5);
-    }
-
-    /// GripBehaviour.FixedUpdate
-    pub fn grip_fixed_update(&mut self, g: usize) {
-        let grip = &self.grips[g];
-        if let Some(held) = grip.CurrentlyHolding {
-            let me = grip.PhysicalBehaviour;
-            if self.physicals[me].SimulateTemperature && self.physicals[held].SimulateTemperature {
-                self.average_temperature(me, held, 0.02);
-            }
-        }
-    }
-
-    /// GripBehaviour.Update
-    pub fn grip_update(&mut self, g: usize) {
-        if self.grips[g].isHolding && self.grips[g].CurrentlyHolding.is_none() {
-            // DropObject without a held object: only the (unrewritten) FixedJoint2D goes.
-            self.grips[g].isHolding = false;
-        }
     }
 
     /// SkinMaterialHandler.Update
@@ -717,11 +719,13 @@ impl Game {
     /// BleedingParticleBehaviour.Update
     pub fn bleeding_update(&mut self, b: usize) {
         // A child of its limb: no Update once the limb is deactivated (disintegrated).
-        if self.bleeding[b].destroyed || !self.limb_active(self.bleeding[b].CirculationBehaviour) {
+        let parent = self.bleeding[b].Parent;
+        if self.bleeding[b].destroyed || self.physicals[parent].destroyed || !self.physicals[parent].active {
             return;
         }
         let bp = &self.bleeding[b];
-        let l = bp.CirculationBehaviour;
+        // CirculationBehaviour.BleedingRate on null: the exception ends the Update before anything changes.
+        let Some(l) = bp.CirculationBehaviour else { return };
         let c = &self.circulations[l];
         let num = if bp.IsOnlyForInternalBleeding { c.InternalBleedingIntensity } else { c.BleedingRate };
         let scaled = mathf::map_range(0.0, 1.0, 0.0, 1.0, c.base.TotalLiquidAmount);
@@ -895,6 +899,8 @@ impl Game {
     pub fn run_pending_starts(&mut self) {
         for start in std::mem::take(&mut self.pending_starts) {
             match start {
+                PendingStart::Glow(g) => self.glow_start(g),
+                PendingStart::BloodTank(t) => self.blood_tank_start(t),
                 PendingStart::Splat(s) => {
                     if !self.splats[s].started && !self.splats[s].destroyed {
                         self.splat_start(s);
@@ -935,6 +941,10 @@ impl Game {
                 PendingStart::Water(w) => self.water_start(w),
                 PendingStart::Machinery(m) => self.machinery_start(m),
                 PendingStart::Destroyable(x) => self.destroyable_start(x),
+                PendingStart::UniversalBell(b) => self.universal_bell_start(b),
+                PendingStart::TimedGate(g) => self.timed_gate_start(g),
+                PendingStart::ArchelixCaster(c) => self.archelix_caster_start(c),
+                PendingStart::ArchelixBolt(b) => self.archelix_bolt_start(b),
                 PendingStart::FireMap(f) => self.fire_map_start(f),
                 PendingStart::DetachFromParent(id, destroy_with_parent) => self.detach_from_parent_on_start(id, destroy_with_parent),
                 PendingStart::NoChildrenCollide(id) => self.no_children_collide_start(id),
@@ -996,6 +1006,8 @@ impl Game {
                 PendingStart::Airfoil(a) => self.airfoil_start(a),
                 PendingStart::Metronome(m) => self.metronome_start(m),
                 PendingStart::MaintainScale(id) => self.maintain_scale_start(id),
+                PendingStart::Foliage(f) => self.foliage_start(f),
+                PendingStart::LiquidSpread(s) => self.liquid_spread_start(s),
                 PendingStart::ActivationToggle(t) => self.activation_toggle_start(t),
                 PendingStart::PowerGauge(g) => self.power_gauge_start(g),
                 PendingStart::Flare(f) => self.flare_start(f),
@@ -1094,6 +1106,7 @@ impl Game {
             Size: 0.2,
             DestroyWhenNoParticles: false,
             TriggerOnCollide: false,
+            on_collide_tank: None,
             Decal: "Sparse_blood".into(),
             particles: Default::default(),
             parent_position: [position[0], position[1], 0.0],
@@ -1103,6 +1116,7 @@ impl Game {
             CollisionLayers: 10752,
             attached: None,
             parent_person: None,
+            id: 0,
         });
         self.behaviours.add(0, super::Behaviour::Splat(self.splats.len() - 1));
         let s = self.splats.len() - 1;
@@ -1174,6 +1188,11 @@ impl Game {
         if self.splats[s].destroyed {
             return;
         }
+        let id = self.splats[s].id;
+        if id != 0 && self.destroyed_components.contains(&id) {
+            self.splats[s].destroyed = true;
+            return;
+        }
         // Objects instantiated during this step have not had Start yet and are not in this FixedUpdate pass.
         if !self.splats[s].started {
             return;
@@ -1193,6 +1212,9 @@ impl Game {
             }
         } else if self.splats[s].particles.is_empty() && self.splats[s].DestroyWhenNoParticles {
             self.splats[s].destroyed = true;
+            if id != 0 {
+                self.destroy_object(id);
+            }
             return;
         }
         let fdt = self.time.fixedDeltaTime;
@@ -1216,6 +1238,9 @@ impl Game {
                 _ => None,
             });
             let same_root = root.is_some_and(|person| self.limbs.iter().any(|l| Some(l.PhysicalBehaviour) == owner && l.Person == person));
+            // collider.transform.root != initialParent.root: a splat hung under a physical compares with that physical's root.
+            let parent_root = self.splats[s].attached.map(|(p, _, _)| self.root_id(p));
+            let same_root = same_root || parent_root.is_some_and(|r| owner.is_some_and(|q| self.root_id(q) == r));
             if colour[3] > 0.05 && !same_root {
                 // SendMessage("Decal") to the collider's GameObject.
                 match hit {
@@ -1228,7 +1253,11 @@ impl Game {
                 }
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
                 if self.splats[s].TriggerOnCollide {
-                    unimplemented!("FancyBloodSplatController.OnCollide");
+                    // OnCollide?.Invoke(collider): its listener is a BloodTankBehaviour (blood_tank.rs).
+                    match self.splats[s].on_collide_tank {
+                        Some(t) => self.blood_tank_on_particle_collide(t, collider),
+                        None => unimplemented!("FancyBloodSplatController.OnCollide: a listener other than BloodTankBehaviour"),
+                    }
                 }
             }
         }

@@ -4,6 +4,7 @@
 pub mod rt;
 pub mod adrenaline_liquid;
 pub mod aerial_faith_plate_behaviour;
+pub mod beverage_m04;
 pub mod blood;
 pub mod bone_hurting_juice_liquid;
 pub mod coagulation_liquid;
@@ -12,17 +13,19 @@ pub mod conveyor_belt_behaviour;
 pub mod coolant;
 pub mod cosmetic_rotation_behaviour;
 pub mod crushing_poison;
+pub mod debug_discoloration_liquid;
 pub mod deformation_behaviour;
 pub mod disable_when_wet;
 pub mod durability_serum;
 pub mod electricity_transformer_behaviour;
-pub mod emit_particles_on_shake_behaviour;
+pub mod exotic_liquid;
 pub mod fan_behaviour;
 pub mod fire_sound_emitter;
 pub mod freeze_poison_liquid;
 pub mod guide_temperature_behaviour;
 pub mod gyrostabiliser_behaviour;
 pub mod hoverbox_behaviour;
+pub mod immortality_serum;
 pub mod industrial_gyrostabiliser_behaviour;
 pub mod inert_liquid;
 pub mod jack_o_latern_behaviour;
@@ -30,8 +33,10 @@ pub mod knockout_poison_liquid;
 pub mod motorised_hinge_behaviour;
 pub mod muscle_enhancement_serum;
 pub mod muscle_poison;
+pub mod nitroglycerine;
 pub mod numbing_poison;
 pub mod oil;
+pub mod osteomorphosis_agent;
 pub mod pink_dormant_liquid;
 pub mod reflection_poison;
 pub mod regeneration_serum;
@@ -41,6 +46,7 @@ pub mod rotor_behaviour;
 pub mod siren_behaviour;
 pub mod target_line_renderer;
 pub mod transparency_poison;
+pub mod tritium;
 pub mod vestibular_poison;
 pub mod water_breathing_serum;
 pub mod zombie_poison_liquid;
@@ -56,7 +62,6 @@ pub struct Translated {
     pub deformation_behaviour: Vec<deformation_behaviour::DeformationBehaviour>,
     pub disable_when_wet: Vec<disable_when_wet::DisableWhenWet>,
     pub electricity_transformer_behaviour: Vec<electricity_transformer_behaviour::ElectricityTransformerBehaviour>,
-    pub emit_particles_on_shake_behaviour: Vec<emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour>,
     pub fan_behaviour: Vec<fan_behaviour::FanBehaviour>,
     pub fan_behaviour__buffer: Vec<i32>,
     pub fire_sound_emitter: Vec<fire_sound_emitter::FireSoundEmitter>,
@@ -75,12 +80,14 @@ pub struct Translated {
     pub bone_hurting_juice_liquid__RemovalChancePerSecond__k: f32,
     pub coagulation_liquid__RemovalChancePerSecond__k: f32,
     pub crushing_poison__RemovalChancePerSecond__k: f32,
+    pub debug_discoloration_liquid__RemovalChancePerSecond__k: f32,
     pub durability_serum__RemovalChancePerSecond__k: f32,
     pub freeze_poison_liquid__RemovalChancePerSecond__k: f32,
     pub knockout_poison_liquid__RemovalChancePerSecond__k: f32,
     pub muscle_enhancement_serum__RemovalChancePerSecond__k: f32,
     pub muscle_poison__RemovalChancePerSecond__k: f32,
     pub numbing_poison__RemovalChancePerSecond__k: f32,
+    pub osteomorphosis_agent__RemovalChancePerSecond__k: f32,
     pub pink_dormant_liquid__RemovalChancePerSecond__k: f32,
     pub reflection_poison__RemovalChancePerSecond__k: f32,
     pub regeneration_serum__RemovalChancePerSecond__k: f32,
@@ -100,7 +107,6 @@ impl Default for Translated {
             deformation_behaviour: Vec::new(),
             disable_when_wet: Vec::new(),
             electricity_transformer_behaviour: Vec::new(),
-            emit_particles_on_shake_behaviour: Vec::new(),
             fan_behaviour: Vec::new(),
             fan_behaviour__buffer: rt::new_array(128),
             fire_sound_emitter: Vec::new(),
@@ -119,12 +125,14 @@ impl Default for Translated {
             bone_hurting_juice_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             coagulation_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             crushing_poison__RemovalChancePerSecond__k: 0.800000011920929,
+            debug_discoloration_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             durability_serum__RemovalChancePerSecond__k: 0.800000011920929,
             freeze_poison_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             knockout_poison_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             muscle_enhancement_serum__RemovalChancePerSecond__k: 0.800000011920929,
             muscle_poison__RemovalChancePerSecond__k: 0.800000011920929,
             numbing_poison__RemovalChancePerSecond__k: 0.800000011920929,
+            osteomorphosis_agent__RemovalChancePerSecond__k: 0.800000011920929,
             pink_dormant_liquid__RemovalChancePerSecond__k: 0.800000011920929,
             reflection_poison__RemovalChancePerSecond__k: 0.800000011920929,
             regeneration_serum__RemovalChancePerSecond__k: 0.800000011920929,
@@ -135,7 +143,7 @@ impl Default for Translated {
 }
 
 /// The translated liquids (circulation::LIQUIDS class names).
-pub const LIQUID_CLASSES: &[&str] = &["AdrenalineLiquid", "Blood", "BoneHurtingJuiceLiquid", "CoagulationLiquid", "CombustionAgent", "Coolant", "CrushingPoison", "DurabilitySerum", "FreezePoisonLiquid", "InertLiquid", "KnockoutPoisonLiquid", "MuscleEnhancementSerum", "MusclePoison", "NumbingPoison", "Oil", "PinkDormantLiquid", "ReflectionPoison", "RegenerationSerum", "TransparencyPoison", "VestibularPoison", "WaterBreathingSerum", "ZombiePoisonLiquid"];
+pub const LIQUID_CLASSES: &[&str] = &["AdrenalineLiquid", "BeverageM04", "Blood", "BoneHurtingJuiceLiquid", "CoagulationLiquid", "CombustionAgent", "Coolant", "CrushingPoison", "DebugDiscolorationLiquid", "DurabilitySerum", "ExoticLiquid", "FreezePoisonLiquid", "ImmortalitySerum", "InertLiquid", "KnockoutPoisonLiquid", "MuscleEnhancementSerum", "MusclePoison", "Nitroglycerine", "NumbingPoison", "Oil", "OsteomorphosisAgent", "PinkDormantLiquid", "ReflectionPoison", "RegenerationSerum", "TransparencyPoison", "Tritium", "VestibularPoison", "WaterBreathingSerum", "ZombiePoisonLiquid"];
 
 /// A translated component: its class and its index in that class's arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -146,7 +154,6 @@ pub enum TBehaviour {
     DeformationBehaviour(usize),
     DisableWhenWet(usize),
     ElectricityTransformerBehaviour(usize),
-    EmitParticlesOnShakeBehaviour(usize),
     FanBehaviour(usize),
     FireSoundEmitter(usize),
     GuideTemperatureBehaviour(usize),
@@ -162,7 +169,7 @@ pub enum TBehaviour {
     TargetLineRenderer(usize),
 }
 
-pub const CLASSES: &[&str] = &["AerialFaithPlateBehaviour", "ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "ElectricityTransformerBehaviour", "EmitParticlesOnShakeBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RocketLauncherBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
+pub const CLASSES: &[&str] = &["AerialFaithPlateBehaviour", "ConveyorBeltBehaviour", "CosmeticRotationBehaviour", "DeformationBehaviour", "DisableWhenWet", "ElectricityTransformerBehaviour", "FanBehaviour", "FireSoundEmitter", "GuideTemperatureBehaviour", "GyrostabiliserBehaviour", "HoverboxBehaviour", "IndustrialGyrostabiliserBehaviour", "JackOLaternBehaviour", "MotorisedHingeBehaviour", "ResistorBehaviour", "RocketLauncherBehaviour", "RotorBehaviour", "SirenBehaviour", "TargetLineRenderer"];
 
 impl TBehaviour {
     pub fn class(self) -> &'static str {
@@ -173,7 +180,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => "DeformationBehaviour",
             TBehaviour::DisableWhenWet(_) => "DisableWhenWet",
             TBehaviour::ElectricityTransformerBehaviour(_) => "ElectricityTransformerBehaviour",
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => "EmitParticlesOnShakeBehaviour",
             TBehaviour::FanBehaviour(_) => "FanBehaviour",
             TBehaviour::FireSoundEmitter(_) => "FireSoundEmitter",
             TBehaviour::GuideTemperatureBehaviour(_) => "GuideTemperatureBehaviour",
@@ -199,7 +205,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => true,
             TBehaviour::ElectricityTransformerBehaviour(_) => false,
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => true,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => true,
             TBehaviour::GuideTemperatureBehaviour(_) => true,
@@ -225,7 +230,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::ElectricityTransformerBehaviour(_) => false,
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -251,7 +255,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::ElectricityTransformerBehaviour(_) => true,
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => true,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -277,7 +280,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::ElectricityTransformerBehaviour(_) => true,
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => false,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -303,7 +305,6 @@ impl TBehaviour {
             TBehaviour::DeformationBehaviour(_) => false,
             TBehaviour::DisableWhenWet(_) => false,
             TBehaviour::ElectricityTransformerBehaviour(_) => false,
-            TBehaviour::EmitParticlesOnShakeBehaviour(_) => false,
             TBehaviour::FanBehaviour(_) => false,
             TBehaviour::FireSoundEmitter(_) => false,
             TBehaviour::GuideTemperatureBehaviour(_) => false,
@@ -378,7 +379,6 @@ pub fn link_fields(class: &str) -> &'static [(&'static str, LinkKind)] {
         "DeformationBehaviour" => &[],
         "DisableWhenWet" => &[("PhysicalBehaviour", LinkKind::Physical), ("ToDisable", LinkKind::Prefab)],
         "ElectricityTransformerBehaviour" => &[("PhysicalBehaviour", LinkKind::Physical)],
-        "EmitParticlesOnShakeBehaviour" => &[],
         "FanBehaviour" => &[("HelicopterAudioSource", LinkKind::Present), ("FirstBladeRenderer", LinkKind::Present), ("SecondBladeRenderer", LinkKind::Present), ("Blades", LinkKind::Script("CosmeticRotationBehaviour")), ("Audio", LinkKind::Present), ("Switch", LinkKind::Present), ("StartupSound", LinkKind::Present), ("ShutoffSound", LinkKind::Present), ("Mask", LinkKind::Mask)],
         "FireSoundEmitter" => &[],
         "GuideTemperatureBehaviour" => &[],
@@ -441,13 +441,6 @@ impl Game {
                 (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
                 self.tr.electricity_transformer_behaviour.push(x);
                 TBehaviour::ElectricityTransformerBehaviour(self.tr.electricity_transformer_behaviour.len() - 1)
-            }
-            "EmitParticlesOnShakeBehaviour" => {
-                let mut x = emit_particles_on_shake_behaviour::EmitParticlesOnShakeBehaviour::default();
-                crate::game::spawn::load_values(x.fields(), values)?;
-                (x.this_id, x.enabled, x.this_physical, x.this_physics) = (id, enabled, physical, physics);
-                self.tr.emit_particles_on_shake_behaviour.push(x);
-                TBehaviour::EmitParticlesOnShakeBehaviour(self.tr.emit_particles_on_shake_behaviour.len() - 1)
             }
             "FanBehaviour" => {
                 let mut x = fan_behaviour::FanBehaviour::default();
@@ -604,7 +597,6 @@ impl Game {
             TBehaviour::DeformationBehaviour(i) => self.tr.deformation_behaviour[i].enabled,
             TBehaviour::DisableWhenWet(i) => self.tr.disable_when_wet[i].enabled,
             TBehaviour::ElectricityTransformerBehaviour(i) => self.tr.electricity_transformer_behaviour[i].enabled,
-            TBehaviour::EmitParticlesOnShakeBehaviour(i) => self.tr.emit_particles_on_shake_behaviour[i].enabled,
             TBehaviour::FanBehaviour(i) => self.tr.fan_behaviour[i].enabled,
             TBehaviour::FireSoundEmitter(i) => self.tr.fire_sound_emitter[i].enabled,
             TBehaviour::GuideTemperatureBehaviour(i) => self.tr.guide_temperature_behaviour[i].enabled,
@@ -623,7 +615,6 @@ impl Game {
 
     pub fn tr_awake(&mut self, b: TBehaviour) {
         match b {
-            TBehaviour::EmitParticlesOnShakeBehaviour(i) => self.emit_particles_on_shake_behaviour_awake(i),
             TBehaviour::FanBehaviour(i) => self.fan_behaviour_awake(i),
             TBehaviour::GuideTemperatureBehaviour(i) => self.guide_temperature_behaviour_awake(i),
             TBehaviour::GyrostabiliserBehaviour(i) => self.gyrostabiliser_behaviour_awake(i),
@@ -767,7 +758,6 @@ impl Game {
             (Phase::Fixed, TBehaviour::ConveyorBeltBehaviour(i)) => self.conveyor_belt_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::CosmeticRotationBehaviour(i)) => self.cosmetic_rotation_behaviour_update(i),
             (Phase::Update, TBehaviour::DisableWhenWet(i)) => self.disable_when_wet_update(i),
-            (Phase::Fixed, TBehaviour::EmitParticlesOnShakeBehaviour(i)) => self.emit_particles_on_shake_behaviour_fixed_update(i),
             (Phase::Fixed, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_fixed_update(i),
             (Phase::Update, TBehaviour::FanBehaviour(i)) => self.fan_behaviour_update(i),
             (Phase::Fixed, TBehaviour::FireSoundEmitter(i)) => self.fire_sound_emitter_fixed_update(i),
@@ -787,24 +777,31 @@ impl Game {
     pub fn tr_liquid_on_enter_limb(&mut self, liquid: usize, limb: usize) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
             "AdrenalineLiquid" => self.adrenaline_liquid_on_enter_limb(liquid, Some(limb)),
+            "BeverageM04" => self.beverage_m04_on_enter_limb(liquid, Some(limb)),
             "Blood" => self.blood_on_enter_limb(liquid, Some(limb)),
             "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_enter_limb(liquid, Some(limb)),
             "CoagulationLiquid" => self.coagulation_liquid_on_enter_limb(liquid, Some(limb)),
             "CombustionAgent" => self.combustion_agent_on_enter_limb(liquid, Some(limb)),
             "Coolant" => self.coolant_on_enter_limb(liquid, Some(limb)),
             "CrushingPoison" => self.crushing_poison_on_enter_limb(liquid, Some(limb)),
+            "DebugDiscolorationLiquid" => self.debug_discoloration_liquid_on_enter_limb(liquid, Some(limb)),
             "DurabilitySerum" => self.durability_serum_on_enter_limb(liquid, Some(limb)),
+            "ExoticLiquid" => self.exotic_liquid_on_enter_limb(liquid, Some(limb)),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_enter_limb(liquid, Some(limb)),
+            "ImmortalitySerum" => self.immortality_serum_on_enter_limb(liquid, Some(limb)),
             "InertLiquid" => self.inert_liquid_on_enter_limb(liquid, Some(limb)),
             "KnockoutPoisonLiquid" => self.knockout_poison_liquid_on_enter_limb(liquid, Some(limb)),
             "MuscleEnhancementSerum" => self.muscle_enhancement_serum_on_enter_limb(liquid, Some(limb)),
             "MusclePoison" => self.muscle_poison_on_enter_limb(liquid, Some(limb)),
+            "Nitroglycerine" => self.nitroglycerine_on_enter_limb(liquid, Some(limb)),
             "NumbingPoison" => self.numbing_poison_on_enter_limb(liquid, Some(limb)),
             "Oil" => self.oil_on_enter_limb(liquid, Some(limb)),
+            "OsteomorphosisAgent" => self.osteomorphosis_agent_on_enter_limb(liquid, Some(limb)),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_enter_limb(liquid, Some(limb)),
             "ReflectionPoison" => self.reflection_poison_on_enter_limb(liquid, Some(limb)),
             "RegenerationSerum" => self.regeneration_serum_on_enter_limb(liquid, Some(limb)),
             "TransparencyPoison" => self.transparency_poison_on_enter_limb(liquid, Some(limb)),
+            "Tritium" => self.tritium_on_enter_limb(liquid, Some(limb)),
             "VestibularPoison" => self.vestibular_poison_on_enter_limb(liquid, Some(limb)),
             "WaterBreathingSerum" => self.water_breathing_serum_on_enter_limb(liquid, Some(limb)),
             "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_enter_limb(liquid, Some(limb)),
@@ -815,24 +812,31 @@ impl Game {
     pub fn tr_liquid_on_enter_container(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
             "AdrenalineLiquid" => self.adrenaline_liquid_on_enter_container(liquid, c),
+            "BeverageM04" => self.beverage_m04_on_enter_container(liquid, c),
             "Blood" => self.blood_on_enter_container(liquid, c),
             "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_enter_container(liquid, c),
             "CoagulationLiquid" => self.coagulation_liquid_on_enter_container(liquid, c),
             "CombustionAgent" => self.combustion_agent_on_enter_container(liquid, c),
             "Coolant" => self.coolant_on_enter_container(liquid, c),
             "CrushingPoison" => self.crushing_poison_on_enter_container(liquid, c),
+            "DebugDiscolorationLiquid" => self.debug_discoloration_liquid_on_enter_container(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_enter_container(liquid, c),
+            "ExoticLiquid" => self.exotic_liquid_on_enter_container(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_enter_container(liquid, c),
+            "ImmortalitySerum" => self.immortality_serum_on_enter_container(liquid, c),
             "InertLiquid" => self.inert_liquid_on_enter_container(liquid, c),
             "KnockoutPoisonLiquid" => self.knockout_poison_liquid_on_enter_container(liquid, c),
             "MuscleEnhancementSerum" => self.muscle_enhancement_serum_on_enter_container(liquid, c),
             "MusclePoison" => self.muscle_poison_on_enter_container(liquid, c),
+            "Nitroglycerine" => self.nitroglycerine_on_enter_container(liquid, c),
             "NumbingPoison" => self.numbing_poison_on_enter_container(liquid, c),
             "Oil" => self.oil_on_enter_container(liquid, c),
+            "OsteomorphosisAgent" => self.osteomorphosis_agent_on_enter_container(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_enter_container(liquid, c),
             "ReflectionPoison" => self.reflection_poison_on_enter_container(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_enter_container(liquid, c),
             "TransparencyPoison" => self.transparency_poison_on_enter_container(liquid, c),
+            "Tritium" => self.tritium_on_enter_container(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_enter_container(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_enter_container(liquid, c),
             "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_enter_container(liquid, c),
@@ -843,24 +847,31 @@ impl Game {
     pub fn tr_liquid_on_exit_container(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
             "AdrenalineLiquid" => self.adrenaline_liquid_on_exit_container(liquid, c),
+            "BeverageM04" => self.beverage_m04_on_exit_container(liquid, c),
             "Blood" => self.blood_on_exit_container(liquid, c),
             "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_exit_container(liquid, c),
             "CoagulationLiquid" => self.coagulation_liquid_on_exit_container(liquid, c),
             "CombustionAgent" => self.combustion_agent_on_exit_container(liquid, c),
             "Coolant" => self.coolant_on_exit_container(liquid, c),
             "CrushingPoison" => self.crushing_poison_on_exit_container(liquid, c),
+            "DebugDiscolorationLiquid" => self.debug_discoloration_liquid_on_exit_container(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_exit_container(liquid, c),
+            "ExoticLiquid" => self.exotic_liquid_on_exit_container(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_exit_container(liquid, c),
+            "ImmortalitySerum" => self.immortality_serum_on_exit_container(liquid, c),
             "InertLiquid" => self.inert_liquid_on_exit_container(liquid, c),
             "KnockoutPoisonLiquid" => self.knockout_poison_liquid_on_exit_container(liquid, c),
             "MuscleEnhancementSerum" => self.muscle_enhancement_serum_on_exit_container(liquid, c),
             "MusclePoison" => self.muscle_poison_on_exit_container(liquid, c),
+            "Nitroglycerine" => self.nitroglycerine_on_exit_container(liquid, c),
             "NumbingPoison" => self.numbing_poison_on_exit_container(liquid, c),
             "Oil" => self.oil_on_exit_container(liquid, c),
+            "OsteomorphosisAgent" => self.osteomorphosis_agent_on_exit_container(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_exit_container(liquid, c),
             "ReflectionPoison" => self.reflection_poison_on_exit_container(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_exit_container(liquid, c),
             "TransparencyPoison" => self.transparency_poison_on_exit_container(liquid, c),
+            "Tritium" => self.tritium_on_exit_container(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_exit_container(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_exit_container(liquid, c),
             "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_exit_container(liquid, c),
@@ -871,24 +882,31 @@ impl Game {
     pub fn tr_liquid_on_update(&mut self, liquid: usize, c: crate::game::container::Owner) {
         match crate::game::circulation::LIQUIDS[liquid].1 {
             "AdrenalineLiquid" => self.adrenaline_liquid_on_update(liquid, c),
+            "BeverageM04" => self.beverage_m04_on_update(liquid, c),
             "Blood" => self.blood_on_update(liquid, c),
             "BoneHurtingJuiceLiquid" => self.bone_hurting_juice_liquid_on_update(liquid, c),
             "CoagulationLiquid" => self.coagulation_liquid_on_update(liquid, c),
             "CombustionAgent" => self.combustion_agent_on_update(liquid, c),
             "Coolant" => self.coolant_on_update(liquid, c),
             "CrushingPoison" => self.crushing_poison_on_update(liquid, c),
+            "DebugDiscolorationLiquid" => self.debug_discoloration_liquid_on_update(liquid, c),
             "DurabilitySerum" => self.durability_serum_on_update(liquid, c),
+            "ExoticLiquid" => self.exotic_liquid_on_update(liquid, c),
             "FreezePoisonLiquid" => self.freeze_poison_liquid_on_update(liquid, c),
+            "ImmortalitySerum" => self.immortality_serum_on_update(liquid, c),
             "InertLiquid" => self.inert_liquid_on_update(liquid, c),
             "KnockoutPoisonLiquid" => self.knockout_poison_liquid_on_update(liquid, c),
             "MuscleEnhancementSerum" => self.muscle_enhancement_serum_on_update(liquid, c),
             "MusclePoison" => self.muscle_poison_on_update(liquid, c),
+            "Nitroglycerine" => self.nitroglycerine_on_update(liquid, c),
             "NumbingPoison" => self.numbing_poison_on_update(liquid, c),
             "Oil" => self.oil_on_update(liquid, c),
+            "OsteomorphosisAgent" => self.osteomorphosis_agent_on_update(liquid, c),
             "PinkDormantLiquid" => self.pink_dormant_liquid_on_update(liquid, c),
             "ReflectionPoison" => self.reflection_poison_on_update(liquid, c),
             "RegenerationSerum" => self.regeneration_serum_on_update(liquid, c),
             "TransparencyPoison" => self.transparency_poison_on_update(liquid, c),
+            "Tritium" => self.tritium_on_update(liquid, c),
             "VestibularPoison" => self.vestibular_poison_on_update(liquid, c),
             "WaterBreathingSerum" => self.water_breathing_serum_on_update(liquid, c),
             "ZombiePoisonLiquid" => self.zombie_poison_liquid_on_update(liquid, c),

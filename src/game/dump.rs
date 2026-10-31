@@ -487,6 +487,7 @@ impl Game {
                 connectedAnchor: [0.0; 2],
                 enabled: r.req("enabled")? == "1",
                 destroyed: false,
+                destroy_at: None,
             };
             let j = raw.req("joint")?;
             if let Some(rs) = &restored {
@@ -574,6 +575,7 @@ impl Game {
         for r in s.of("GripBehaviour") {
             let mut gr = Grip::default();
             load_fields(gr.fields(), r)?;
+            gr.id = r.id;
             gr.PhysicalBehaviour = phys_ids[&reference(r.req("PhysicalBehaviour")?).unwrap()];
             gr.CurrentlyHolding = reference(r.req("CurrentlyHolding")?).map(|id| phys_ids[&id]);
             let l = limb_by_name(&r.name).ok_or("grip without limb")?;
@@ -664,11 +666,13 @@ impl Game {
         for r in s.of("BleedingParticleBehaviour") {
             let mut b = BleedingParticle::default();
             load_fields(b.fields(), r)?;
-            b.CirculationBehaviour = circ_ids[&reference(r.req("CirculationBehaviour")?).unwrap()];
+            let circ = circ_ids[&reference(r.req("CirculationBehaviour")?).unwrap()];
+            b.CirculationBehaviour = Some(circ);
+            b.Parent = g.limbs[circ].PhysicalBehaviour;
             b.PushingTo = reference(r.req("PushingTo")?).map(|id| circ_ids[&id]);
             b.BloodSplatController = reference(r.req("BloodSplatController")?).map(|id| splat_ids[&id]);
             if let Some(s) = b.BloodSplatController {
-                let limb = &g.limbs[b.CirculationBehaviour];
+                let limb = &g.limbs[circ];
                 g.splats[s].parent_person = Some(limb.Person);
                 // From dump16 on: the bleeding particle's Transform under its limb.
                 if let Some(t) = r.get("tlpos") {
@@ -941,6 +945,9 @@ impl Game {
                 (Phase::Update, B::Flamethrower(i)) => self.flamethrower_update(i),
                 (Phase::Fixed, B::Rocket(i)) => self.rocket_fixed_update(i),
                 (Phase::Update, B::Rocket(i)) => self.rocket_update(i),
+                (Phase::Update, B::BreakJointOnBurn(i)) => self.break_joint_on_burn_update(i),
+                (Phase::Fixed, B::SoundOnShake(i)) => self.sound_on_shake_fixed_update(i),
+                (Phase::Fixed, B::GorseDrooling(i)) => self.gorse_drooling_fixed_update(i),
                 (Phase::Fixed, B::Airfoil(i)) => self.airfoil_fixed_update(i),
                 (Phase::Update, B::Stunner(i)) => self.stunner_update(i),
                 (Phase::Update, B::Blaster(i)) => self.blaster_update(i),
@@ -977,6 +984,18 @@ impl Game {
                 (Phase::Update, B::Accelerator(a)) => self.accelerator_update(a),
                 (Phase::Update, B::AcceleratorBolt(b)) => self.accelerator_bolt_update(b),
                 (Phase::Fixed, B::AcceleratorBolt(b)) => self.accelerator_bolt_fixed_update(b),
+                (Phase::Update, B::ArchelixBolt(b)) => self.archelix_bolt_update(b),
+                (Phase::Fixed, B::ArchelixBolt(b)) => self.archelix_bolt_fixed_update(b),
+                (Phase::Update, B::UniversalBell(b)) => self.universal_bell_update(b),
+                // ValveBehaviour.Update: the container update (valve.rs).
+                (Phase::Update, B::Valve(v)) => self.valve_update(v),
+                (Phase::Update, B::HeartMonitor(h)) => self.heart_monitor_update(h),
+                (Phase::Update, B::Excalibur(e)) => self.excalibur_update(e),
+                (Phase::Update, B::BloodTank(t)) => self.blood_tank_update(t),
+                // LagboxBehaviour.Update only turns the knob (presentation).
+                (Phase::Update, B::TimedGate(_)) => {}
+                (Phase::Fixed, B::UniversalBell(b)) => self.universal_bell_fixed_update(b),
+                (Phase::Fixed, B::ToggleableMirror(m)) => self.toggleable_mirror_fixed_update(m),
                 // FireSoundEmitter.FixedUpdate only sets the fire loop's volume at its position (sound only, as
                 // PhysicalBehaviour's FuzzySetVolumeAt call is); the translated runtime cannot read a bare Transform's position.
                 (Phase::Fixed, B::Translated(super::translated::TBehaviour::FireSoundEmitter(_))) => {}
@@ -1043,6 +1062,7 @@ impl Game {
         self.blood_puff_pool_update();
         self.splash_pool_update();
         self.tracer_pool_update();
+        self.pool_update();
         // Execution order 1050, above every spawnable script's.
         self.catalog_update();
         // CameraControlBehaviour.Update is the last Update; then the coroutines.
@@ -1064,6 +1084,8 @@ impl Game {
         }
         self.blood_puff_particles_update();
         self.splash_particles_update();
+        // The renderers' update: the bolts' trails.
+        self.archelix_trails_update();
         // The Starts still due after the LateUpdate phase (a Person spawned this frame), before the render.
         self.run_pending_starts();
     }
@@ -1071,6 +1093,9 @@ impl Game {
     /// The render after LateUpdate: SkinMaterialHandler.OnWillRenderObject of each limb the camera drew, in call
     /// order (the UE snapshot's `rendered`; before dump17 every limb was on screen). bloodColor is render state.
     pub fn render_callbacks(&mut self, s: &Snapshot) -> Result<(), String> {
+        if !self.foliages.is_empty() {
+            unimplemented!("FoliageBehaviour.OnWillRenderObject in a recording (its leaves aren't in `rendered`)");
+        }
         let drawn: Vec<usize> = match s.snap.iter().find(|(k, _)| k == "rendered") {
             Some((_, names)) => names.split(';').filter(|n| !n.is_empty()).map(|n| {
                 self.limbs.iter().position(|l| self.physicals[l.PhysicalBehaviour].name == n).ok_or(format!("rendered: no limb {n}"))

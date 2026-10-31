@@ -331,6 +331,15 @@ impl Default for ShatteredObjectGenerator {
     }
 }
 
+/// A ShatteredObjectGenerator as its prefab serialized it, with the references Generate hands to the shards it
+/// makes. `file` is the prefab's file (the references resolve against it).
+#[derive(Clone, Debug, Default)]
+pub struct GeneratorSource {
+    pub g: ShatteredObjectGenerator,
+    /// PartsPhysicalProperties
+    pub properties: super::physical::PhysicalProperties,
+}
+
 /// `toReplace` (Transform): position, rotation and lossyScale.
 #[derive(Clone, Copy, Debug)]
 pub struct ToReplace {

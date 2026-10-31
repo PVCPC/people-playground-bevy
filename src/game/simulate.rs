@@ -517,6 +517,9 @@ impl Game {
                 // The JointBreakSoundBehaviours on the joint's GameObject come after the scripts above in component
                 // order, and the destroy draws nothing.
                 self.joint_break_sound_on_break(j);
+                if let Some(id) = self.break_joint_component(j) {
+                    self.break_joint_scripts_on_break(id);
+                }
                 self.joint_helpers_on_break(j);
                 self.joint_break_limits.retain(|&k| k != j);
             }
@@ -562,6 +565,7 @@ impl Game {
                 let c = self.world.script_collision(col, collider.id);
                 // The collider's own GameObject first (a TorchBehaviour without a PhysicalBehaviour), then the physical's.
                 self.torch_collision_on_collider(collider.id, r.message, &c);
+                self.gorse_projectile_collision(collider.id, r.message, &c);
                 if let Some(p) = self.physical_of_collider(collider.id) {
                     self.send_collision_message(p, r.message, &c);
                 }
@@ -581,7 +585,7 @@ impl Game {
     fn send_collision_message(&mut self, p: usize, m: Message, c: &ScriptCollision) {
         let limb = self.limbs.iter().position(|l| l.PhysicalBehaviour == p);
         let destroyable = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p);
-        let explosive = self.explosives.iter().position(|x| x.physical == Some(p));
+        let explosives = self.explosives_on(p);
         // The other scripts that take collisions, before and after the PhysicalBehaviour, in component order.
         let act_on_collide = self.act_on_collides.iter().position(|x| x.physical == Some(p));
         let side = |g: &Self, after: bool| -> Vec<(usize, super::acts::CollisionScript)> {
@@ -590,7 +594,7 @@ impl Game {
             if let Some(x) = destroyable.filter(|&x| g.destroyables[x].after_physical == after) {
                 v.push((g.destroyables[x].index, S::Destroyable(x)));
             }
-            if let Some(e) = explosive.filter(|&e| g.explosives[e].after_physical == after) {
+            for &e in explosives.iter().filter(|&&e| g.explosives[e].after_physical == after) {
                 v.push((g.explosives[e].index, S::Explosive(e)));
             }
             if let Some(a) = act_on_collide.filter(|&a| g.act_on_collides[a].after_physical == after) {
@@ -616,6 +620,12 @@ impl Game {
             }
             if let Some(t) = g.televisions.iter().position(|x| x.physical == p && x.after_physical == after) {
                 v.push((g.televisions[t].index, S::Television(t)));
+            }
+            if let Some(w) = g.wrenches.iter().position(|x| x.physical == p && x.after_physical == after) {
+                v.push((g.wrenches[w].index, S::Wrench(w)));
+            }
+            if let Some(n) = g.no_collide_body_parts.iter().position(|x| x.physical == p && x.after_physical == after) {
+                v.push((g.no_collide_body_parts[n].index, S::NoCollideBodyPart(n)));
             }
             v.extend(g.tr.collision_scripts.iter().filter(|s| s.physical == p && s.after_physical == after).map(|s| (s.index, S::Translated(s.b))));
             v.sort_by_key(|&(i, _)| i);

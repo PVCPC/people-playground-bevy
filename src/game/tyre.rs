@@ -88,6 +88,18 @@ impl Game {
         self.tyres[t].initialOffset = offset;
     }
 
+    /// TyreDeflationBehaviour.Repair: Deflated = false; Collider.radius = initial.Radius; Collider.offset = initial.Offset.
+    /// The deflated material is rendering.
+    pub fn tyre_repair(&mut self, t: usize) {
+        self.tyres[t].Deflated = false;
+        let s = &self.tyres[t];
+        let (id, key, radius, offset) = (s.id, s.collider, s.initialRadius, s.initialOffset);
+        self.with_component_instance(id, |g, inst, _| {
+            g.circle_set_radius(inst, key, radius);
+            g.circle_set_offset(inst, key, offset);
+        });
+    }
+
     /// TyreDeflationBehaviour.Start: a Deflated tyre takes the deflated circle. The material, the sag property block
     /// and the context menu buttons are rendering and UI.
     pub fn tyre_start(&mut self, t: usize) {

@@ -261,12 +261,15 @@ impl Game {
             return;
         }
         let limbs = self.people[person].Limbs.clone();
-        // DisintegrationCount reached the limb count, so every limb went through PhysicalBehaviour.Disintegrate and
-        // its GameObject is inactive (no OnDisable left to run, the b2 body, joints and colliders already gone).
+        // DisintegrationCount reached the limb count, so normally every limb went through PhysicalBehaviour.Disintegrate and
+        // its GameObject is inactive (no OnDisable left to run, the b2 body, joints and colliders already gone). Otherwise
+        // the generic hierarchy destroy runs: OnDisable of every active script, then each component's OnDestroy.
         for &l in &limbs {
             let p = self.limbs[l].PhysicalBehaviour;
             if self.limb_active(l) || self.physicals[p].rigidbody.detached.is_none() {
-                unimplemented!("Object.Destroy of a person with an active limb: OnDisable order of the hierarchy");
+                let id = self.people[person].id;
+                self.run_object_destroy(id);
+                return;
             }
         }
         // PersonBehaviour.OnDestroy: AliveBehaviour.AliveByTransform.Remove(transform), a lookup nothing rewritten reads.
@@ -314,11 +317,7 @@ impl Game {
     pub(super) fn limb_destroy_joints(&mut self, l: usize) {
         self.remove_spring_joint(l);
         if let Some(h) = self.limbs[l].Joint {
-            if let Some(j) = self.hinges[h].joint.take() {
-                self.world.destroy_joint(j);
-            }
-            self.hinges[h].destroyed = true;
-            self.joint_break_limits.retain(|&k| k != super::BreakJoint::Hinge(h));
+            self.run_hinge_destroy(h);
         }
         // The bleeding particles are children of the limb (and the extraDecals splat of the particle).
         for i in self.circulations[l].BleedingParticles.clone() {
@@ -327,6 +326,16 @@ impl Game {
                 self.splats[s].destroyed = true;
             }
         }
+    }
+
+    /// The delayed Object.Destroy of a hinge (HingeJoint2D::Cleanup): its b2 joint and break-limit entry go.
+    pub(super) fn run_hinge_destroy(&mut self, h: usize) {
+        self.hinges[h].destroy_at = None;
+        if let Some(j) = self.hinges[h].joint.take() {
+            self.world.destroy_joint(j);
+        }
+        self.hinges[h].destroyed = true;
+        self.joint_break_limits.retain(|&k| k != super::BreakJoint::Hinge(h));
     }
 
     pub fn add_pain(&mut self, person: usize, intensity: f32) {
@@ -446,7 +455,11 @@ impl Game {
                 && !self.people[person].HasAlreadyBeenDeadOnce
                 && self.random.value() < 0.02
             {
-                // ponytail: HolleManPrefab spawn (zombie easter egg) is not rewritten yet.
+                // Object.Instantiate(Global.main.HolleManPrefab, Head.transform.position, identity).
+                let h = head.unwrap();
+                let source = self.holle_man_prefab.unwrap_or_else(|| unimplemented!("Object.Instantiate(null HolleManPrefab) (ArgumentException)"));
+                let position = self.physicals[self.limbs[h].PhysicalBehaviour].transform.position;
+                self.spawn_prefab(source, position);
             }
             self.people[person].HasAlreadyBeenDeadOnce = true;
         } else if alive && self.people[person].dead {

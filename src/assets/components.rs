@@ -803,3 +803,49 @@ impl ParticleSystemHead {
         Ok(Self { length_in_sec, simulation_speed, stop_action, looping })
     }
 }
+
+/// What the simulation reads of a TrailRenderer (class 96): the Renderer head as a SpriteRenderer's, then m_Time; the
+/// rest (m_Parameters: width, curve, gradient) is rendering, and m_MinVertexDistance, m_Autodestruct and m_Emitting
+/// are the last 6 bytes (a float and two bools).
+#[derive(Clone, Copy, Debug)]
+pub struct TrailHead {
+    pub enabled: bool,
+    pub time: f32,
+    pub min_vertex_distance: f32,
+    pub autodestruct: bool,
+    pub emitting: bool,
+}
+
+impl TrailHead {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        PPtr::read(r)?;
+        let enabled = r.bool()?;
+        r.bytes(8)?;
+        r.align();
+        r.u32()?; // m_RenderingLayerMask
+        r.i32()?; // m_RendererPriority
+        (r.u16()?, r.u16()?); // m_LightmapIndex
+        let _: [[f32; 4]; 2] = [floats(r)?, floats(r)?];
+        vec(r, PPtr::read)?; // m_Materials
+        (r.u16()?, r.u16()?); // m_StaticBatchInfo
+        for _ in 0..3 {
+            PPtr::read(r)?; // m_StaticBatchRoot, m_ProbeAnchor, m_LightProbeVolumeOverride
+        }
+        r.i32()?; // m_SortingLayerID
+        r.i16()?; // m_SortingLayer
+        r.i16()?; // m_SortingOrder
+        r.align();
+        let time = r.f32()?;
+        let n = data.len();
+        if n < r.pos + 6 {
+            return Err("TrailRenderer: no tail".into());
+        }
+        let tail = &data[n - 6..];
+        if tail[4] > 1 || tail[5] > 1 {
+            return Err("TrailRenderer: unexpected tail".into());
+        }
+        let min_vertex_distance = f32::from_le_bytes(tail[..4].try_into().unwrap());
+        Ok(Self { enabled, time, min_vertex_distance, autodestruct: tail[4] == 1, emitting: tail[5] == 1 })
+    }
+}

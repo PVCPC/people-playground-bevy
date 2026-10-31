@@ -84,8 +84,8 @@ impl Game {
                 ex.Position = [vector[0], vector[1], 0.0];
                 self.explosion_creator_explode(ex);
                 let p = self.hit_transform_physical(&hit);
-                self.send_shot(hit.collider, p, normal, point, 35.0, false);
-                self.send_shot(hit.collider, p, normal, point, 35.0, true);
+                self.send_shot(hit.collider, p, normal, point, 35.0, false, None);
+                self.send_shot(hit.collider, p, normal, point, 35.0, true, None);
                 self.send_break(hit.collider, p, [num2 * right[0], num2 * right[1]]);
             }
             None => {

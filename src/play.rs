@@ -144,21 +144,46 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
                     g.input.mouse = [g.BoundingBox.center[0] + dx, g.BoundingBox.center[1], 0.0];
                 }
             }
-            // PP_ATTACH=<attachment item>[,<point index>]: on frame 900 that item is dropped on the gun's attachment point.
-            if let Ok(spec) = std::env::var("PP_ATTACH") {
-                let mut it = spec.split(',');
-                let name = it.next().unwrap();
-                let pt: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-                if n == 899 {
-                    g.catalog_selected = Some(name.to_string());
-                    g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: true, held: true, up: false });
+        }
+        // PP_ATTACH=<attachment item>[,<point index>]: on frame 900 that item is dropped on the gun's attachment point.
+        if let Ok(spec) = std::env::var("PP_ATTACH") {
+            let mut it = spec.split(',');
+            let name = it.next().unwrap();
+            let pt: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            if n == 899 {
+                g.catalog_selected = Some(name.to_string());
+                g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: true, held: true, up: false });
+            }
+            if n == 900 {
+                g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: false, held: false, up: true });
+                let at = g.attachment_point_position(pt);
+                g.input.mouse = at;
+                println!("attachment point {pt} at {at:?}");
+            }
+            // The gun fires with the attachment on it (frames 1000, 1040, 1080), then the attachment is activated: it disconnects.
+            let (gun, att) = if n >= 901 { (g.firearms[0].physical.unwrap(), g.firearm_attachments[0].physical.unwrap()) } else { (0, 0) };
+            let report = |g: &crate::game::Game, what: &str| {
+                let (a, f) = (&g.firearm_attachments[0], &g.firearms[0]);
+                let em = f.emitter.as_ref();
+                println!(
+                    "{what}: connected={} listeners={:?} parent={} driven={} charge={} gun temp={} applyCharge={} inaccuracy={:?} explosive={:?} laser={:?} on fire={} burn sum={} limb health sum={}",
+                    a.Connected, f.attachments, g.physicals[att].parent.is_some(), g.physicals[att].driven_by.is_some(), g.physicals[gun].charge, g.physicals[gun].Temperature, f.ApplyCharge, f.InaccuracyMultipliers,
+                    em.map(|e| (e.ExplosiveRound, e.ExplodeAtHitPoint)), a.laser.map(|l| g.lasers[l].Activated),
+                    g.physicals.iter().filter(|p| p.OnFire).count(), g.physicals.iter().map(|p| p.BurnProgress).sum::<f32>(),
+                    g.limbs.iter().map(|l| l.Health).sum::<f32>()
+                );
+            };
+            match n {
+                ..901 => {}
+                960 | 1120 | 1260 | 1400 => report(&g, &format!("frame {n}")),
+                1000 | 1040 | 1080 => g.activate_for_test(gun),
+                1200 if std::env::var("PP_ATTACH_DESTROY").is_err() => g.activate_for_test(att),
+                // PP_ATTACH_DESTROY=gun|att: that object is destroyed while connected, instead of the attachment being activated.
+                1100 if std::env::var("PP_ATTACH_DESTROY").is_ok() => {
+                    let victim = if std::env::var("PP_ATTACH_DESTROY").is_ok_and(|v| v == "gun") { gun } else { att };
+                    g.destroy_object(g.physicals[victim].id);
                 }
-                if n == 900 {
-                    g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: false, held: false, up: true });
-                    let at = g.attachment_point_position(pt);
-                    g.input.mouse = at;
-                    println!("attachment point {pt} at {at:?}");
-                }
+                _ => {}
             }
         }
         if let Err(m) = step(&mut g, 1.0 / 60.0) {
@@ -250,6 +275,7 @@ pub(crate) fn step(g: &mut Game, real: f32) -> Result<(), String> {
                 g.skin_will_render(l);
             }
         }
+        g.foliage_will_render(g.input.view);
         g.end_of_frame_calls();
     }))
     .map_err(panic_message)

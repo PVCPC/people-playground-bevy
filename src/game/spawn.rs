@@ -548,6 +548,7 @@ impl Game {
         if active {
             let scripts = self.activate(inst, o);
             self.attached_set_active(inst, o, true);
+            self.refresh_renderers(inst, o);
             return scripts;
         }
         inst.objects[o].self_active = false;
@@ -555,7 +556,22 @@ impl Game {
         let mut scripts = Vec::new();
         self.deactivate_recursively(inst, &prefab, o, &mut scripts);
         self.attached_set_active(inst, o, false);
+        self.refresh_renderers(inst, o);
         scripts
+    }
+
+    /// The drawn SpriteRenderers of the subtree follow activeInHierarchy (Renderer.enabled is the prefab's).
+    fn refresh_renderers(&mut self, inst: &Instance, o: usize) {
+        for d in std::iter::once(o).chain(inst.descendants(o)) {
+            for (k, (_, comp)) in inst.prefab.objects[d].components.iter().enumerate() {
+                if let Component::SpriteRenderer(r) = comp {
+                    let id = inst.objects[d].components[k];
+                    if let Some(x) = self.renderers.iter_mut().find(|x| x.id == id) {
+                        x.visible = inst.objects[d].active && r.enabled;
+                    }
+                }
+            }
+        }
     }
 
     /// GameObject.SetActive(true): the flag, then (with the parents active) ActivateAwakeRecursivelyInternal queues
@@ -721,6 +737,8 @@ impl Game {
         for (_, id) in self.world.body(body).joints.clone().into_iter().rev() {
             if let Some(&(jo, jc)) = inst.joints.iter().find(|(_, j)| **j == id).map(|(k, _)| k) {
                 self.joint2d_deactivate(inst, prefab, jo, jc);
+            } else if self.attachment_joint_cleanup(id) {
+                // The HingeJoint2D a FirearmAttachmentPointBehaviour added to its firearm: Joint2D::Cleanup.
             } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(id)) {
                 // A Fixed/SliderJoint2D HingeJointLimitAutofixBehaviour took over from the instance.
                 self.fixed_joint_cleanup(f, false);
@@ -1455,6 +1473,10 @@ impl Game {
         let body = inst.bodies[&o];
         for (_, id) in self.world.body(body).joints.clone().into_iter().rev() {
             let Some(&(jo, jc)) = inst.joints.iter().find(|(_, j)| **j == id).map(|(k, _)| k) else {
+                // The HingeJoint2D a FirearmAttachmentPointBehaviour added to its firearm.
+                if self.attachment_joint_recreate(id) {
+                    continue;
+                }
                 // A Fixed/SliderJoint2D HingeJointLimitAutofixBehaviour took over from the instance.
                 let f = self.fixed_joints.iter().position(|f| f.joint == Some(id)).unwrap_or_else(|| unimplemented!("RecreateJoints: a joint outside the instance"));
                 self.fixed_joint_recreate(f);

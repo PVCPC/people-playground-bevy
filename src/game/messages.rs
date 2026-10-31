@@ -71,7 +71,7 @@ impl Game {
     }
 
     /// The Joint2D component id of a joint in the break-limit list, when the rewrite keeps one.
-    fn break_joint_component(&self, j: BreakJoint) -> Option<i32> {
+    pub(super) fn break_joint_component(&self, j: BreakJoint) -> Option<i32> {
         match j {
             BreakJoint::Anchored(a) => Some(self.anchored_joints[a].component),
             BreakJoint::Hinge(h) => self.anchored_joints.iter().find(|a| a.hinge == Some(h)).map(|a| a.component),

@@ -2,14 +2,12 @@
 //! FirearmAttachmentPointBehaviour on the guns. Awake caches the PhysicalBehaviour and adds a CheckOnDestroyAttachment
 //! (one instance id).
 //!
-//! A point's OnTriggerEnter2D, ConnectAttachment up to its Transform.SetParent and GetLocalJointAnchor are rewritten (the
-//! attachment takes the firearm's scale and rotation and the HingeJoint2D is built into the b2 world). The
-//! `Transform.SetParent(firearm)` of the attachment's Rigidbody2D object under the firearm's is a live transform
-//! hierarchy between two separately spawned bodies, which the rewrite does not model (a Rigidbody2D object's Transform
-//! is only a child of another one inside one prefab), so ConnectAttachment stops there. What lies behind it (the
-//! listener lists, Connect, OnConnect/OnDisconnect/OnHit of each subclass) is written below but can only run once a
-//! connection exists; until then `Connected` stays false and Use, Battery's FixedUpdate and
-//! CheckOnDestroyAttachment.OnDestroy (which act only when Connected) do nothing.
+//! A point's OnTriggerEnter2D, ConnectAttachment, DisconnectAttachment and DisconnectOnAttachmentDestroyed, and
+//! CheckOnDestroyAttachment.OnDestroy are rewritten: the attachment takes the firearm's scale and rotation, a
+//! HingeJoint2D (limits 0..0) is built into the b2 world between the firearm and the attachment, the attachment's
+//! Rigidbody2D object becomes a child of the firearm's Transform (`reparent.rs`) and its listeners and OnConnect run.
+//! The HingeJoint2D is the point's: it is re-created when either body's Transform changes, cleaned up with a
+//! deactivated body and destroyed (delayed, as Object.Destroy is) on disconnect.
 #![allow(non_snake_case)]
 
 use super::explosion::{EffectSize, ExplosionParameters};
@@ -81,6 +79,20 @@ pub struct AttachmentPoint {
     pub ignoreConnect: bool,
     /// The HingeJoint2D.
     pub joint: Option<JointId>,
+    /// The HingeJoint2D's anchor (in the firearm's space) and the angles HingeJoint2D::Cleanup(false) kept for its next Create.
+    pub anchor: [f32; 2],
+    pub kept: Option<KeptAngles>,
+    /// The component's attached object (the firearm) and connectedBody (the attachment), as PhysicalBehaviours: they stay
+    /// the joint's after the point forgets the attachment.
+    pub jointed: Option<(usize, usize)>,
+}
+
+/// What HingeJoint2D::Cleanup(false) keeps: the reference angle and both body angles.
+#[derive(Clone, Copy, Debug)]
+pub struct KeptAngles {
+    pub reference_angle: f32,
+    pub body_angle_a: f32,
+    pub body_angle_b: f32,
 }
 
 impl Game {
@@ -91,10 +103,12 @@ impl Game {
     }
 
     /// FirearmAttachmentBehaviour.Use: `if (AttachmentPoint)` and the propagation's Target is this object, which
-    /// disconnects it; an attachment that is not connected has no point to act through.
-    pub fn firearm_attachment_use(&mut self, a: usize) {
-        if self.firearm_attachments[a].Connected {
-            unimplemented!("FirearmAttachmentBehaviour.Use on a connected attachment (AttachmentPoint.DisconnectAttachment; nothing connects until ConnectAttachment's Transform.SetParent is rewritten)");
+    /// disconnects it. `target` is the physical a direct activation was made on (ActivationPropagation.Target): a
+    /// firearm's activation broadcasts to its attachment too, with the firearm as Target.
+    pub fn firearm_attachment_use(&mut self, a: usize, target: usize) {
+        let Some(pt) = self.firearm_attachments[a].point.filter(|&pt| !self.destroyed_components.contains(&self.attachment_points[pt].id)) else { return };
+        if self.firearm_attachments[a].physical == Some(target) {
+            self.attachment_point_disconnect(pt);
         }
     }
 
@@ -186,6 +200,11 @@ impl Game {
         [w[0], w[1], w[2]]
     }
 
+    /// A direct activation of physical `p` (the test harness; the tool does it for the hovered or selected one).
+    pub fn activate_for_test(&mut self, p: usize) {
+        self.activate_direct(p);
+    }
+
     /// FirearmAttachmentPointBehaviour.ConnectAttachment.
     fn connect_attachment(&mut self, pt: usize) {
         let a = self.attachment_points[pt].FirearmAttachment.expect("ConnectAttachment without an attachment");
@@ -215,24 +234,59 @@ impl Game {
             inst.set_world_rotation(o, rotation);
             g.physicals[att].transform = super::link::pose(inst, o);
         });
-        if let Some(i) = self.retained.iter().position(|i| i.objects.iter().any(|x| x.components.contains(&att_id))) {
-            let inst = self.retained.remove(i);
-            self.unsynced.push(inst);
-        }
+        self.unsync_instance_of(att_id);
         // AddComponent<HingeJoint2D>() (one instance id), and the setters; connectedBody flushes the transform sync.
         self.allocate_instance_id();
         let anchor = self.attachment_local_joint_anchor(pt, a, gun);
         self.sync_pending();
+        self.attachment_points[pt].anchor = anchor;
+        self.attachment_points[pt].kept = None;
+        self.attachment_points[pt].jointed = Some((gun, att));
+        self.world.wake_body(self.physicals[gun].rigidbody.body);
+        self.attachment_create_joint(pt);
+        // FirearmAttachment.transform.SetParent(firearm.transform), then the listeners and Connect().
+        self.physical_set_parent(att, gun);
+        self.connect_attachment_listeners(a, f);
+    }
+
+    /// Joint2D::Create of the point's HingeJoint2D on the firearm (anchor A, connectedAnchor zero on the attachment,
+    /// limits 0..0): the reference angle is the attached body's angle difference, or what Cleanup kept (moved a turn when a
+    /// body angle wrapped, as hinge_joint2d_create does).
+    fn attachment_create_joint(&mut self, pt: usize) {
+        let (gun, att) = self.attachment_points[pt].jointed.expect("a HingeJoint2D without its bodies");
         let (ph_g, ph_a) = (&self.physicals[gun], &self.physicals[att]);
         if !ph_a.active || ph_g.rigidbody.detached.is_some() || ph_a.rigidbody.detached.is_some() {
-            unimplemented!("FirearmAttachmentPointBehaviour.ConnectAttachment: a HingeJoint2D to an inactive object");
+            unimplemented!("FirearmAttachmentPointBehaviour: a HingeJoint2D to an inactive object");
         }
         let (ba, bb) = (ph_g.rigidbody.body, ph_a.rigidbody.body);
+        let (angle_a, angle_b) = (self.world.body(ba).sweep.a, self.world.body(bb).sweep.a);
+        let reference_angle = match self.attachment_points[pt].kept {
+            None => angle_b - angle_a,
+            Some(k) => {
+                const PI: f32 = f32::from_bits(0x4049_0fdb);
+                const TAU: f32 = f32::from_bits(0x40c9_0fdb);
+                const TOLERANCE: f32 = f32::from_bits(0x3d0e_fa36);
+                let near = |x: f32, y: f32| TOLERANCE >= (x - y).abs();
+                let (prev_a, prev_b, mut r) = (k.body_angle_a, k.body_angle_b, k.reference_angle);
+                if prev_a > PI && near(angle_a, prev_a - TAU) {
+                    r += TAU;
+                } else if -PI > prev_a && near(angle_a, prev_a + TAU) {
+                    r -= TAU;
+                }
+                if prev_b > PI && near(angle_b, prev_b - TAU) {
+                    r -= TAU;
+                } else if -PI > prev_a && near(angle_b, prev_b + TAU) {
+                    r += TAU;
+                }
+                r
+            }
+        };
+        let anchor = self.attachment_points[pt].anchor;
         let s = self.lossy_scale(gun);
         let def = RevoluteDef {
             local_anchor_a: V::new(s[0] * anchor[0], s[1] * anchor[1]),
             local_anchor_b: V::ZERO,
-            reference_angle: self.world.body(bb).sweep.a - self.world.body(ba).sweep.a,
+            reference_angle,
             enable_limit: true,
             lower_angle: 0.0,
             upper_angle: 0.0,
@@ -240,17 +294,100 @@ impl Game {
             motor_speed: 0.0,
             max_motor_torque: 10000.0,
         };
-        self.world.wake_body(ba);
         let joint = self.world.create_joint(def, ba, bb, false);
         self.world.wake_joined(ba);
         self.world.wake_joined(bb);
         self.attachment_points[pt].joint = Some(joint);
-        unimplemented!("FirearmAttachmentPointBehaviour.ConnectAttachment: Transform.SetParent of the attachment's Rigidbody2D object under the firearm's (a transform hierarchy between two separately spawned bodies); then OnFire/BulletEntryEvent listeners, Connect() and OnConnect");
+    }
+
+    /// The point whose HingeJoint2D is the b2 joint `j`.
+    fn point_of_joint(&self, j: JointId) -> Option<usize> {
+        self.attachment_points.iter().position(|p| p.joint == Some(j))
+    }
+
+    /// HingeJoint2D::Cleanup(false) of the point's joint `j` (Rigidbody2D::Cleanup, Deactivate, ReCreate): the angles are
+    /// kept for the next Create and the b2 joint goes. False when `j` is not a point's.
+    pub(super) fn attachment_joint_cleanup(&mut self, j: JointId) -> bool {
+        let Some(pt) = self.point_of_joint(j) else { return false };
+        let joint = self.world.joints[j].as_ref().expect("a point's HingeJoint2D without its b2 joint");
+        let (a, b, reference_angle) = (joint.body_a, joint.body_b, joint.revolute().def.reference_angle);
+        self.attachment_points[pt].kept = Some(KeptAngles { reference_angle, body_angle_a: self.world.body(a).sweep.a, body_angle_b: self.world.body(b).sweep.a });
+        self.attachment_points[pt].joint = None;
+        self.world.destroy_joint(j);
+        true
+    }
+
+    /// Joint2D::ReCreate of the point's joint `j` (a body of it had its Transform changed): Cleanup, then Create while
+    /// both objects are active. False when `j` is not a point's.
+    pub(super) fn attachment_joint_recreate(&mut self, j: JointId) -> bool {
+        let Some(pt) = self.point_of_joint(j) else { return false };
+        self.attachment_joint_cleanup(j);
+        self.attachment_create_joint(pt);
+        true
+    }
+
+    /// Object.Destroy(joint): DestroyObjectDelayed queues it at min(fixedTimeAsDouble, the frame's time); a second Destroy
+    /// finds it queued.
+    fn attachment_destroy_joint(&mut self, pt: usize) {
+        let Some(j) = self.attachment_points[pt].joint else { return };
+        if !self.attachment_joint_destroys.iter().any(|&(_, k)| k == j) {
+            let at = self.time.fixedTimeAsDouble.min(self.time.timeAsDouble);
+            self.attachment_joint_destroys.push((at, j));
+        }
+    }
+
+    /// The delayed destroy of a point's HingeJoint2D: its Joint2D::Cleanup destroys the b2 joint; the component is gone, so
+    /// nothing is kept for a next Create.
+    pub(super) fn attachment_run_joint_destroy(&mut self, j: JointId) {
+        self.attachment_joint_destroys.retain(|&(_, k)| k != j);
+        if let Some(pt) = self.point_of_joint(j) {
+            self.attachment_joint_cleanup(j);
+            self.attachment_points[pt].kept = None;
+        }
+    }
+
+    /// FirearmAttachmentPointBehaviour.DisconnectAttachment (the attachment was activated directly).
+    fn attachment_point_disconnect(&mut self, pt: usize) {
+        self.attachment_points[pt].ignoreConnect = true;
+        self.attachment_destroy_joint(pt);
+        if let Some(a) = self.point_attachment(pt) {
+            self.attachment_on_disconnect(a);
+            let (f, att) = (self.attachment_points[pt].firearm, self.firearm_attachments[a].physical);
+            let x = &mut self.firearm_attachments[a];
+            (x.point, x.firearm, x.Connected) = (None, None, false);
+            // OnFire.RemoveListener and BulletEntryEvent.RemoveListener: the first entry.
+            if let Some(f) = f {
+                let list = &mut self.firearms[f].attachments;
+                if let Some(i) = list.iter().position(|&k| k == a) {
+                    list.remove(i);
+                }
+            }
+            self.physical_set_parent_null(att.expect("an attachment without a PhysicalBehaviour"));
+            self.attachment_points[pt].FirearmAttachment = None;
+        }
+        // detailViewBlob.enabled = true: rendering. StartCoroutine(ConnectDelay()): WaitForSeconds(0.75).
+        let id = self.attachment_points[pt].id;
+        self.start_wait(id, 0.75, super::destroyable::Step::AttachmentConnectDelay(pt));
+    }
+
+    /// CheckOnDestroyAttachment.OnDestroy of the object whose Transform id is `key` (the component FirearmAttachmentBehaviour.
+    /// Awake added): a connected attachment disconnects itself from its point, whose joint goes.
+    pub(super) fn check_on_destroy_attachment(&mut self, key: i32) {
+        let Some(a) = self.firearm_attachments.iter().position(|a| a.physical.is_some_and(|p| self.physicals[p].transform_id == key)) else { return };
+        if !self.firearm_attachments[a].Connected {
+            return;
+        }
+        self.attachment_on_disconnect(a);
+        // (bool)Attachment.AttachmentPoint: the point's object was not destroyed with it.
+        if let Some(pt) = self.firearm_attachments[a].point.filter(|&pt| !self.destroyed_components.contains(&self.attachment_points[pt].id)) {
+            // DisconnectOnAttachmentDestroyed: ignoreConnect = false, Destroy(joint).
+            self.attachment_points[pt].ignoreConnect = false;
+            self.attachment_destroy_joint(pt);
+        }
     }
 
     /// ConnectAttachment behind the SetParent: the OnFire and BulletEntryEvent listeners (always added and removed
     /// together, so one list serves both), then Connect().
-    #[allow(dead_code)]
     fn connect_attachment_listeners(&mut self, a: usize, f: usize) {
         self.firearms[f].attachments.push(a);
         if !self.firearm_attachments[a].Connected {
@@ -261,7 +398,6 @@ impl Game {
     }
 
     /// FirearmAttachmentBehaviour.OnConnect of each subclass.
-    #[allow(dead_code)]
     fn attachment_on_connect(&mut self, a: usize) {
         let x = &self.firearm_attachments[a];
         let Some(f) = x.firearm else { return };
@@ -298,7 +434,6 @@ impl Game {
     }
 
     /// FirearmAttachmentBehaviour.OnDisconnect of each subclass.
-    #[allow(dead_code)]
     fn attachment_on_disconnect(&mut self, a: usize) {
         let x = &self.firearm_attachments[a];
         let Some(f) = x.firearm else { return };
@@ -317,9 +452,11 @@ impl Game {
             }
             Kind::Battery => self.firearms[f].ApplyCharge = false,
             Kind::Explosive => {
-                let em = self.firearms[f].emitter.as_mut().expect("a firearm that has not started");
-                em.ExplosiveRound = false;
-                em.ExplodeAtHitPoint = false;
+                // The destroyed firearm's emitter is gone; the field writes on its dead object change nothing.
+                if let Some(em) = self.firearms[f].emitter.as_mut() {
+                    em.ExplosiveRound = false;
+                    em.ExplodeAtHitPoint = false;
+                }
             }
             Kind::Flashlight | Kind::Incendiary => {}
         }

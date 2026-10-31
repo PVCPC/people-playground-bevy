@@ -41,6 +41,8 @@ script! {
         GameObjectsToToggle: Vec<i32> = Vec::new(),
         /// OnDamaged's persistent calls reach only audio and particle components, or are all in `OnDamagedCalls`.
         OnDamagedPresentation: bool = true,
+        /// OnRepaired reaches only audio and particle components (checked when a repair runs).
+        OnRepairedPresentation: bool = true,
         OnDamagedCalls: Vec<super::link::EventCall> = Vec::new(),
         /// The component's instance id.
         id: i32 = 0,
@@ -133,6 +135,42 @@ impl Game {
     }
 
     /// DamagableMachineryBehaviour.ActOnDamage
+    /// DamagableMachineryBehaviour.Repair: when CanRepair, the temperature is held just under TemperatureThreshold, Health
+    /// gains a quarter of its initial value (clamped to it), and ActOnRepair runs.
+    pub(super) fn machinery_repair(&mut self, m: usize) {
+        if !self.machinery[m].CanRepair {
+            return;
+        }
+        let p = self.machinery[m].PhysicalBehaviour;
+        let limit = self.machinery[m].TemperatureThreshold - 1.0;
+        self.physicals[p].Temperature = super::mathf::min(self.physicals[p].Temperature, limit);
+        let mc = &mut self.machinery[m];
+        mc.Health += mc.initialHealth / 4.0;
+        mc.Health = super::mathf::clamp(mc.Health, 0.0, mc.initialHealth);
+        self.machinery_act_on_repair(m);
+    }
+
+    /// DamagableMachineryBehaviour.ActOnRepair: if Health is above 0.001, the object is no longer Destroyed and its
+    /// BurnProgress is 0. Its material is presentation. Re-enabling BehavioursToToggle and SetActive of
+    /// GameObjectsToToggle are not rewritten, and OnRepaired must reach only presentation.
+    fn machinery_act_on_repair(&mut self, m: usize) {
+        if !(self.machinery[m].Health > 0.001) {
+            return;
+        }
+        if !self.machinery[m].BehavioursToToggle.is_empty() {
+            unimplemented!("DamagableMachineryBehaviour.ActOnRepair: enabling BehavioursToToggle (not rewritten)");
+        }
+        if !self.machinery[m].GameObjectsToToggle.is_empty() {
+            unimplemented!("DamagableMachineryBehaviour.ActOnRepair: SetActive(true) of GameObjectsToToggle (not rewritten)");
+        }
+        if !self.machinery[m].OnRepairedPresentation {
+            unimplemented!("DamagableMachineryBehaviour.OnRepaired: a persistent call beyond audio and particles");
+        }
+        let p = self.machinery[m].PhysicalBehaviour;
+        self.physicals[p].BurnProgress = 0.0;
+        self.machinery[m].Destroyed = false;
+    }
+
     pub(super) fn machinery_act_on_damage(&mut self, m: usize) {
         let mc = &self.machinery[m];
         if !(mc.Health > 0.0) && !mc.Destroyed {
@@ -253,6 +291,11 @@ impl Game {
                     self.thrusterbed_on_disable(i);
                 }
             }
+            "ArchelixCasterBehaviour" => {
+                let i = self.archelix_casters.iter().position(|x| x.id == id).expect("an ArchelixCasterBehaviour in the arena");
+                // No OnDisable, and Start only (it is in no manager).
+                self.archelix_casters[i].enabled = false;
+            }
             "BlasterBehaviour" => {
                 let i = self.blasters.iter().position(|x| x.id == id).expect("a BlasterBehaviour in the arena");
                 if !std::mem::replace(&mut self.blasters[i].enabled, false) {
@@ -299,6 +342,7 @@ impl Game {
             || self.ray_guns.iter().any(|x| x.id == id && !x.enabled)
             || self.thrusterbeds.iter().any(|x| x.id == id && !x.enabled)
             || self.blasters.iter().any(|x| x.id == id && !x.enabled)
+            || self.archelix_casters.iter().any(|x| x.id == id && !x.enabled)
             || self.beamformers.iter().any(|x| x.id == id && !x.enabled)
             || self.scifi40s.iter().any(|x| x.id == id && !x.enabled)
     }

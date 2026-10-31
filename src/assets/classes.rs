@@ -164,3 +164,23 @@ mod tests {
         assert!(script.assembly.starts_with("Assembly-CSharp"), "{script:?}");
     }
 }
+
+/// AudioClip (83), up to m_Length.
+pub struct AudioClip {
+    pub frequency: i32,
+    /// AudioClip.length, in seconds.
+    pub length: f32,
+}
+
+impl AudioClip {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let _name = r.string()?;
+        let (_load_type, _channels, frequency, _bits_per_sample) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+        let length = r.f32()?;
+        if !(1000..=384000).contains(&frequency) || !(0.0..3600.0).contains(&length) {
+            return Err(format!("AudioClip: frequency {frequency}, length {length}"));
+        }
+        Ok(Self { frequency, length })
+    }
+}

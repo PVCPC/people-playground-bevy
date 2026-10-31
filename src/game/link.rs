@@ -62,6 +62,15 @@ pub struct Linked {
     pub miniguns: HashMap<usize, usize>,
     pub accelerators: HashMap<usize, usize>,
     pub accelerator_bolts: HashMap<usize, usize>,
+    pub archelix_casters: HashMap<usize, usize>,
+    pub archelix_bolts: HashMap<usize, usize>,
+    pub universal_bells: HashMap<usize, usize>,
+    pub toggleable_mirrors: HashMap<usize, usize>,
+    pub valves: HashMap<usize, usize>,
+    pub timed_gates: HashMap<usize, usize>,
+    pub heart_monitors: HashMap<usize, usize>,
+    pub excaliburs: HashMap<usize, usize>,
+    pub blood_tanks: HashMap<usize, usize>,
     pub explosives: HashMap<usize, usize>,
     pub delete_afters: HashMap<usize, usize>,
     pub point_to_velocities: HashMap<usize, usize>,
@@ -108,6 +117,7 @@ pub struct Linked {
     pub blasterbolts: HashMap<usize, usize>,
     pub beamformers: HashMap<usize, usize>,
     pub scifi40s: HashMap<usize, usize>,
+    pub effect_guns: HashMap<usize, usize>,
     pub signal_converters: HashMap<usize, usize>,
     pub syringe_explosions: HashMap<usize, usize>,
     pub point_liquids: HashMap<usize, usize>,
@@ -344,6 +354,8 @@ pub enum EventCall {
     JetForceShutoff(i32),
     WakeUp(i32),
     AddTorque(i32, f32),
+    /// LiquidSpreadAoEBehaviour.Spread by its component id.
+    LiquidSpread(i32),
 }
 
 /// UseEventTrigger: Use runs Event while enabled and (not OnlyOnce or never used). Nothing sets its Action.
@@ -388,6 +400,7 @@ fn try_event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance,
                 ("PhysicalBehaviour", "HaltNextPropagation") => Some(EventCall::HaltNextPropagation(inst.objects[o].components[c])),
                 ("DamagableMachineryBehaviour", "set_enabled") if on == Some(false) => Some(EventCall::DisableMachinery(inst.objects[o].components[c])),
                 ("JetEngineBehaviour", "ForceShutoff") => Some(EventCall::JetForceShutoff(inst.objects[o].components[c])),
+                ("LiquidSpreadAoEBehaviour", "Spread") => Some(EventCall::LiquidSpread(inst.objects[o].components[c])),
                 ("UseEventTrigger", "set_enabled") if on.is_some() => Some(EventCall::SetUseEventEnabled(inst.objects[o].components[c], on.unwrap())),
                 ("DeleteAfterTime", "set_enabled") if on == Some(true) => Some(EventCall::EnableDeleteAfter(inst.objects[o].components[c])),
                 ("RandomForceAtStart", "set_enabled") if on == Some(true) => {
@@ -502,7 +515,7 @@ pub(super) fn check_rewritten(class: &str) {
         "PhysicalBehaviour" | "LimbBehaviour" | "CirculationBehaviour" | "PersonBehaviour" | "SkinMaterialHandler" | "ConnectedNodeBehaviour"
         | "GoreStringBehaviour" | "GripBehaviour" | "HingeJointLimitAutofixBehaviour" | "MapLightBehaviour" | "MapConfig" | "BoundingBoxBehaviour"
         | "ActivateIfTutorial" | "WaterBehaviour" | "PlayAudioAtRandom" | "ShatteredObjectGenerator"
-        | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
+        | "JointBreakSoundBehaviour" | "DamagableMachineryBehaviour" | "DestroyableBehaviour" | "VaseBehaviour" | "ExplosionSoundBehviour" | "ActOnDestroy"
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
         | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" | "LaunchedRocketBehaviour"
         // Airfoil's Awake, Start and FixedUpdate are rewritten (airfoil.rs; its context menu buttons are UI). Stunner's Update is (stunner.rs).
@@ -542,6 +555,8 @@ pub(super) fn check_rewritten(class: &str) {
         // blaster.rs, scifi.rs: Awake caches components (the Disassembler's takes an AudioSource id), Start flips the
         // muzzle flash (BlasterBehaviour), shows or hides lines (BeamformerBehaviour); the bolt only has Update.
         "BlasterBehaviour" | "BlasterboltBehaviour" | "BeamformerBehaviour" | "GenericScifiWeapon40Behaviour" => {}
+        // effect_gun.rs: Awake adds an AudioSource (its id), Use and Affect are rewritten.
+        "HealthGunBehaviour" | "FreezeGunBehaviour" => {}
         // syringe.rs: Awake and OnWillRenderObject are rendering, Start's AddButtons is UI.
         c if super::syringe::is_syringe(c) || c == "SyringeExplosionBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
@@ -550,7 +565,7 @@ pub(super) fn check_rewritten(class: &str) {
         // OnEnable's two Random.value (`color_wave_on_enable`) feed only OnWillRenderObject's SpriteRenderer.color.
         "ColorWave" => {}
         // Start: see PendingStart::FirearmAttachmentPoint; OnTriggerEnter2D: `attachment_point_trigger_enter`; OnDestroy only
-        // destroys a connected attachment (none connects yet).
+        // destroys the FirearmAttachment component, which goes with its object.
         "FirearmAttachmentPointBehaviour" => {}
         // Awake keeps the bodies' masses for OnMakeWeightful; nothing rewritten sends OnMakeWeightless/OnMakeWeightful.
         "WeightlessHelper" => {}
@@ -579,6 +594,44 @@ pub(super) fn check_rewritten(class: &str) {
         "AcceleratorGunBehaviour" => {}
         // Update and FixedUpdate are rewritten (accelerator.rs, bolt.rs for the flight); the bolt has no Awake or Start.
         "AcceleratorBoltBehaviour" => {}
+        // Start and Use (the BurstShot coroutine) are rewritten (archelix.rs); the muzzle flash and sounds are presentation.
+        "ArchelixCasterBehaviour" => {}
+        // Start, Update, FixedUpdate, OnHit, DespawnRoutine and OnPoolableInitialised are rewritten (archelix.rs, pool.rs).
+        "ArchelixCasterBoltBehaviour" => {}
+        // Start, FixedUpdate and Update are rewritten (universal_bell.rs); Awake, colours and labels are presentation.
+        "UniversalBellBehaviour" => {}
+        // FixedUpdate is rewritten (mirror.rs); Awake and OnWillRenderObject set the shader's progress only.
+        "ToggleableMirrorBehaviour" => {}
+        // Awake (linked), Start and OnWillRenderObject are rewritten (foliage.rs); the property block is presentation.
+        "FoliageBehaviour" => {}
+        // Awake, Update, OnJointBreak2D, Shot, Slice and OnEnable's GetComponent are rewritten (breakjoint.rs).
+        "BreakJointOnBurnBehaviour" | "BreakJointOnShotBehaviour" => {}
+        // Awake (linked) and FixedUpdate are rewritten (shake.rs); the one-shot itself is audio.
+        "SoundOnShakeBehaviour" => {}
+        // FixedUpdate and OnCollisionEnter2D are rewritten (gorse.rs); Start caches the emission module only.
+        "GorseDroolingBehaviour" | "GorseProjectileBehaviour" => {}
+        // Start and FixedUpdate are rewritten (misc.rs); OnCollide has no subscriber outside the rewrite's checks.
+        "FancyBloodSplatController" => {}
+        // FixedUpdate only feeds ParticleSystem.Emit (the native particle RNG): presentation, and a null rb or ps only
+        // throws inside it.
+        "EmitParticlesOnShakeBehaviour" => {}
+        // Start and Spread are rewritten (liquid_spread.rs).
+        "LiquidSpreadAoEBehaviour" => {}
+        // OnCollisionEnter2D is rewritten (wrench.rs); its android limb heal and Repair receivers stop there.
+        "WrenchBehaviour" => {}
+        // OnCollisionEnter2D is rewritten (no_collide.rs).
+        "NoCollideWithBodyPart" => {}
+        // Start and Update are rewritten (blood_tank.rs); its splat's OnCollide listener is set at link time.
+        "BloodTankBehaviour" => {}
+        // Update and Use are rewritten (valve.rs); Awake, Start, the display and OnWillRenderObject are presentation.
+        "ValveBehaviour" => {}
+        // Awake sets the physical's delay, Start and OnEnable resume a busy DoLag, Use and OnDisable are rewritten (timed_gate.rs).
+        "TimedGateBehaviour" => {}
+        // Use and Update are rewritten (heart_monitor.rs); Awake, Start, OnEnable and the display are presentation.
+        "HeartMonitorBehaviour" => {}
+        // Use and Update are rewritten (excalibur.rs); Awake, the glow and the sounds are presentation. CastSpell and
+        // the fireball stop there.
+        "ExcaliburBehaviour" => {}
         // Start sets the static Instance that the bolt's lightning calls Emit on (lightning.rs); it has no other state.
         "SimpleLightningEmitterBehaviour" => {}
         // Awake only subscribes SyncSprite to the parent's OnAfterChange (the sprite is presentation). It draws nothing.
@@ -594,6 +647,47 @@ pub(super) fn check_rewritten(class: &str) {
 }
 
 impl Game {
+    /// The ShatteredObjectGenerator component `reference` points at, as a `shatter_generators` entry (None for a null reference).
+    fn load_shatter_generator(&mut self, db: &mut AssetDb, l: &Linker, reference: &Value) -> Result<Option<usize>, String> {
+        let p = reference.pptr().ok_or("ShatteredObjectSpriteInitialiser: not a reference")?;
+        if p.is_null() {
+            return Ok(None);
+        }
+        let &(o, c) = l.prefab.index.get(&ObjRef { file: l.file, path_id: p.path_id }).ok_or("ShatteredObjectSpriteInitialiser: a dangling generator")?;
+        let Component::Script { class, fields: v, .. } = &l.prefab.objects[o].components[c].1 else { return Err("ShatteredObjectSpriteInitialiser: not a script".into()) };
+        if class != "ShatteredObjectGenerator" {
+            return Err(format!("ShatteredObjectSpriteInitialiser: a {class} generator"));
+        }
+        let sprite_ref = field(v, "Sprite")?.pptr().ok_or("ShatteredObjectGenerator.Sprite")?;
+        let sprite_asset = db.resolve(l.file, sprite_ref).ok_or("ShatteredObjectGenerator.Sprite does not resolve")?;
+        let sprite = Sprite::read(db.data(sprite_asset))?;
+        // Sprite.uv and texture size only feed the shard material's _AtlasTransform (rendering).
+        let int = |name: &str| field(v, name)?.i64().ok_or_else(|| format!("ShatteredObjectGenerator.{name}"));
+        let range = field(v, "SoftJointStrengthRange")?;
+        let g = shatter::ShatteredObjectGenerator {
+            name: string(v, "Name")?,
+            PartMass: float(v, "PartMass")?,
+            Sprite: shatter::Sprite { id: sprite_asset.path_id as i32, rect_width: sprite.rect[2], rect_height: sprite.rect[3], pixels_per_unit: sprite.pixels_to_units, ..Default::default() },
+            PartCount: int("PartCount")? as i32,
+            PartSizeRatio: float(v, "PartSizeRatio")?,
+            PartsLayer: int("PartsLayer")? as i32,
+            PartsPhysicalProperties: 0,
+            RandomForceIntensity: float(v, "RandomForceIntensity")?,
+            RandomTorqueIntensity: float(v, "RandomTorqueIntensity")?,
+            GenerateSoftJointsChance: float(v, "GenerateSoftJointsChance")?,
+            GenerateOnStart: field(v, "GenerateOnStart")?.bool().ok_or("ShatteredObjectGenerator.GenerateOnStart")?,
+            ConnectTo: l.physical(field(v, "ConnectTo")?)?,
+            ConnectToRange: float(v, "ConnectToRange")?,
+            SoftJointStrengthRange: [float(range, "x")?, float(range, "y")?],
+            Brightness: 1.0,
+        };
+        let p = field(v, "PartsPhysicalProperties")?.pptr().ok_or("ShatteredObjectGenerator.PartsPhysicalProperties")?;
+        let asset = db.resolve(l.file, p).ok_or("ShatteredObjectGenerator.PartsPhysicalProperties does not resolve")?;
+        // Shards add it to `properties` when the first one is made (the recorded arena holds only what a spawned component used).
+        self.shatter_generators.push(shatter::GeneratorSource { g, properties: read_physical_properties(db, asset)? });
+        Ok(Some(self.shatter_generators.len() - 1))
+    }
+
     /// The instance's scripts as arena entries with their serialized fields and links, in prefab order (the
     /// order GetComponentsInChildren lists them, and the queue 0x14 order within one script class). Limb-owned
     /// components (CirculationBehaviour, ConnectedNodeBehaviour, SkinMaterialHandler, GForceMeasureBehaviour)
@@ -742,7 +836,8 @@ impl Game {
                         let Some(sprite) = db.resolve(file, r.sprite) else { continue };
                         let (anchor, chain) = anchor_of(o);
                         let visible = inst.objects[o].active && r.enabled;
-                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size), visible });
+                        let bounds = renderer_bounds(&Sprite::read(db.data(sprite))?, r);
+                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size), visible, bounds });
                     }
                     _ => {}
                 }
@@ -810,6 +905,7 @@ impl Game {
                 }
             }
             p.LocalColliderGridPoints = Some(array(v, "LocalColliderGridPoints")?.iter().map(floats::<2>).collect::<Result<_, _>>()?);
+            p.HoldingPositions = array(v, "HoldingPositions")?.iter().map(floats::<3>).collect::<Result<_, _>>()?;
             // Awake's GetComponent<LocalFirePropagationMap>() and Start's GetComponents<DecalControllerBehaviour>().
             p.has_fire_map = script(prefab, o, "LocalFirePropagationMap").is_some();
             p.prefab_decal_controllers = prefab.objects[o].components.iter().filter(|(_, x)| matches!(x, Component::Script { class, .. } if class == "DecalControllerBehaviour")).count();
@@ -852,6 +948,7 @@ impl Game {
                     connectedAnchor: inst.hinges.get(&(o, c)).map_or(j.connected_anchor, |s| s.connected_anchor),
                     enabled: j.enabled,
                     destroyed: false,
+                    destroy_at: None,
                 };
                 // The create put the joint in m_JointBreakLimits as BreakJoint::Anchored(slot): it becomes Hinge(h), in place.
                 if let Some(slot) = inst.hinges.get(&(o, c)).and_then(|s| s.slot) {
@@ -894,6 +991,17 @@ impl Game {
                 None => return Err("LimbBehaviour: a BloodDecal that does not resolve".into()),
             };
             self.vital_parts.insert(self.limbs.len(), array(v, "VitalParts")?.iter().map(bounds).collect::<Result<_, _>>()?);
+            // Awake's GetComponent<ShatteredObjectSpriteInitialiser>() and its three generators.
+            b.ShatteredObjectGenerators = match script(prefab, o, "ShatteredObjectSpriteInitialiser") {
+                None => None,
+                Some((_, _, iv)) => {
+                    let mut gens = [None; 3];
+                    for (k, name) in ["BoneGenerator", "FleshGenerator", "SkinGenerator"].into_iter().enumerate() {
+                        gens[k] = self.load_shatter_generator(db, &l, field(iv, name)?)?;
+                    }
+                    Some(gens)
+                }
+            };
             // Awake's GetComponent<GoreStringBehaviour>().
             b.goreString = false;
             if let Some((_, gore_enabled, gv)) = script(prefab, o, "GoreStringBehaviour") {
@@ -919,9 +1027,10 @@ impl Game {
         }
 
         for o in 0..n {
-            let Some((_, _, v)) = script(prefab, o, "GripBehaviour") else { continue };
+            let Some((c, _, v)) = script(prefab, o, "GripBehaviour") else { continue };
             let mut g = Grip::default();
             load_values(g.fields(), v)?;
+            g.id = inst.objects[o].components[c];
             // Awake's GetComponent<PhysicalBehaviour>().
             g.PhysicalBehaviour = *l.arenas.physical.get(&o).ok_or("GripBehaviour without PhysicalBehaviour")?;
             g.CurrentlyHolding = l.physical(field(v, "CurrentlyHolding")?)?;
@@ -1042,7 +1151,8 @@ impl Game {
         }
         let mut destroyables = HashMap::new();
         for o in 0..n {
-            let Some((c, _, v)) = script(prefab, o, "DestroyableBehaviour") else { continue };
+            // VaseBehaviour extends DestroyableBehaviour (its own methods are presentation: debris sprite).
+            let Some((c, _, v)) = script(prefab, o, "DestroyableBehaviour").or_else(|| script(prefab, o, "VaseBehaviour")) else { continue };
             let mut x = super::destroyable::Destroyable::default();
             load_values(x.fields(), v)?;
             x.id = inst.objects[o].components[c];
@@ -1059,7 +1169,7 @@ impl Game {
                 let (ao, _) = *prefab.index.get(&ObjRef { file, path_id: ancestor.path_id }).filter(|_| ancestor.file == 0).ok_or("VelocityAncestor outside the prefab")?;
                 x.VelocityAncestor = Some(*l.arenas.physical.get(&ao).unwrap_or_else(|| unimplemented!("DestroyableBehaviour.VelocityAncestor without a PhysicalBehaviour")));
             }
-            x.OnBreakPresentation = presentation_event(prefab, file, field(v, "OnBreak")?);
+            x.OnBreak = event_calls(prefab, file, field(v, "OnBreak")?, inst, "DestroyableBehaviour.OnBreak", false)?;
             destroyables.insert(o, self.destroyables.len());
             self.destroyables.push(x);
         }
@@ -1082,6 +1192,7 @@ impl Game {
                 x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
                 x.before_destroyable = script(prefab, o, "DestroyableBehaviour").is_some_and(|(dc, _, _)| c < dc);
                 x.index = c;
+                x.Tag = string(v, "Tag")?;
                 x.OnExplodeCalls = event_calls(prefab, file, field(v, "OnExplode")?, inst, "ExplosiveBehaviour.OnExplode", false)?;
                 x.OnArmPresentation = presentation_event(prefab, file, field(v, "OnArm")?);
                 let vfx = field(v, "VFXOverride")?.pptr().ok_or("VFXOverride")?;
@@ -1251,6 +1362,373 @@ impl Game {
             accelerator_bolts.insert(o, self.accelerator_bolts.len());
             self.accelerator_bolts.push(x);
         }
+        // ArchelixCasterBehaviour: Use starts BurstShot, which requests pooled bolts (archelix.rs).
+        let mut archelix_casters = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "ArchelixCasterBehaviour") else { continue };
+            let mut x = super::archelix::ArchelixCaster::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            let ph = field(v, "PhysicalBehaviour")?.pptr().ok_or("ArchelixCasterBehaviour.PhysicalBehaviour")?;
+            if ph.is_null() || ph.file != 0 {
+                unimplemented!("ArchelixCasterBehaviour.PhysicalBehaviour null or outside the prefab (NullReferenceException)");
+            }
+            let (po, _) = *prefab.index.get(&ObjRef { file, path_id: ph.path_id }).ok_or("ArchelixCasterBehaviour.PhysicalBehaviour: dangling reference")?;
+            x.physical = l.arenas.physical.get(&po).copied().unwrap_or_else(|| unimplemented!("ArchelixCasterBehaviour.PhysicalBehaviour on an object without a physical behaviour in this clone"));
+            x.ShootSounds = array(v, "ShootSounds")?.len();
+            x.MuzzleFlash = !field(v, "MuzzleFlash")?.pptr().ok_or("ArchelixCasterBehaviour.MuzzleFlash")?.is_null();
+            // BarrelPosition uses the Rigidbody2D of this GameObject (the physical's body).
+            let rbp = field(v, "Rigidbody")?.pptr().ok_or("ArchelixCasterBehaviour.Rigidbody")?;
+            if rbp.is_null() || rbp.file != 0 || prefab.index.get(&ObjRef { file, path_id: rbp.path_id }).map(|&(ro, _)| ro) != Some(o) {
+                unimplemented!("ArchelixCasterBehaviour.Rigidbody not on its own GameObject");
+            }
+            let proj = field(v, "projectilePrefab")?.pptr().ok_or("ArchelixCasterBehaviour.projectilePrefab")?;
+            if !proj.is_null() {
+                x.projectilePrefab = Some(db.resolve(file, proj).ok_or("ArchelixCasterBehaviour.projectilePrefab outside the data")?);
+            }
+            archelix_casters.insert(o, self.archelix_casters.len());
+            self.archelix_casters.push(x);
+        }
+        // ArchelixCasterBoltBehaviour: a pooled bolt without physics; its trail is a TrailRenderer on a child at the bolt's origin.
+        let mut archelix_bolts = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "ArchelixCasterBoltBehaviour") else { continue };
+            if prefab.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                unimplemented!("ArchelixCasterBoltBehaviour on a prefab with physics (its pose)");
+            }
+            if !enabled || o != 0 {
+                unimplemented!("ArchelixCasterBoltBehaviour disabled in the prefab, or not on the root");
+            }
+            let mut x = super::archelix::ArchelixBolt::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("ArchelixCasterBoltBehaviour.Layers.m_Bits")? as u32;
+            let imp = field(v, "ImpactPoolable")?.pptr().ok_or("ArchelixCasterBoltBehaviour.ImpactPoolable")?;
+            if !imp.is_null() {
+                x.ImpactPoolable = Some(db.resolve(file, imp).ok_or("ArchelixCasterBoltBehaviour.ImpactPoolable outside the data")?);
+            }
+            let tp = field(v, "TrailRendererToDetach")?.pptr().ok_or("ArchelixCasterBoltBehaviour.TrailRendererToDetach")?;
+            if tp.is_null() || tp.file != 0 {
+                unimplemented!("ArchelixCasterBoltBehaviour.TrailRendererToDetach null or outside the prefab (NullReferenceException)");
+            }
+            let (to, tc) = *prefab.index.get(&ObjRef { file, path_id: tp.path_id }).ok_or("ArchelixCasterBoltBehaviour.TrailRendererToDetach: dangling reference")?;
+            let (tref, tcomp) = &prefab.objects[to].components[tc];
+            if !matches!(tcomp, Component::Other(96)) {
+                unimplemented!("ArchelixCasterBoltBehaviour.TrailRendererToDetach is not a TrailRenderer");
+            }
+            let head = crate::assets::components::TrailHead::read(db.data(*tref))?;
+            if head.autodestruct || !head.emitting || !head.enabled {
+                unimplemented!("ArchelixCasterBoltBehaviour: a TrailRenderer that is autodestructing, not emitting or disabled");
+            }
+            // The trail's points are the bolt's position: a child with an identity Transform.
+            let identity = matches!(&prefab.objects[to].components[0].1, Component::Transform(t) if t.local_position == [0.0; 3] && t.local_rotation == [0.0, 0.0, 0.0, 1.0] && t.local_scale == [1.0; 3]);
+            if prefab.objects[to].parent != Some(o) || !identity {
+                unimplemented!("ArchelixCasterBoltBehaviour: a TrailRenderer that is not a child at the bolt's origin");
+            }
+            x.trail_time = head.time;
+            x.trail_min_distance = head.min_vertex_distance;
+            archelix_bolts.insert(o, self.archelix_bolts.len());
+            self.archelix_bolts.push(x);
+        }
+        // UniversalBellBehaviour: its Start, FixedUpdate and Update touch the physical's body (universal_bell.rs). Its
+        // clapper and clip sprites and labels are presentation, but Start dereferences them (NullReferenceException).
+        let mut universal_bells = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "UniversalBellBehaviour") else { continue };
+            let mut x = super::universal_bell::UniversalBell::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("UniversalBellBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+            for name in ["clapperSpriteRenderer", "DetailViewLabel"] {
+                if field(v, name)?.pptr().ok_or(name)?.is_null() {
+                    unimplemented!("UniversalBellBehaviour.{name} is null (NullReferenceException in Start)");
+                }
+            }
+            universal_bells.insert(o, self.universal_bells.len());
+            self.universal_bells.push(x);
+        }
+        // ToggleableMirrorBehaviour: FixedUpdate writes its physical's laser flags (mirror.rs).
+        let mut toggleable_mirrors = HashMap::new();
+        for o in 0..n {
+            if script(prefab, o, "ToggleableMirrorBehaviour").is_none() {
+                continue;
+            }
+            let mut x = super::mirror::ToggleableMirror::default();
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("ToggleableMirrorBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+            toggleable_mirrors.insert(o, self.toggleable_mirrors.len());
+            self.toggleable_mirrors.push(x);
+        }
+        // BreakJointOnBurnBehaviour / BreakJointOnShotBehaviour: their Joint, Awake's GetComponent<PhysicalBehaviour> and
+        // breakForce read, OnEnable's GetComponent<Joint2D> for an unset one (breakjoint.rs).
+        for o in 0..n {
+            let file = prefab.objects[o].game_object.file;
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                let Component::Script { class, fields: v, .. } = comp else { continue };
+                if class != "BreakJointOnBurnBehaviour" && class != "BreakJointOnShotBehaviour" {
+                    continue;
+                }
+                let p = field(v, "Joint")?.pptr().ok_or("Joint")?;
+                let joint = if p.is_null() {
+                    None
+                } else {
+                    assert_eq!(p.file, 0, "{class}: a joint outside its prefab");
+                    let k = prefab.index[&ObjRef { file, path_id: p.path_id }];
+                    let Component::Joint2D(j) = &prefab.objects[k.0].components[k.1].1 else { unimplemented!("{class}.Joint is not a Joint2D") };
+                    Some((inst.objects[k.0].components[k.1], j.break_force))
+                };
+                let id = inst.objects[o].components[c];
+                if class == "BreakJointOnBurnBehaviour" {
+                    let (Joint, initialThreshold) = joint.unwrap_or_else(|| unimplemented!("BreakJointOnBurnBehaviour.Awake with a null Joint (NullReferenceException)"));
+                    let phys = l.arenas.physical.get(&o).copied();
+                    self.break_joint_on_burns.push(super::breakjoint::BreakJointOnBurn { id, Joint, phys, initialThreshold, randomOffset: 1.0 });
+                } else {
+                    let own = || prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Joint2D(_))).map(|k| inst.objects[o].components[k]);
+                    let Joint = joint.map(|j| j.0).or_else(own);
+                    let (Chance, ShotIntensityInfluence) = (float(v, "Chance")?, float(v, "ShotIntensityInfluence")?);
+                    self.break_joint_on_shots.push(super::breakjoint::BreakJointOnShot { id, Joint, Chance, ShotIntensityInfluence });
+                }
+            }
+        }
+        // LiquidSpreadAoEBehaviour: its LiquidContainer and the PhysicalBehaviour whose position it spreads from.
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "LiquidSpreadAoEBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let lc = field(v, "LiquidContainer")?.pptr().ok_or("LiquidContainer")?;
+            let LiquidContainer = (!lc.is_null()).then(|| {
+                assert_eq!(lc.file, 0, "LiquidSpreadAoEBehaviour.LiquidContainer outside its prefab");
+                let k = prefab.index[&ObjRef { file, path_id: lc.path_id }];
+                inst.objects[k.0].components[k.1]
+            });
+            let phys = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("LiquidSpreadAoEBehaviour on an object without a PhysicalBehaviour"));
+            self.liquid_spreads.push(super::liquid_spread::LiquidSpreadAoE {
+                id: inst.objects[o].components[c],
+                LiquidContainer,
+                AmountMultiplier: float(v, "AmountMultiplier")?,
+                LimbsOnly: field(v, "LimbsOnly")?.bool().ok_or("LimbsOnly")?,
+                SpreadOnStart: field(v, "SpreadOnStart")?.bool().ok_or("SpreadOnStart")?,
+                Range: float(v, "Range")?,
+                Mask: field(field(v, "Mask")?, "m_Bits")?.i64().ok_or("Mask.m_Bits")? as u32,
+                phys,
+            });
+        }
+        // FancyBloodSplatController in an instantiated prefab: its fields, decal, and initialParent's position and
+        // its own rotation (neither moves before Start). Under a physical it moves with it when the initialParent is
+        // that physical's object or one of its direct children (the bleeding-particle pose; update_splat_pose).
+        let mut splat_by_object = HashMap::new();
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "FancyBloodSplatController") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let mut x = super::misc::FancyBloodSplat::default();
+            load_values(x.fields(), v)?;
+            let dp = field(v, "Decal")?.pptr().ok_or("Decal")?;
+            let decal = db.resolve(file, dp).unwrap_or_else(|| unimplemented!("FancyBloodSplatController.Decal null or outside the data"));
+            let k = self.load_decal_descriptor(db, decal)?;
+            x.Decal = self.decal_descriptors[k].name.clone();
+            x.CollisionLayers = field(field(v, "CollisionLayers")?, "m_Bits")?.i64().ok_or("CollisionLayers.m_Bits")? as u32;
+            let parent = inst.objects[o].parent.unwrap_or_else(|| unimplemented!("FancyBloodSplatController without a parent (initialParent.position: NullReferenceException)"));
+            // The nearest physical above the splat, and no transform node or body above it.
+            let mut nearest = None;
+            let mut up = Some(o);
+            while let Some(t) = up {
+                if l.arenas.node.contains_key(&t) {
+                    unimplemented!("FancyBloodSplatController under a Transform node or body");
+                }
+                if let Some(&p) = l.arenas.physical.get(&t) {
+                    if t == o {
+                        unimplemented!("FancyBloodSplatController on a physical object");
+                    }
+                    nearest.get_or_insert((t, p));
+                }
+                up = inst.objects[t].parent;
+            }
+            // Attached when the initialParent is the physical's object (identity pose) or its direct child (its local
+            // TRS). Deeper, the initialParent's pose is not modelled.
+            x.attached = match nearest {
+                None => None,
+                Some((t, p)) if t == parent => Some((p, crate::unity::transform::Trs { t: [0.0; 4], q: [0.0, 0.0, 0.0, 1.0], s: [1.0, 1.0, 1.0, 0.0] }, inst.objects[o].trs.q)),
+                Some((t, p)) if inst.objects[parent].parent == Some(t) => Some((p, inst.objects[parent].trs, inst.objects[o].trs.q)),
+                Some(_) => unimplemented!("FancyBloodSplatController more than one Transform below its physical (its initialParent's pose is not modelled)"),
+            };
+            x.parent_position = inst.position(parent);
+            x.rotation = inst.rotation(o);
+            x.started = false;
+            x.id = inst.objects[o].components[c];
+            splat_by_object.insert(o, self.splats.len());
+            self.splats.push(x);
+        }
+        // BloodTankBehaviour: its PhysicalParticles splat calls its OnCollide listener (blood_tank.rs).
+        let mut blood_tanks = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "BloodTankBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let mut x = super::blood_tank::BloodTank::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.physical = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("BloodTankBehaviour without a PhysicalBehaviour (NullReferenceException in Awake)"));
+            // PhysicalParticles: the FancyBloodSplatController of this prefab (Awake's OnCollide subscription on it).
+            let pp = field(v, "PhysicalParticles")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("BloodTankBehaviour.PhysicalParticles null or outside its prefab (NullReferenceException in Awake)"));
+            let (po, _) = *prefab.index.get(&ObjRef { file, path_id: pp.path_id }).ok_or("BloodTankBehaviour.PhysicalParticles: dangling reference")?;
+            x.splat = *splat_by_object.get(&po).unwrap_or_else(|| unimplemented!("BloodTankBehaviour.PhysicalParticles is not a FancyBloodSplatController of this prefab"));
+            // WaterPuffParticles: its Transform (the first component of its object) decides whether the puff is submerged.
+            let wp = field(v, "WaterPuffParticles")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("BloodTankBehaviour.WaterPuffParticles null or outside its prefab (NullReferenceException in UpdateActivation)"));
+            let (wo, _) = *prefab.index.get(&ObjRef { file, path_id: wp.path_id }).ok_or("BloodTankBehaviour.WaterPuffParticles: dangling reference")?;
+            x.water_puff = inst.objects[wo].components[0];
+            self.splats[x.splat].on_collide_tank = Some(self.blood_tanks.len());
+            blood_tanks.insert(o, self.blood_tanks.len());
+            self.blood_tanks.push(x);
+        }
+        // GorseDroolingBehaviour: its LimbBehaviour, Projectile and where its Transform hangs.
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "GorseDroolingBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let lp = field(v, "LimbBehaviour")?.pptr().ok_or("LimbBehaviour")?;
+            if lp.is_null() || lp.file != 0 {
+                unimplemented!("GorseDroolingBehaviour.LimbBehaviour null or outside its prefab");
+            }
+            let lo = prefab.index[&ObjRef { file, path_id: lp.path_id }].0;
+            let limb = *l.arenas.limb.get(&lo).unwrap_or_else(|| unimplemented!("GorseDroolingBehaviour.LimbBehaviour not a linked limb"));
+            let (mut chain, mut up) = (Vec::new(), Some(o));
+            let anchor = loop {
+                let Some(t) = up else { break BareAnchor::Root };
+                if let Some(&p) = l.arenas.physical.get(&t) {
+                    break BareAnchor::Physical(p);
+                }
+                if let Some(&i) = l.arenas.node.get(&t) {
+                    break BareAnchor::Node(i);
+                }
+                chain.push(inst.objects[t].trs);
+                up = inst.objects[t].parent;
+            };
+            let proj = field(v, "Projectile")?.pptr().ok_or("Projectile")?;
+            let Projectile = if proj.is_null() { None } else { Some(db.resolve(file, proj).ok_or("GorseDroolingBehaviour.Projectile outside the data")?) };
+            self.gorse_droolings.push(super::gorse::GorseDrooling {
+                id: inst.objects[o].components[c],
+                limb,
+                anchor,
+                chain,
+                CanSee: field(field(v, "CanSee")?, "m_Bits")?.i64().ok_or("CanSee.m_Bits")? as u32,
+                Projectile,
+                FireClips: array(v, "FireClip")?.len(),
+                Range: float(v, "Range")?,
+                Force: float(v, "Force")?,
+                step: 0,
+                isAlive: false,
+            });
+        }
+        // GorseProjectileBehaviour: its own colliders, body and DisperseEffect.
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "GorseProjectileBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let node_body = *node_rigidbodies.get(&o).unwrap_or_else(|| unimplemented!("GorseProjectileBehaviour without a bare Rigidbody2D on its GameObject"));
+            let effect = field(v, "DisperseEffect")?.pptr().ok_or("DisperseEffect")?;
+            let DisperseEffect = if effect.is_null() { None } else { Some(db.resolve(file, effect).ok_or("GorseProjectileBehaviour.DisperseEffect outside the data")?) };
+            let colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, comp))| matches!(comp, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+            self.gorse_projectiles.push(super::gorse::GorseProjectile {
+                id: inst.objects[o].components[c],
+                Damage: float(v, "Damage")?,
+                DisperseEffect,
+                AcidChance: float(v, "AcidChance")?,
+                colliders,
+                node_body,
+            });
+        }
+        // SoundOnShakeBehaviour: Awake's GetComponent<Rigidbody2D>, its AudioSource and the lengths of Clips (shake.rs).
+        for o in 0..n {
+            let Some((c, _, v)) = script(prefab, o, "SoundOnShakeBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let rb = prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::Rigidbody2D(_))).map(|k| inst.objects[o].components[k]);
+            let rb = rb.unwrap_or_else(|| unimplemented!("SoundOnShakeBehaviour without a Rigidbody2D (NullReferenceException in FixedUpdate)"));
+            let a = field(v, "AudioSource")?.pptr().ok_or("AudioSource")?;
+            if a.is_null() || a.file != 0 {
+                unimplemented!("SoundOnShakeBehaviour.AudioSource null or outside its prefab");
+            }
+            let source = ObjRef { file, path_id: a.path_id };
+            // AudioSource.m_Enabled, after m_GameObject: a disabled one never plays.
+            if db.data(source)[12] == 0 {
+                unimplemented!("SoundOnShakeBehaviour with a disabled AudioSource");
+            }
+            let k = prefab.index[&source];
+            let mut up = Some(k.0);
+            let mut time_scaled = false;
+            while let Some(t) = up {
+                if script(prefab, t, "AudioSourceTimeScaleBehaviour").is_some() {
+                    time_scaled = true;
+                    break;
+                }
+                up = inst.objects[t].parent;
+            }
+            let mut clips = Vec::new();
+            for x in array(v, "Clips")? {
+                let r = db.resolve(file, x.pptr().ok_or("Clips")?).unwrap_or_else(|| unimplemented!("SoundOnShakeBehaviour: a null AudioClip"));
+                clips.push(crate::assets::classes::AudioClip::read(db.data(r))?.length);
+            }
+            self.sound_on_shakes.push(super::shake::SoundOnShake {
+                id: inst.objects[o].components[c],
+                rb,
+                AudioSource: inst.objects[k.0].components[k.1],
+                Clips: clips,
+                ShakeThreshold: float(v, "ShakeThreshold")?,
+                previousVelocity: [0.0, 0.0],
+                root: inst.objects[0].components[0],
+                time_scaled,
+            });
+        }
+        // FoliageBehaviour: Awake's GetComponentInParent<PhysicalBehaviour>, and its own SpriteRenderer (foliage.rs).
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "FoliageBehaviour") else { continue };
+            if !enabled {
+                unimplemented!("a disabled FoliageBehaviour (OnWillRenderObject still reaches it)");
+            }
+            let mut x = super::foliage::Foliage::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            if x.SyncWithParentPhysicalBehaviour {
+                let mut up = Some(o);
+                while let Some(t) = up {
+                    if let Some(&p) = l.arenas.physical.get(&t) {
+                        x.phys = Some(p);
+                        break;
+                    }
+                    up = inst.objects[t].parent;
+                }
+            }
+            let k = prefab.objects[o].components.iter().position(|(_, x)| matches!(x, Component::SpriteRenderer(_)));
+            let k = k.unwrap_or_else(|| unimplemented!("FoliageBehaviour without a SpriteRenderer (NullReferenceException in Awake)"));
+            let rid = inst.objects[o].components[k];
+            x.renderer = self.renderers.iter().position(|r| r.id == rid).unwrap_or_else(|| unimplemented!("FoliageBehaviour: a SpriteRenderer with a null sprite"));
+            self.foliages.push(x);
+        }
+        // WrenchBehaviour: OnCollisionEnter2D reaches it through its physical (wrench.rs); no Awake, Update or Start.
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "WrenchBehaviour") else { continue };
+            let mut x = super::wrench::Wrench::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("WrenchBehaviour without a PhysicalBehaviour (its collisions are not delivered)"));
+            x.index = c;
+            x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+            self.wrenches.push(x);
+        }
+        // NoCollideWithBodyPart: its collider's collisions with a body part's limb are ignored (no_collide.rs).
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "NoCollideWithBodyPart") else { continue };
+            let mut x = super::no_collide::NoCollideWithBodyPart::default();
+            load_values(x.fields(), v)?;
+            x.enabled = enabled;
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("NoCollideWithBodyPart without a PhysicalBehaviour (its collisions are not delivered)"));
+            x.index = c;
+            x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+            // A null Collider never equals the receiver's own collider, so its callback does nothing (Collider stays 0).
+            if let Some(p) = field(v, "Collider")?.pptr().filter(|p| !p.is_null()) {
+                let (co, cc) = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or("NoCollideWithBodyPart.Collider outside the prefab")?;
+                x.Collider = inst.objects[co].components[cc];
+            }
+            self.no_collide_body_parts.push(x);
+        }
         let mut bells = HashMap::new();
         for o in 0..n {
             let Some((_, _, v)) = script(prefab, o, "BellBehaviour") else { continue };
@@ -1311,6 +1789,10 @@ impl Game {
         let (mut glowtubes, mut leds, mut detectors, mut sticky_grenades) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let mut liquid_containers = HashMap::new();
         let (mut syringes, mut syringe_explosions) = (HashMap::new(), HashMap::new());
+        let mut valves = HashMap::new();
+        let mut timed_gates = HashMap::new();
+        let mut heart_monitors = HashMap::new();
+        let mut excaliburs = HashMap::new();
         let mut point_liquids = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "LiquidContainerController") {
@@ -1335,6 +1817,7 @@ impl Game {
         }
         // The sci-fi weapons the ActOnCollide and ActOnShot Actions call.
         let (mut blasters, mut blasterbolts, mut beamformers, mut scifi40s) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        let mut effect_guns = HashMap::new();
         for o in 0..n {
             if let Some((c, enabled, v)) = script(prefab, o, "BlasterBehaviour") {
                 let mut x = super::blaster::Blaster::default();
@@ -1422,6 +1905,27 @@ impl Game {
                 scifi40s.insert(o, self.scifi40s.len());
                 self.scifi40s.push(x);
             }
+            for class in ["HealthGunBehaviour", "FreezeGunBehaviour"] {
+                let Some((c, enabled, v)) = script(prefab, o, class) else { continue };
+                let mut x = super::effect_gun::EffectGun::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.freeze = class == "FreezeGunBehaviour";
+                // PhysicalBehaviour is [SkipSerialisation]: only read by the base class through transform here.
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("{class} without a PhysicalBehaviour on its GameObject"));
+                let flash = field(v, "Muzzleflash")?.pptr().ok_or("EffectGunBehaviour.Muzzleflash")?;
+                if !flash.is_null() {
+                    let r = db.resolve(file, flash).ok_or("EffectGunBehaviour.Muzzleflash outside the data")?;
+                    if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("EffectGunBehaviour: a Muzzleflash with physics (its pose)");
+                    }
+                    x.Muzzleflash = Some(r);
+                }
+                x.ShotSounds = array(v, "ShotSounds")?.len();
+                effect_guns.insert(o, self.effect_guns.len());
+                self.effect_guns.push(x);
+            }
         }
         // A UnityEvent of persistent calls: ExplosiveBehaviour.Activate (the mine), FirearmBehaviour.Shoot,
         // ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, BlasterBehaviour.Shoot,
@@ -1449,6 +1953,14 @@ impl Game {
                     Some((to, tc)) if class_of(to, tc) == "BeamformerBehaviour" && method == "Shoot" => targets.push(ActTarget::Beam(beamformers[&to])),
                     Some((to, tc)) if class_of(to, tc) == "GenericScifiWeapon40Behaviour" && method == "Fire" => targets.push(ActTarget::Fire(scifi40s[&to])),
                     Some((to, tc)) if class_of(to, tc) == "PhysicalBehaviour" && method == "ForceSendUse" => targets.push(ActTarget::ForceSendUse(l.arenas.physical[&to])),
+                    // The CarBehaviour calls car_calls keeps (the same argument reads).
+                    Some((to, tc)) if class_of(to, tc) == "CarBehaviour" && method == "SetHealth" => {
+                        let h = call.get("m_Arguments").and_then(|a| a.get("m_FloatArgument")).and_then(Value::f32).ok_or("CarBehaviour.SetHealth without its float argument")?;
+                        targets.push(ActTarget::Car(inst.objects[to].components[tc], super::car::CarCall::SetHealth(h)));
+                    }
+                    Some((to, tc)) if class_of(to, tc) == "CarBehaviour" && method == "set_enabled" && call.get("m_Arguments").and_then(|a| a.get("m_BoolArgument")).is_some_and(|b| b.bool() == Some(false) || b.i64() == Some(0)) => {
+                        targets.push(ActTarget::Car(inst.objects[to].components[tc], super::car::CarCall::Disable));
+                    }
                     _ if presentation_call(prefab, file, call) => {}
                     _ => unimplemented!("{what}.Actions: a persistent call beyond ExplosiveBehaviour.Activate, FirearmBehaviour.Shoot, ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, BlasterBehaviour.Shoot, BeamformerBehaviour.Shoot, GenericScifiWeapon40Behaviour.Fire, PhysicalBehaviour.ForceSendUse, audio and particles ({method})"),
                 }
@@ -1631,9 +2143,14 @@ impl Game {
                     unimplemented!("ActOnHingeJointLimit with Joints: HingeJoint2D.limitState");
                 }
             }
-            if script(prefab, o, "AndroidSparkCreator").is_some() {
+            if let Some((_, _, sv)) = script(prefab, o, "AndroidSparkCreator") {
                 let mut x = super::acts::AndroidSparkCreator::default();
                 x.limb = *l.arenas.limb.get(&o).unwrap_or_else(|| unimplemented!("AndroidSparkCreator without a LimbBehaviour (NullReferenceException in FixedUpdate)"));
+                // spark: the GameObject Instantiate copies in FixedUpdate (a null one is an ArgumentException there).
+                let spark = field(sv, "spark")?.pptr().ok_or("AndroidSparkCreator.spark")?;
+                if !spark.is_null() {
+                    x.spark = Some(db.resolve(file, spark).ok_or("AndroidSparkCreator.spark outside the data")?);
+                }
                 android_sparks.insert(o, self.android_sparks.len());
                 self.android_sparks.push(x);
             }
@@ -1709,6 +2226,51 @@ impl Game {
                 }
                 syringes.insert(o, self.syringes.len());
                 self.syringes.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ValveBehaviour") {
+                let mut x = super::valve::Valve::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("ValveBehaviour without a PhysicalBehaviour (NullReferenceException in TurnRoutine's PlayClipOnce)"));
+                if !presentation_event(prefab, file, field(v, "OnDistributionChange")?) {
+                    unimplemented!("BloodContainer.OnDistributionChange: a persistent call beyond audio and particles");
+                }
+                x.ValveTurnCurve = Some(curve(field(v, "ValveTurnCurve")?)?);
+                valves.insert(o, self.valves.len());
+                self.valves.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "HeartMonitorBehaviour") {
+                let mut x = super::heart_monitor::HeartMonitor::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                heart_monitors.insert(o, self.heart_monitors.len());
+                self.heart_monitors.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ExcaliburBehaviour") {
+                let mut x = super::excalibur::Excalibur::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // Lodged reaches it through its physical's receiver name (stab.rs send_lodged).
+                let p = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("ExcaliburBehaviour without a PhysicalBehaviour (its Lodged receiver is the physical's)"));
+                self.physicals[p].lodge_receiver = "ExcaliburBehaviour".to_string();
+                excaliburs.insert(o, self.excaliburs.len());
+                self.excaliburs.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TimedGateBehaviour") {
+                let mut x = super::timed_gate::TimedGate::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("TimedGateBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+                // Knob is dereferenced by DoLag and Update (NullReferenceException when it is null).
+                if field(v, "Knob")?.pptr().ok_or("Knob")?.is_null() {
+                    unimplemented!("TimedGateBehaviour.Knob is null (NullReferenceException)");
+                }
+                timed_gates.insert(o, self.timed_gates.len());
+                self.timed_gates.push(x);
             }
             if let Some((c, _, v)) = script(prefab, o, "SyringeExplosionBehaviour") {
                 let mut x = super::syringe::SyringeExplosion::default();
@@ -1809,6 +2371,7 @@ impl Game {
             }
             m.id = inst.objects[o].components[c];
             m.OnDamagedPresentation = presentation_event(prefab, file, field(v, "OnDamaged")?);
+            m.OnRepairedPresentation = presentation_event(prefab, file, field(v, "OnRepaired")?);
             if !m.OnDamagedPresentation {
                 // Kept only when every call is one EventCall; otherwise SetAsBroken stays unimplemented.
                 if let Ok(calls) = try_event_calls(prefab, file, field(v, "OnDamaged")?, inst, false)? {
@@ -2524,7 +3087,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, blasters, blasterbolts, beamformers, scifi40s, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, heart_monitors, blood_tanks, excaliburs, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -2583,6 +3146,8 @@ impl Game {
     pub(super) fn event_call(&mut self, call: EventCall) {
         match call {
             EventCall::Car(car, c) => self.car_invoke(car, c),
+            EventCall::LiquidSpread(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::LiquidSpread(id) => self.liquid_spread(id),
             // DetachFromParent.Detach: transform.parent = null.
             EventCall::Detach(id) => self.set_parent_null_of(id, |_, _, _| {}),
             // ActOnDestroy.Clear: DestroyWith = null. A destroyed ActOnDestroy (its entry is gone) is a destroyed target: the call is skipped.
@@ -2822,6 +3387,12 @@ impl Game {
             (_, Some(&n)) => self.transform_nodes[n].id,
             _ => unreachable!(),
         };
+        // Its Start's Global.AddAudioSource of every AudioSource below: their pitch follows Time.timeScale.
+        for s in &mut self.sound_on_shakes {
+            if s.root == root {
+                s.time_scaled = true;
+            }
+        }
         self.object_names.insert(root, asset.to_string());
         if let Some(&p) = linked.physicals.get(&0) {
             self.physicals[p].name = asset.to_string();
@@ -2874,6 +3445,8 @@ impl Game {
                             "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
                             "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
                             "MetronomeBehaviour" => self.metronome_on_disable(linked.metronomes[&d]),
+                            "TimedGateBehaviour" => self.timed_gate_on_disable(linked.timed_gates[&d]),
+                            "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
                             "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
                             "ActivationToggleBehaviour" => self.activation_toggle_on_disable(linked.activation_toggles[&d]),
                             "DisplayBehaviour" => self.display_on_disable(linked.displays[&d]),
@@ -2920,6 +3493,12 @@ impl Game {
                 }
                 "DetectorBehaviour" => self.detector_awake(linked.detectors[&o]),
                 "TelevisionBehaviour" => self.television_awake(linked.televisions[&o]),
+                "TimedGateBehaviour" => {
+                    self.timed_gate_awake(linked.timed_gates[&o]);
+                    if *enabled {
+                        self.timed_gate_on_enable(linked.timed_gates[&o]);
+                    }
+                }
                 "FirearmAttachmentBehaviour" | "ScopeAttachmentBehaviour" | "BatteryAttachmentBehaviour" | "ExplosiveAttachmentBehaviour" | "FlashlightAttachmentBehaviour" | "IncendiaryAttachmentBehaviour" => self.firearm_attachment_awake(),
                 "DisplayBehaviour" => self.display_awake(linked.displays[&o]),
                 // offset = Random.Range(-1f, 1f) * 1500f: only OnWillRenderObject reads it.
@@ -2951,7 +3530,12 @@ impl Game {
                 }
                 "GearBehaviour" => self.gear_awake(inst.objects[o].components[c]),
                 "LaunchedRocketBehaviour" => self.rocket_awake(linked.rockets[&o]),
+                "BreakJointOnBurnBehaviour" => {
+                    let b = self.break_joint_on_burns.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap();
+                    self.break_joint_on_burn_awake(b);
+                }
                 "GenericScifiWeapon40Behaviour" => self.scifi40_awake(),
+                "HealthGunBehaviour" | "FreezeGunBehaviour" => self.effect_gun_awake(),
                 "AirfoilBehaviour" => self.airfoil_awake(linked.airfoils[&o]),
                 "DestroyWhenAllChildrenDestroyed" => {
                     let Component::Script { fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
@@ -3048,7 +3632,7 @@ impl Game {
                 "LavaBehaviour" => Some(Behaviour::Lava(linked.lavas[&o])),
                 "RandomPrefabSpawnerBehaviour" => Some(Behaviour::Spawner(linked.spawners[&o])),
                 "TemperatureTargetRectangleBehaviour" => Some(Behaviour::HeatRect(linked.heat_rects[&o])),
-                "DestroyableBehaviour" => Some(Behaviour::Destroyable(linked.destroyables[&o])),
+                "DestroyableBehaviour" | "VaseBehaviour" => Some(Behaviour::Destroyable(linked.destroyables[&o])),
                 "LocalFirePropagationMap" => Some(Behaviour::FireMap(linked.fire_maps[&o])),
                 "FirearmBehaviour" => Some(Behaviour::Firearm(linked.firearms[&o])),
                 "ProjectileLauncherBehaviour" => Some(Behaviour::Launcher(linked.launchers[&o])),
@@ -3057,6 +3641,15 @@ impl Game {
                 "MinigunBehaviour" => Some(Behaviour::Minigun(linked.miniguns[&o])),
                 "AcceleratorGunBehaviour" => Some(Behaviour::Accelerator(linked.accelerators[&o])),
                 "AcceleratorBoltBehaviour" => Some(Behaviour::AcceleratorBolt(linked.accelerator_bolts[&o])),
+                "ArchelixCasterBehaviour" => Some(Behaviour::ArchelixCaster(linked.archelix_casters[&o])),
+                "ArchelixCasterBoltBehaviour" => Some(Behaviour::ArchelixBolt(linked.archelix_bolts[&o])),
+                "UniversalBellBehaviour" => Some(Behaviour::UniversalBell(linked.universal_bells[&o])),
+                "ToggleableMirrorBehaviour" => Some(Behaviour::ToggleableMirror(linked.toggleable_mirrors[&o])),
+                "ValveBehaviour" => Some(Behaviour::Valve(linked.valves[&o])),
+                "TimedGateBehaviour" => Some(Behaviour::TimedGate(linked.timed_gates[&o])),
+                "HeartMonitorBehaviour" => Some(Behaviour::HeartMonitor(linked.heart_monitors[&o])),
+                "ExcaliburBehaviour" => Some(Behaviour::Excalibur(linked.excaliburs[&o])),
+                "BloodTankBehaviour" => Some(Behaviour::BloodTank(linked.blood_tanks[&o])),
                 "ExplosiveBehaviour" => Some(Behaviour::Explosive(linked.explosives[&o])),
                 "DeleteAfterTime" => Some(Behaviour::DeleteAfter(linked.delete_afters[&o])),
                 "PointToVelocityBehaviour" => Some(Behaviour::PointToVelocity(linked.point_to_velocities[&o])),
@@ -3080,6 +3673,10 @@ impl Game {
                 "PistonBehaviour" => Some(Behaviour::Piston(linked.pistons[&o])),
                 "FlamethrowerBehaviour" => Some(Behaviour::Flamethrower(linked.flamethrowers[&o])),
                 "LaunchedRocketBehaviour" => Some(Behaviour::Rocket(linked.rockets[&o])),
+                "FancyBloodSplatController" => Some(Behaviour::Splat(self.splats.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap())),
+                "GorseDroolingBehaviour" => Some(Behaviour::GorseDrooling(self.gorse_droolings.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap())),
+                "SoundOnShakeBehaviour" => Some(Behaviour::SoundOnShake(self.sound_on_shakes.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap())),
+                "BreakJointOnBurnBehaviour" => Some(Behaviour::BreakJointOnBurn(self.break_joint_on_burns.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap())),
                 "AirfoilBehaviour" => Some(Behaviour::Airfoil(linked.airfoils[&o])),
                 "StunnerBehaviour" => Some(Behaviour::Stunner(linked.stunners[&o])),
                 "BalloonBehaviour" => Some(Behaviour::Balloon(linked.balloons[&o])),
@@ -3099,6 +3696,8 @@ impl Game {
                 "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
                 "BeamformerBehaviour" => Some(Behaviour::Beamformer(linked.beamformers[&o])),
                 "GenericScifiWeapon40Behaviour" => Some(Behaviour::Scifi40(linked.scifi40s[&o])),
+                "HealthGunBehaviour" => Some(Behaviour::HealthGun(linked.effect_guns[&o])),
+                "FreezeGunBehaviour" => Some(Behaviour::FreezeGun(linked.effect_guns[&o])),
                 "SignalConverterBehaviour" => Some(Behaviour::SignalConverter(linked.signal_converters[&o])),
                 c if super::syringe::is_syringe(c) => Some(Behaviour::Syringe(linked.syringes[&o])),
                 "PointLiquidTransferBehaviour" => Some(Behaviour::PointLiquid(linked.point_liquids[&o])),
@@ -3205,7 +3804,8 @@ impl Game {
                 "MapLightBehaviour" => PendingStart::MapLight(linked.map_lights[&o]),
                 "WaterBehaviour" => PendingStart::Water(linked.waters[&o]),
                 "DamagableMachineryBehaviour" => PendingStart::Machinery(linked.machinery[&o]),
-                "DestroyableBehaviour" => PendingStart::Destroyable(linked.destroyables[&o]),
+                "DestroyableBehaviour" | "VaseBehaviour" => PendingStart::Destroyable(linked.destroyables[&o]),
+                "UniversalBellBehaviour" => PendingStart::UniversalBell(linked.universal_bells[&o]),
                 "LocalFirePropagationMap" => PendingStart::FireMap(linked.fire_maps[&o]),
                 "NoChildrenCollide" => PendingStart::NoChildrenCollide(inst.objects[o].components[c]),
                 "DetachFromParentOnStart" => PendingStart::DetachFromParent(inst.objects[o].components[c], flag("DestroyIfParentDestroyed")),
@@ -3240,7 +3840,7 @@ impl Game {
                 "MachineGunBehaviour" => PendingStart::MachineGun(linked.machine_guns[&o]),
                 "FirearmAttachmentPointBehaviour" => {
                     if field(v, "FirearmAttachment")?.pptr().is_some_and(|p| !p.is_null()) {
-                        unimplemented!("FirearmAttachmentPointBehaviour.Start with a FirearmAttachment (ConnectAttachment's Transform.SetParent is not rewritten)");
+                        unimplemented!("FirearmAttachmentPointBehaviour.Start with a FirearmAttachment (a saved, connected contraption: every item prefab holds null)");
                     }
                     PendingStart::FirearmAttachmentPoint
                 }
@@ -3274,7 +3874,14 @@ impl Game {
                 "RandomSpriteBehaviour" => PendingStart::RandomSprite(linked.random_sprites[&o]),
                 "AirfoilBehaviour" => PendingStart::Airfoil(linked.airfoils[&o]),
                 "MetronomeBehaviour" => PendingStart::Metronome(linked.metronomes[&o]),
+                "TimedGateBehaviour" => PendingStart::TimedGate(linked.timed_gates[&o]),
+                "BloodTankBehaviour" => PendingStart::BloodTank(linked.blood_tanks[&o]),
+                "ArchelixCasterBehaviour" => PendingStart::ArchelixCaster(linked.archelix_casters[&o]),
+                "ArchelixCasterBoltBehaviour" => PendingStart::ArchelixBolt(linked.archelix_bolts[&o]),
                 "MaintainScaleSignBehaviour" => PendingStart::MaintainScale(inst.objects[o].components[c]),
+                "FancyBloodSplatController" => PendingStart::Splat(self.splats.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
+                "LiquidSpreadAoEBehaviour" => PendingStart::LiquidSpread(self.liquid_spreads.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
+                "FoliageBehaviour" => PendingStart::Foliage(self.foliages.iter().position(|x| x.id == inst.objects[o].components[c]).unwrap()),
                 "ActivationToggleBehaviour" => PendingStart::ActivationToggle(linked.activation_toggles[&o]),
                 "PowerGaugeBehaviour" => PendingStart::PowerGauge(linked.power_gauges[&o]),
                 // A Signal Flare that starts Activated enables its TorchBehaviour (not rewritten); otherwise Start does nothing.
@@ -3322,10 +3929,20 @@ impl Game {
 
     /// The PhysicalProperties asset's arena index, loading it on first use (assets are shared by name).
     fn physical_properties(&mut self, db: &mut AssetDb, asset: ObjRef) -> Result<usize, String> {
-        let (_, mb, v) = db.mono(asset)?.ok_or("PhysicalProperties is not a MonoBehaviour")?;
+        let (_, mb, _) = db.mono(asset)?.ok_or("PhysicalProperties is not a MonoBehaviour")?;
         if let Some(i) = self.properties.iter().position(|p| p.name == mb.name) {
             return Ok(i);
         }
+        let p = read_physical_properties(db, asset)?;
+        self.properties.push(p);
+        Ok(self.properties.len() - 1)
+    }
+}
+
+/// A PhysicalProperties asset as the game reads it.
+pub(super) fn read_physical_properties(db: &mut AssetDb, asset: ObjRef) -> Result<PhysicalProperties, String> {
+    {
+        let (_, mb, v) = db.mono(asset)?.ok_or("PhysicalProperties is not a MonoBehaviour")?;
         let b = |n: &str| -> Result<bool, String> { field(&v, n)?.bool().ok_or(n.to_string()) };
         let mut p = PhysicalProperties { name: mb.name.clone(), ..Default::default() };
         p.Softness = float(&v, "Softness")?;
@@ -3369,8 +3986,7 @@ impl Game {
             }
             None => (p.friction, p.bounciness) = (None, 0.0),
         }
-        self.properties.push(p);
-        Ok(self.properties.len() - 1)
+        Ok(p)
     }
 }
 
@@ -3428,6 +4044,8 @@ mod tests {
             g.physicals[p].hash_code = want.physicals.iter().find(|a| a.id == id).map_or(0, |a| a.hash_code);
         }
         g.queue_starts(Some(&mut db), &prefab, &inst, &linked, &order).unwrap();
+        // The clone stays with the game like a real spawn's: Starts that look at the hierarchy find it.
+        g.unsynced.push(inst);
         g.run_pending_starts();
         assert!(g.physicals.iter().all(|p| p.in_world));
         // The first frame's render: OnWillRenderObject fills the blood colour caches.
