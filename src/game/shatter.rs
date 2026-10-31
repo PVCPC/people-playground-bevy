@@ -3,9 +3,11 @@
 //!
 //! The Unity-object operations (new GameObject, AddComponent, SetPath, joints, ClosestPoint ...) have no Rust state
 //! yet: `ShatterHost` lists each one the generator performs, in the C# order, with the values the C# computes.
-//! The `Game` implementation marks them `unimplemented!` with the C# call they stand for.
+//! The `Game` implementation builds each shard as a one-object prefab instance on the simulation's own state.
 
 use super::{d, mathf};
+use crate::assets::db::{Component, ObjRef, Prefab, PrefabObject};
+use crate::assets::mono::Value;
 use crate::unity::Random;
 use std::collections::HashMap;
 
@@ -338,6 +340,9 @@ pub struct GeneratorSource {
     pub g: ShatteredObjectGenerator,
     /// PartsPhysicalProperties
     pub properties: super::physical::PhysicalProperties,
+    /// The Sprite (the shards' SpriteRenderer.sprite) and its local bounds (center, extents): a Simple SpriteRenderer's.
+    pub sprite: Option<crate::assets::db::ObjRef>,
+    pub sprite_bounds: ([f32; 3], [f32; 3]),
 }
 
 /// `toReplace` (Transform): position, rotation and lossyScale.
@@ -408,8 +413,11 @@ pub trait ShatterHost {
     fn closest_point_fix(&mut self, shard: usize, point: Vec2) -> Vec2;
     /// (Vector2)rb.transform.InverseTransformPoint(point)
     fn inverse_transform_point(&mut self, shard: usize, point: Vec2) -> Vec2;
-    /// AddComponent<SpringJoint2D> on `shard` with the spec's values, then `distance *= 0.95f`.
-    fn add_spring_joint(&mut self, shard: usize, spec: &SpringSpec);
+    /// AddComponent<SpringJoint2D> on `shard`: the joint's handle. Its Create (to the ground body) happens here.
+    fn add_spring_component(&mut self, shard: usize) -> usize;
+    /// The joint's setters in order (connectedBody, frequency, dampingRatio, breakForce, anchor, connectedAnchor),
+    /// then `distance *= 0.95f`.
+    fn configure_spring(&mut self, joint: usize, spec: &SpringSpec);
     /// Rigidbody2D.worldCenterOfMass
     fn world_center_of_mass(&mut self, shard: usize) -> Vec2;
     /// AddComponent<FixedJoint2D>: connectedBody = ConnectTo, frequency, breakForce, anchor = attachedRigidbody.centerOfMass,
@@ -481,6 +489,7 @@ pub fn generate<H: ShatterHost>(
         for k in 0..g.PartCount as usize {
             for l in k + 1..g.PartCount as usize {
                 if !(host.random().value() > g.GenerateSoftJointsChance) {
+                    let joint = host.add_spring_component(array[k]);
                     let (pk, pl) = (host.position(array[k]), host.position(array[l]));
                     let point = [(pk[0] + pl[0]) * 0.5, (pk[1] + pl[1]) * 0.5];
                     let v4 = host.closest_point_fix(array[k], point);
@@ -493,7 +502,7 @@ pub fn generate<H: ShatterHost>(
                     let ca = host.inverse_transform_point(array[l], v5);
                     let c2 = host.random().inside_unit_circle();
                     let connected_anchor = [ca[0] + c2[0] * 0.04, ca[1] + c2[1] * 0.04];
-                    host.add_spring_joint(array[k], &SpringSpec { connected: array[l], frequency: 16.0, damping_ratio: 1.0, break_force, anchor, connected_anchor });
+                    host.configure_spring(joint, &SpringSpec { connected: array[l], frequency: 16.0, damping_ratio: 1.0, break_force, anchor, connected_anchor });
                 }
             }
             if host.random().value() < g.GenerateSoftJointsChance && g.ConnectTo.is_some() && source.is_some() {
@@ -531,33 +540,284 @@ impl super::Game {
     }
 }
 
+/// A shard's GameObject as the one-object Prefab its Instance runs on: the components `Generate` adds, in its order
+/// (PhysicalBehaviour's Awake additions, ActivationNode and ContextMenuOptions, are not components of the prefab).
+fn shard_prefab(name: &str, layer: i32, sprite: ObjRef) -> Prefab {
+    use crate::assets::classes::{PPtr, Transform};
+    use crate::assets::components::{Collider2D, ColliderShape, Rigidbody2D, SpriteRenderer, SpriteTiling};
+    let script = |class: &str, fields: Vec<(String, Value)>| Component::Script { class: class.into(), execution_order: 0, enabled: true, fields: Value::Struct(fields) };
+    let ast = || script("AudioSourceTimeScaleBehaviour", vec![("IsAmbience".into(), Value::Bool(false))]);
+    let none = PPtr::default();
+    let components = vec![
+        Component::Transform(Transform { game_object: none, local_rotation: [0.0, 0.0, 0.0, 1.0], local_position: [0.0; 3], local_scale: [1.0; 3], children: Vec::new(), father: none }),
+        Component::SpriteRenderer(SpriteRenderer {
+            game_object: none,
+            enabled: true,
+            materials: Vec::new(),
+            sorting_layer_id: 0,
+            sorting_order: 0,
+            sprite: PPtr { file: 0, path_id: sprite.path_id },
+            color: [1.0; 4],
+            flip_x: false,
+            flip_y: false,
+            draw_mode: 0,
+            size: [1.0, 1.0],
+            mask_interaction: 0,
+            sprite_sort_point: 0,
+        }),
+        ast(),
+        script("Optout", Vec::new()),
+        script("ShatteredShardBehaviour", Vec::new()),
+        script("DebrisComponent", Vec::new()),
+        // PolygonCollider2D::Reset: density 1, no offset, no paths.
+        Component::Collider2D(Collider2D {
+            game_object: none,
+            enabled: true,
+            density: 1.0,
+            material: none,
+            is_trigger: false,
+            used_by_effector: false,
+            used_by_composite: false,
+            offset: [0.0; 2],
+            shape: ColliderShape::Polygon {
+                tiling: SpriteTiling { border: [0.0; 4], pivot: [0.0; 2], old_size: [0.0; 2], new_size: [0.0; 2], adaptive_tiling_threshold: 0.0, draw_mode: 0, adaptive_tiling: false },
+                auto_tiling: false,
+                paths: Vec::new(),
+            },
+        }),
+        // Rigidbody2D::Reset (180c22c10)
+        Component::Rigidbody2D(Rigidbody2D {
+            game_object: none,
+            body_type: 0,
+            simulated: true,
+            use_full_kinematic_contacts: false,
+            use_auto_mass: false,
+            mass: 1.0,
+            linear_drag: 0.0,
+            angular_drag: 0.05,
+            gravity_scale: 1.0,
+            material: none,
+            interpolate: 0,
+            sleeping_mode: 1,
+            collision_detection: 0,
+            constraints: 0,
+        }),
+        script("PhysicalBehaviour", Vec::new()),
+        ast(),
+    ];
+    let components = components.into_iter().enumerate().map(|(k, c)| (ObjRef { file: usize::MAX, path_id: k as i64 + 1 }, c)).collect();
+    let game_object = ObjRef { file: usize::MAX, path_id: 0 };
+    Prefab { objects: vec![PrefabObject { game_object, name: name.into(), layer: layer as u32, tag: 0, active: true, parent: None, children: Vec::new(), components }], index: HashMap::new(), materials: HashMap::new() }
+}
+
+/// Polygon2D::CheckConsistency (180635ab0): a point with a non-finite coordinate becomes (0, 0).
+fn check_consistency(path: &mut [Vec2]) {
+    for p in path {
+        if !(p[0].is_finite() && p[1].is_finite()) {
+            *p = [0.0, 0.0];
+        }
+    }
+}
+
+impl super::Game {
+    /// `new GameObject(...)` and the AddComponent calls of one shard in `ShatteredObjectGenerator.Generate`, with the
+    /// instance ids in the order the C# and the natives take them. Returns the shard's PhysicalBehaviour.
+    fn shatter_spawn_shard(&mut self, spec: &ShardSpec) -> usize {
+        use super::spawn::Clone as CloneObject;
+        use crate::unity::transform::Trs;
+        let (sprite, sprite_bounds) = {
+            let g = self.shatter_generators.iter().find(|g| g.g.Sprite.id == spec.sprite_id).expect("a shard of a generator the game did not load");
+            (g.sprite.expect("a generator loaded without its Sprite"), g.sprite_bounds)
+        };
+        // new GameObject(name, SpriteRenderer, AudioSourceTimeScaleBehaviour, Optout): the GameObject, its Transform, then the three.
+        let game_object = self.allocate_instance_id();
+        let mut ids: Vec<i32> = (0..4).map(|_| self.allocate_instance_id()).collect();
+        // gameObject.layer = PartsLayer
+        self.world.layers.insert(game_object, spec.layer);
+        // SpriteRenderer.color/sprite/material are rendering. AddComponent<ShatteredShardBehaviour>, <DebrisComponent>, <PolygonCollider2D>.
+        ids.extend((0..3).map(|_| self.allocate_instance_id()));
+        let prefab = std::sync::Arc::new(shard_prefab(&spec.name, spec.layer, sprite));
+        let trs = Trs { t: [0.0; 4], q: [0.0, 0.0, 0.0, 1.0], s: [1.0, 1.0, 1.0, 0.0] };
+        let mut inst = super::spawn::Instance {
+            prefab: prefab.clone(),
+            objects: vec![CloneObject { game_object, components: ids, trs, parent: None, active: true, self_active: true, activated: true }],
+            interest: vec![0],
+            changed: vec![0],
+            ..Default::default()
+        };
+        self.collider2d_awake(&mut inst, &prefab, 0, 6);
+        // polygonCollider2D.SetPath(0, path): Polygon2D::SetPath, CheckConsistency, RecreateCollider. An empty path is ignored.
+        let mut collider = match &prefab.objects[0].components[6].1 {
+            Component::Collider2D(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        if !spec.path.is_empty() {
+            let mut path = spec.path.clone();
+            check_consistency(&mut path);
+            let crate::assets::components::ColliderShape::Polygon { paths, .. } = &mut collider.shape else { unreachable!() };
+            *paths = vec![path];
+            let mut shard = (*prefab).clone();
+            shard.objects[0].components[6].1 = Component::Collider2D(collider.clone());
+            inst.prefab = std::sync::Arc::new(shard);
+            let prefab = inst.prefab.clone();
+            self.collider2d_recreate(&mut inst, &prefab, 0, 6);
+        }
+        // AddComponent<Rigidbody2D>: its AwakeFromLoad makes the body; the collider's shapes stay on the ground body until SyncTransforms.
+        let prefab = inst.prefab.clone();
+        let rb_id = self.allocate_instance_id();
+        inst.objects[0].components.push(rb_id);
+        let Component::Rigidbody2D(rb_data) = &prefab.objects[0].components[7].1 else { unreachable!() };
+        self.rigidbody2d_awake(&mut inst, &prefab, 0, 7, rb_data);
+        let body = inst.bodies[&0];
+        let rigidbody = super::Rigidbody {
+            body,
+            bodyType: 0,
+            collisionDetectionMode: 0,
+            interpolation: 0,
+            movement: super::MovementState::default(),
+            detached: None,
+            component: rb_id,
+            simulated: true,
+            detached_props: [0.0, 0.05, 1.0],
+            constraints: 0,
+        };
+        // rigidbody2D.mass = PartMass; AddForce(..., Impulse); AddTorque(..., Impulse)
+        self.body_set_mass(body, spec.mass);
+        rigidbody.add_force_impulse(&mut self.world, spec.impulse);
+        rigidbody.add_torque_impulse(&mut self.world, spec.torque_impulse);
+        // AddComponent<PhysicalBehaviour>: its fields at their initial values, then Awake.
+        let physical_id = self.allocate_instance_id();
+        inst.objects[0].components.push(physical_id);
+        let p = self.physicals.len();
+        let mut ph = super::Physical { name: spec.name.clone(), id: physical_id, ..Default::default() };
+        ph.enabled = true;
+        ph.active = true;
+        ph.isStatic = false;
+        ph.colliders = vec![inst.objects[0].components[6]];
+        ph.collider_defs = vec![collider];
+        ph.all_colliders = ph.colliders.clone();
+        ph.transform_id = inst.objects[0].components[0];
+        ph.rigidbody = rigidbody.clone();
+        ph.transform = super::link::pose(&inst, 0);
+        // The AudioSourceTimeScaleBehaviour the GameObject was made with.
+        ph.audio_time_scale = true;
+        ph.sprite_bounds = Some(sprite_bounds);
+        ph.sprite = Some((sprite, spec.color, 0));
+        ph.sprite_draw = ([false, false], 0, [1.0, 1.0]);
+        let address = self.heap_base.unwrap_or(super::link::MODELLED_HEAP_BASE) + ((p as u64) << 11);
+        ph.hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
+        self.physicals.push(ph);
+        self.rigidbody_hierarchy_changed = true;
+        self.physical_awake(p);
+        // physicalBehaviour.Properties = PartsPhysicalProperties; SpawnSpawnParticles, HasOutline, DisplayBloodDecals, PlaySliderSound = false.
+        let ph = &mut self.physicals[p];
+        ph.Properties = spec.properties;
+        ph.SpawnSpawnParticles = false;
+        ph.DisplayBloodDecals = false;
+        ph.PlaySliderSound = false;
+        // AddComponent<AudioSourceTimeScaleBehaviour>() (a second one); OverrideShotSounds/OverrideImpactSounds are empty (0).
+        let second = self.allocate_instance_id();
+        inst.objects[0].components.push(second);
+        // toReplace: SetPositionAndRotation(position, rotation), localScale = lossyScale.
+        if let Some(t) = &spec.to_replace {
+            inst.set_world_position(0, t.position);
+            inst.set_world_rotation(0, t.rotation);
+            inst.set_local_scale(0, t.lossy_scale);
+            self.physicals[p].transform = super::link::pose(&inst, 0);
+        }
+        // source: rigidbody.velocity += source.velocity; angularVelocity += source.angularVelocity.
+        if let Some((velocity, angular)) = spec.add_velocity {
+            let v = rigidbody.velocity(&self.world);
+            rigidbody.set_velocity(&mut self.world, [v[0] + velocity[0], v[1] + velocity[1]]);
+            let w = rigidbody.angular_velocity(&self.world);
+            rigidbody.set_angular_velocity(&mut self.world, w + angular);
+        }
+        self.unsynced.push(inst);
+        self.pending_starts.push(super::misc::PendingStart::Physical(p));
+        p
+    }
+
+    /// Rigidbody2D.position: AutoSyncTransforms, then the b2 body's origin.
+    fn rigidbody_position(&mut self, p: usize) -> Vec2 {
+        self.sync_pending();
+        let xf = self.world.body(self.physicals[p].rigidbody.body).xf;
+        [xf.p.x, xf.p.y]
+    }
+}
+
 impl ShatterHost for super::Game {
     fn random(&mut self) -> &mut Random {
         &mut self.random
     }
-    fn spawn_shard(&mut self, _spec: &ShardSpec) -> usize {
-        unimplemented!("ShatteredObjectGenerator.Generate: new GameObject + SpriteRenderer/PolygonCollider2D/Rigidbody2D/PhysicalBehaviour (no runtime object spawning or PhysicalBehaviour.Awake for spawned objects, PolygonCollider2D.SetPath decomposition)")
+    fn spawn_shard(&mut self, spec: &ShardSpec) -> usize {
+        self.shatter_spawn_shard(spec)
     }
-    fn connect_point(&mut self, _connect_to: usize, _to_replace: Option<&ToReplace>) -> Vec2 {
-        unimplemented!("ShatteredObjectGenerator.Generate: PhysicalObjectsInWorldByTransform + SpriteRenderer.bounds.ClosestPoint")
+    fn connect_point(&mut self, connect_to: usize, to_replace: Option<&ToReplace>) -> Vec2 {
+        let t = to_replace.expect("NullReferenceException: ShatteredObjectGenerator.Generate without toReplace");
+        // PhysicalObjectsInWorldByTransform.TryGetValue(ConnectTo.transform): in the world since its Start, until destroyed.
+        if self.physicals[connect_to].in_world && !self.physicals[connect_to].destroyed {
+            let (c, e) = self.sprite_world_bounds(connect_to);
+            let (closest, _) = crate::unity::transform::bounds_closest_point(t.position, c, e);
+            return [closest[0], closest[1]];
+        }
+        let at = self.rigidbody_position(connect_to);
+        [(at[0] + t.position[0]) * 0.5, (at[1] + t.position[1]) * 0.5]
     }
-    fn position(&mut self, _shard: usize) -> Vec2 {
-        unimplemented!("Rigidbody2D.position of a spawned shard")
+    fn position(&mut self, shard: usize) -> Vec2 {
+        self.rigidbody_position(shard)
     }
-    fn closest_point_fix(&mut self, _shard: usize, _point: Vec2) -> Vec2 {
-        unimplemented!("Utils.ClosestPointFix (Collider2D.ClosestPoint)")
+    fn closest_point_fix(&mut self, shard: usize, point: Vec2) -> Vec2 {
+        // GetAttachedColliders, then Collider2D.ClosestPoint (AutoSyncTransforms) on each.
+        self.sync_pending();
+        let body = self.physicals[shard].rigidbody.body;
+        let mut best = f32::MAX;
+        let mut result = point;
+        for c in self.physicals[shard].all_colliders.clone() {
+            if self.world.collider_body(c) != Some(body) {
+                continue;
+            }
+            let v = self.world.collider_closest_point(c, crate::b2::math::Vec2::new(point[0], point[1]));
+            let sqr = mathf::sqr_magnitude([v.x - point[0], v.y - point[1]]);
+            if sqr < best {
+                best = sqr;
+                result = [v.x, v.y];
+            }
+        }
+        result
     }
-    fn inverse_transform_point(&mut self, _shard: usize, _point: Vec2) -> Vec2 {
-        unimplemented!("Transform.InverseTransformPoint of a spawned shard")
+    fn inverse_transform_point(&mut self, shard: usize, point: Vec2) -> Vec2 {
+        let r = super::Game::inverse_transform_point(self, shard, [point[0], point[1], 0.0]);
+        [r[0], r[1]]
     }
-    fn add_spring_joint(&mut self, _shard: usize, _spec: &SpringSpec) {
-        unimplemented!("AddComponent<SpringJoint2D> between shards (no b2 spring/distance joint on spawned bodies)")
+    fn add_spring_component(&mut self, shard: usize) -> usize {
+        self.allocate_instance_id();
+        self.add_spring_joint_component(shard)
     }
-    fn world_center_of_mass(&mut self, _shard: usize) -> Vec2 {
-        unimplemented!("Rigidbody2D.worldCenterOfMass of a spawned shard")
+    fn configure_spring(&mut self, joint: usize, spec: &SpringSpec) {
+        self.fixed_joint_set_connected_body(joint, Some(super::BodyOwner::Physical(spec.connected)));
+        self.fixed_joint_set_frequency(joint, spec.frequency);
+        self.fixed_joint_set_damping_ratio(joint, spec.damping_ratio);
+        self.fixed_joint_set_break_force(joint, spec.break_force);
+        self.fixed_joint_set_anchor(joint, spec.anchor);
+        self.fixed_joint_set_connected_anchor(joint, spec.connected_anchor);
+        // springJoint2D.distance *= 0.95f
+        let distance = self.spring_joint_distance(joint) * 0.95;
+        self.spring_joint_set_distance(joint, distance);
     }
-    fn add_fixed_joint(&mut self, _shard: usize, _connect_to: usize, _frequency: f32, _break_force: f32) {
-        unimplemented!("AddComponent<FixedJoint2D> (no b2 weld joint)")
+    fn world_center_of_mass(&mut self, shard: usize) -> Vec2 {
+        let c = self.world.body(self.physicals[shard].rigidbody.body).sweep.c;
+        [c.x, c.y]
+    }
+    fn add_fixed_joint(&mut self, shard: usize, connect_to: usize, frequency: f32, break_force: f32) {
+        self.allocate_instance_id();
+        let f = self.add_fixed_joint_component(shard);
+        self.fixed_joint_set_connected_body(f, Some(super::BodyOwner::Physical(connect_to)));
+        self.fixed_joint_set_frequency(f, frequency);
+        self.fixed_joint_set_break_force(f, break_force);
+        // fixedJoint2D.anchor = fixedJoint2D.attachedRigidbody.centerOfMass
+        let c = self.world.body(self.physicals[shard].rigidbody.body).sweep.local_center;
+        self.fixed_joint_set_anchor(f, [c.x, c.y]);
+        self.fixed_joint_set_auto_configure(f, true);
     }
 }
 
@@ -668,8 +928,11 @@ mod tests {
         fn inverse_transform_point(&mut self, _s: usize, p: Vec2) -> Vec2 {
             p
         }
-        fn add_spring_joint(&mut self, shard: usize, spec: &SpringSpec) {
-            self.springs.push((shard, *spec));
+        fn add_spring_component(&mut self, shard: usize) -> usize {
+            shard
+        }
+        fn configure_spring(&mut self, joint: usize, spec: &SpringSpec) {
+            self.springs.push((joint, *spec));
         }
         fn world_center_of_mass(&mut self, _s: usize) -> Vec2 {
             [0.0, 0.0]

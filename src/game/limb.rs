@@ -97,6 +97,8 @@ script! {
         /// The GoreStringBehaviour component: present, enabled and its `Joint` (a SpringJoint2D).
         goreString: bool = true,
         goreStringEnabled: bool = true,
+        /// LimbBehaviour.DestroyWith: a component id on each GameObject (the gore shards PrepareGoreBits added).
+        destroy_with: Vec<i32> = Vec::new(),
         goreStringJoint: bool = false,
         /// The GoreStringBehaviour's own values and line state.
         gore: GoreString = GoreString::default(),
@@ -1133,16 +1135,32 @@ impl Game {
                 self.properties.len() - 1
             }
         };
-        // spawn_shard reaches the one remaining gap before anything below the Generate call runs.
         let p = self.limbs[l].PhysicalBehaviour;
         let t = self.physicals[p].transform;
         let to_replace = super::shatter::ToReplace { position: t.position, rotation: t.rotation, lossy_scale: self.lossy_scale(p) };
         let rb = &self.physicals[p].rigidbody;
         let source = super::shatter::ShatterSource { name: self.physicals[p].name.clone(), velocity: rb.velocity(&self.world), angular_velocity: rb.angular_velocity(&self.world) };
         let mut buffer = vec![None; g.PartCount.max(0) as usize];
-        let _ = self.shattered_object_generate(&mut st, &g, Some(to_replace), Some(&source), Some(&mut buffer));
+        let count = self.shattered_object_generate(&mut st, &g, Some(to_replace), Some(&source), Some(&mut buffer));
         self.shatter = st;
-        unimplemented!("LimbBehaviour.PrepareGoreBits: DestroyWith, DisintegrationCounterBehaviour.RegisterPseudoChild, PseudoBloodImpactHelper on limb {l}");
+        // PrepareGoreBits: GetComponentInParent<DisintegrationCounterBehaviour>() (the person's) and
+        // GetOriginalBloodType().Color (only the helper's presentation reads it), then per shard:
+        let person = self.limbs[l].Person;
+        for shard in buffer.iter().take(count.max(0) as usize).map(|s| s.expect("a creation buffer slot Generate filled")) {
+            // DestroyWith.Add(g[i]); RegisterPseudoChild(g[i].GetComponent<PhysicalBehaviour>())
+            let id = self.physicals[shard].id;
+            self.limbs[l].destroy_with.push(id);
+            self.people[person].pseudo_children.push(shard);
+            // g[i].AddComponent<PseudoBloodImpactHelper>().Color = color: a new component on the shard's GameObject.
+            let helper = self.allocate_instance_id();
+            self.with_component_instance(id, |_, inst, o| {
+                let mut prefab = (*inst.prefab).clone();
+                let n = prefab.objects[o].components.len() as i64;
+                prefab.objects[o].components.push((crate::assets::db::ObjRef { file: usize::MAX, path_id: n + 1 }, crate::assets::db::Component::Script { class: "PseudoBloodImpactHelper".into(), execution_order: 0, enabled: true, fields: crate::assets::mono::Value::Struct(Vec::new()) }));
+                inst.prefab = std::sync::Arc::new(prefab);
+                inst.objects[o].components.push(helper);
+            });
+        }
     }
 
     /// LimbBehaviour.Crush
@@ -1572,5 +1590,75 @@ impl Game {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::tool::Control;
+    use crate::play::{new_game, step};
+
+    fn frames(g: &mut Game, n: usize) {
+        for _ in 0..n {
+            step(g, 1.0 / 60.0).unwrap();
+            for c in g.input.controls.values_mut() {
+                c.down = false;
+                c.up = false;
+            }
+        }
+    }
+
+    /// ShatterProcedurally on a Human's limbs with the chance forced to pass: each Generate builds PartCount shards
+    /// (body, collider, PhysicalBehaviour) whose ids follow the AddComponent order, registers them as the limb's
+    /// DestroyWith and the person's pseudo children, and the run goes on. Skipped without the installed game.
+    #[test]
+    fn shatter_procedurally_spawns_shards() {
+        let Ok(game) = crate::game_assets::find_game(None) else { return };
+        let mut g = new_game(&game, "Default", Some("Human"), None, 0).unwrap();
+        g.prefs.ProceduralFragments = true;
+        frames(&mut g, 30);
+        let c = g.BoundingBox.center;
+        let ground = g.raycast_first(crate::b2::math::Vec2::new(c[0], c[1]), [0.0, -1.0], 1.0e4).unwrap().point.y;
+        g.input.mouse = [c[0], ground + 0.6, 0.0];
+        g.input.controls.insert("spawnRight".into(), Control { down: false, held: false, up: true });
+        frames(&mut g, 1);
+        g.input.controls.insert("spawnRight".into(), Control::default());
+        frames(&mut g, 60);
+        let l = (0..g.limbs.len()).find(|&l| g.limbs[l].ShatteredObjectGenerators.is_some()).expect("a limb with generators");
+        g.limbs[l].ShatteredObjectChance = 2.0;
+        let (first_physical, first_id) = (g.physicals.len(), g.next_instance_id);
+        g.limb_shatter_procedurally(l);
+        let shards = first_physical..g.physicals.len();
+        // The collider's shapes sit on the ground body until the next SyncTransforms moves them onto the shard's body.
+        g.sync_pending();
+        assert!(!shards.is_empty(), "no shard spawned");
+        assert_eq!(g.limbs[l].destroy_with.len(), shards.len());
+        assert_eq!(g.people[g.limbs[l].Person].pseudo_children, shards.clone().collect::<Vec<_>>());
+        for s in shards {
+            let ph = &g.physicals[s];
+            // A shard whose mask polygon is empty keeps a collider without shapes (SetPath skips an empty path).
+            let has_path = matches!(&ph.collider_defs[0].shape, crate::assets::components::ColliderShape::Polygon { paths, .. } if !paths.is_empty());
+            assert_eq!(!g.world.body(ph.rigidbody.body).fixtures.is_empty(), has_path, "shard {s}: collider shapes");
+            assert!(ph.ids.ActivationNode < ph.id && ph.id <= first_id);
+            // Instance ids count down: the components' ids follow the order the C# adds them in.
+            let id = ph.id;
+            let components = g.with_component_instance(id, |_, inst, _| inst.objects[0].components.clone());
+            assert_eq!(components.len(), 11, "the ten of Generate, then the PseudoBloodImpactHelper");
+            assert!(components.windows(2).all(|w| w[1] < w[0]), "{components:?}");
+        }
+        // Generate's SpringJoint2Ds between the shards (GenerateSoftJointsChance > 0), live on the shards' bodies.
+        assert!(g.fixed_joints.iter().any(|f| f.spring.is_some() && f.joint.is_some()), "no spring joint between shards");
+        frames(&mut g, 120);
+        // A shard's disintegration counts toward the person's DisintegrationCounterBehaviour like a limb's.
+        let person = g.limbs[l].Person;
+        let before = g.people[person].DisintegrationCount;
+        g.physical_disintegrate(first_physical);
+        assert_eq!(g.people[person].DisintegrationCount, before + 1);
+        // Destroying the person's root takes the shards with it (LimbBehaviour.OnDestroy: DestroyWith).
+        let root = g.people[person].id;
+        g.destroy_object(root);
+        frames(&mut g, 5);
+        assert!(g.physicals[first_physical + 1..].iter().all(|q| q.destroyed), "a shard survived its limb");
     }
 }

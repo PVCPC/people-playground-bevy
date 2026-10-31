@@ -81,6 +81,8 @@ pub enum ActTarget {
     ForceSendUse(usize),
     /// A CarBehaviour call (SetHealth or set_enabled(false)) on the car with component id `.0` (car.rs car_invoke).
     Car(i32, super::car::CarCall),
+    /// PhysicalBehaviour.Ignite(bool ignoreFlammability) (`Game::physicals`): ignite(p, ignore) in physical.rs.
+    Ignite(usize, bool),
 }
 
 script! {
@@ -183,6 +185,7 @@ impl Game {
             ActTarget::Activate(e) => self.explosive_activate(e),
             ActTarget::Shoot(f) => self.firearm_shoot(f),
             ActTarget::Car(id, c) => self.car_invoke(id, c),
+            ActTarget::Ignite(p, ignore) => self.ignite(p, ignore),
             ActTarget::Launch(l) => self.launcher_launch(l),
             ActTarget::ForceBreak(m) => self.machinery_force_break(m),
             ActTarget::Blast(b) => self.blaster_shoot(b),

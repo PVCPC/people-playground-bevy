@@ -310,11 +310,16 @@ impl Game {
                             g.people[i].destroy_at = None;
                             g.people[i].destroyed = true;
                         }
-                        // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove (Destroy(myStatus) is UI, DestroyWith only
-                        // filled by attachments). Its joints and bleeding particles go with the GameObject.
+                        // ShatteredShardBehaviour.OnDestroy is empty.
+                        "ShatteredShardBehaviour" => {}
+                        // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove (Destroy(myStatus) is UI), then Destroy(item)
+                        // for each DestroyWith. Its joints and bleeding particles go with the GameObject.
                         "LimbBehaviour" => {
                             let l = g.limb_of_object(key);
                             g.limbs[l].enabled = false;
+                            for item in g.limbs[l].destroy_with.clone() {
+                                g.destroy_object(item);
+                            }
                             g.limb_destroy_joints(l);
                         }
                         // ConnectedNodeBehaviour.OnDestroy: DisconnectFromEverything, then NodeController.Nodes.Remove.

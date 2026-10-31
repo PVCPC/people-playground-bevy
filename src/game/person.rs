@@ -135,6 +135,8 @@ script! {
         BoneBreakClips: usize = 0,
         /// DisintegrationCounterBehaviour.DisintegrationCount (the root object's).
         DisintegrationCount: i32 = 0,
+        /// DisintegrationCounterBehaviour.RegisterPseudoChild: the gore shards' PhysicalBehaviours, after the limbs.
+        pseudo_children: Vec<usize> = Vec::new(),
         DismembermentClips: usize = 0,
         /// PoolableImpactEffect when set: the prefab, or None from a recording (which only names it).
         PoolableImpactEffect: Option<Option<crate::assets::db::ObjRef>> = None,
@@ -236,10 +238,12 @@ impl Game {
         }
     }
 
-    /// DisintegrationCounterBehaviour.OnChildDisintegrated: its children are the person's limbs, none destroyed.
+    /// DisintegrationCounterBehaviour.OnChildDisintegrated: its children are the person's limbs (none destroyed) and
+    /// the pseudo children not yet destroyed.
     pub fn person_on_child_disintegrated(&mut self, person: usize) {
         self.people[person].DisintegrationCount += 1;
-        if self.people[person].DisintegrationCount >= self.people[person].Limbs.len() as i32 {
+        let alive = self.people[person].Limbs.len() + self.people[person].pseudo_children.iter().filter(|&&c| !self.physicals[c].destroyed).count();
+        if self.people[person].DisintegrationCount >= alive as i32 {
             // Object.Destroy(base.transform.root.gameObject): DestroyObjectDelayed queues it on the
             // DelayedCallManager at min(fixedTimeAsDouble, the frame's time), like Destroy(Joint); a second
             // Destroy finds nothing left to do.
@@ -293,9 +297,12 @@ impl Game {
                 }
             }
             // InvokeOnItemRemoved: the modding event only.
-            // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove(this); Destroy(myStatus) is UI and
-            // DestroyWith is only filled by attachments, which are not rewritten.
+            // LimbBehaviour.OnDestroy: LimbBehaviourManager.Limbs.Remove(this); Destroy(myStatus) is UI; then
+            // Destroy(item) for each live DestroyWith.
             self.limbs[l].enabled = false;
+            for item in self.limbs[l].destroy_with.clone() {
+                self.destroy_object(item);
+            }
             // ConnectedNodeBehaviour.OnDestroy: DisconnectFromEverything, then NodeController.Nodes.Remove (the
             // node is isolated and nothing reads it afterwards, so its slot in the update loop changes nothing).
             self.node_disconnect_from_everything(l);

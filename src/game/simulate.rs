@@ -678,6 +678,8 @@ impl Game {
 pub struct FixedJoint {
     pub state: FixedJoint2d,
     pub slider: Option<SliderJoint2d>,
+    /// A SpringJoint2D's own fields (a b2DistanceJoint): distance, damping ratio, frequency and autoConfigureDistance.
+    pub spring: Option<super::spawn::SpringState>,
     /// m_Joint (+0x58)
     pub joint: Option<JointId>,
     /// The owner of the Rigidbody2D that is body A, and the connectedBody's (None: the scene's ground body).
@@ -723,7 +725,7 @@ impl Game {
     /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
     pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -734,7 +736,20 @@ impl Game {
         let f = self.fixed_joints.len();
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
-        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), spring: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joint_create_if_active(f);
+        f
+    }
+
+    /// AddComponent<SpringJoint2D>(): SpringJoint2D::Reset (180bfd9c0) over AnchoredJoint2D::Reset: distance 1,
+    /// damping ratio 0, frequency 1, autoConfigureDistance on and autoConfigureConnectedAnchor off; AddToManager
+    /// creates the joint (to the ground body) when the GameObject is active and the component enabled.
+    pub fn add_spring_joint_component(&mut self, attached: usize) -> usize {
+        let f = self.fixed_joints.len();
+        let mut state = FixedJoint2d::reset();
+        state.auto_configure_connected_anchor = false;
+        let spring = super::spawn::SpringState { auto_configure_distance: true, distance: 1.0, damping_ratio: 0.0, frequency: 1.0 };
+        self.fixed_joints.push(FixedJoint { state, slider: None, spring: Some(spring), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -760,9 +775,25 @@ impl Game {
             Some(b) => Connected::Body { frame: self.body_frame(b), lossy_scale: ends.scale_b },
         };
         let j = &mut self.fixed_joints[f];
-        let def: JointKind = match j.slider.as_mut() {
-            Some(slider) => slider.create_def(&mut j.state, ends.scale_a, &frame_a, &connected).into(),
-            None => j.state.create_def(ends.scale_a, &frame_a, &connected).into(),
+        let def: JointKind = match (j.slider.as_mut(), j.spring.as_mut()) {
+            (Some(slider), _) => slider.create_def(&mut j.state, ends.scale_a, &frame_a, &connected).into(),
+            // SpringJoint2D::Create: the anchors, then the distance between them when it autoconfigures.
+            (None, Some(sp)) => {
+                let (anchor_a, anchor_b) = j.state.configure_anchors(ends.scale_a, &frame_a, &connected);
+                if sp.auto_configure_distance && !j.state.anchor_configured {
+                    let world = |f: &BodyFrame, p: Vec2| Vec2::new(p.x * f.q.c - p.y * f.q.s + f.position.x, f.q.s * p.x + p.y * f.q.c + f.position.y);
+                    let frame_b = match connected {
+                        Connected::World => BodyFrame::default(),
+                        Connected::Body { frame, .. } => frame,
+                    };
+                    let (wa, wb) = (world(&frame_a, anchor_a), world(&frame_b, anchor_b));
+                    let (dx, dy) = (wb.x - wa.x, wb.y - wa.y);
+                    let d = (dx * dx + dy * dy).sqrt();
+                    sp.distance = if 0.005 > d { 0.005 } else { f32::min(1_000_000.0, d) };
+                }
+                crate::b2::distance_joint::DistanceDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, length: sp.distance, frequency_hz: sp.frequency, damping_ratio: sp.damping_ratio }.into()
+            }
+            (None, None) => j.state.create_def(ends.scale_a, &frame_a, &connected).into(),
         };
         // FinalizeCreateJoint: body B is the connected body, or the scene's ground body. The one scene has one
         // world, so the different-worlds refusal cannot arise.
@@ -784,6 +815,14 @@ impl Game {
     /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
     /// FlushSimulationChanges after it does nothing while playing).
     pub(super) fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
+        if self.fixed_joints[f].spring.is_some() {
+            // SpringJoint2D: Joint2D::Cleanup alone; the next Create redoes the auto-configuration.
+            if let Some(id) = self.fixed_joints[f].joint.take() {
+                self.fixed_joints[f].state.anchor_configured = false;
+                self.world.destroy_joint(id);
+            }
+            return;
+        }
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_ref().unwrap().reference_angle());
         self.fixed_joints[f].state.cleanup(destroyed, live);
         if let Some(id) = self.fixed_joints[f].joint.take() {
@@ -840,15 +879,48 @@ impl Game {
 
     /// FixedJoint2D::SetFrequency / SetDampingRatio: clamped and written into the live b2 joint without recreating it.
     pub fn fixed_joint_set_frequency(&mut self, f: usize, v: f32) {
+        // SpringJoint2D::SetFrequency (180bfdb80): clamped to [0, 1e6], written through to the live b2 joint.
+        if let Some(sp) = self.fixed_joints[f].spring.as_mut() {
+            sp.frequency = if 0.0 > v { 0.0 } else { f32::min(1_000_000.0, v) };
+            let frequency = sp.frequency;
+            if let Some(id) = self.fixed_joints[f].joint {
+                self.world.joints[id].as_mut().unwrap().distance_mut().def.frequency_hz = frequency;
+            }
+            return;
+        }
         assert!(self.fixed_joints[f].slider.is_none(), "frequency of a SliderJoint2D");
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
         self.fixed_joints[f].state.set_frequency(v, live);
     }
 
     pub fn fixed_joint_set_damping_ratio(&mut self, f: usize, v: f32) {
+        // SpringJoint2D::SetDampingRatio (180bfda50): clamped to [0, 1], written through to the live b2 joint.
+        if let Some(sp) = self.fixed_joints[f].spring.as_mut() {
+            sp.damping_ratio = if 0.0 > v { 0.0 } else { f32::min(1.0, v) };
+            let ratio = sp.damping_ratio;
+            if let Some(id) = self.fixed_joints[f].joint {
+                self.world.joints[id].as_mut().unwrap().distance_mut().def.damping_ratio = ratio;
+            }
+            return;
+        }
         assert!(self.fixed_joints[f].slider.is_none(), "damping ratio of a SliderJoint2D");
         let live = self.fixed_joints[f].joint.map(|id| self.world.joints[id].as_mut().unwrap().weld_mut());
         self.fixed_joints[f].state.set_damping_ratio(v, live);
+    }
+
+    /// SpringJoint2D.distance (the stored value).
+    pub fn spring_joint_distance(&self, f: usize) -> f32 {
+        self.fixed_joints[f].spring.as_ref().expect("a SpringJoint2D").distance
+    }
+
+    /// SpringJoint2D::SetDistance (180bfdab0): clamped to [0.005, 1e6], written through to the live b2 joint's length.
+    pub fn spring_joint_set_distance(&mut self, f: usize, v: f32) {
+        let sp = self.fixed_joints[f].spring.as_mut().expect("a SpringJoint2D");
+        sp.distance = if 0.005 > v { 0.005 } else { f32::min(1_000_000.0, v) };
+        let distance = sp.distance;
+        if let Some(id) = self.fixed_joints[f].joint {
+            self.world.joints[id].as_mut().unwrap().distance_mut().def.length = distance;
+        }
     }
 
     /// Joint2D::SetBreakForce (180c05980) / SetBreakTorque (180c059d0): the clamped value is stored, then

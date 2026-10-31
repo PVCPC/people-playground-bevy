@@ -772,7 +772,7 @@ impl Game {
     }
 
     /// Rigidbody2D::AwakeFromLoad (180c1c8e0) in instantiate mode: Create on an active object without a body.
-    fn rigidbody2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData) {
+    pub(super) fn rigidbody2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize, rb: &RigidbodyData) {
         if inst.objects[o].active && !inst.bodies.contains_key(&o) {
             self.rigidbody2d_create(inst, prefab, o, c, rb, None);
         }
@@ -1068,7 +1068,7 @@ impl Game {
     /// Collider2D::AwakeFromLoad (180c0c370) in instantiate mode: CreateFixtures on an active object, and
     /// Collider2D::AddToManager (180c0bcc0) on an enabled one, which registers the GameObject's interest in the
     /// collider TRS system.
-    fn collider2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
+    pub(super) fn collider2d_awake(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
         if inst.objects[o].active {
             let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
             // Collider2D +0xc8: the GameObject's Effector2D, found before the fixtures exist.

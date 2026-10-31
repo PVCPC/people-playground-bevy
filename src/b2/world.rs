@@ -535,6 +535,13 @@ impl Joint {
         }
     }
 
+    pub fn distance_mut(&mut self) -> &mut DistanceJoint {
+        match &mut self.kind {
+            JointKind::Distance(d) => d,
+            _ => panic!("not a spring"),
+        }
+    }
+
     pub fn weld(&self) -> &WeldJoint {
         match &self.kind {
             JointKind::Weld(w) => w,

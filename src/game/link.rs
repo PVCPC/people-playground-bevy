@@ -17,7 +17,7 @@ use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
 
 /// Where the modelled managed heap starts (see `Game::spawn`): a 2048-aligned address. Any value is as real as another
 /// (the game's own differs per run); this one is a fixed pick.
-const MODELLED_HEAP_BASE: u64 = 0x0000_0000_014f_5000;
+pub(super) const MODELLED_HEAP_BASE: u64 = 0x0000_0000_014f_5000;
 use crate::assets::mono::Value;
 use crate::game_assets::{Curve, CurveCache};
 use crate::unity::transform::Node as TransformNode;
@@ -684,7 +684,8 @@ impl Game {
         let p = field(v, "PartsPhysicalProperties")?.pptr().ok_or("ShatteredObjectGenerator.PartsPhysicalProperties")?;
         let asset = db.resolve(l.file, p).ok_or("ShatteredObjectGenerator.PartsPhysicalProperties does not resolve")?;
         // Shards add it to `properties` when the first one is made (the recorded arena holds only what a spawned component used).
-        self.shatter_generators.push(shatter::GeneratorSource { g, properties: read_physical_properties(db, asset)? });
+        let bounds = sprite_bounds(&sprite);
+        self.shatter_generators.push(shatter::GeneratorSource { g, properties: read_physical_properties(db, asset)?, sprite: Some(sprite_asset), sprite_bounds: bounds });
         Ok(Some(self.shatter_generators.len() - 1))
     }
 
@@ -1953,6 +1954,11 @@ impl Game {
                     Some((to, tc)) if class_of(to, tc) == "BeamformerBehaviour" && method == "Shoot" => targets.push(ActTarget::Beam(beamformers[&to])),
                     Some((to, tc)) if class_of(to, tc) == "GenericScifiWeapon40Behaviour" && method == "Fire" => targets.push(ActTarget::Fire(scifi40s[&to])),
                     Some((to, tc)) if class_of(to, tc) == "PhysicalBehaviour" && method == "ForceSendUse" => targets.push(ActTarget::ForceSendUse(l.arenas.physical[&to])),
+                    // Ignite(bool): the call's bool argument is ignoreFlammability (a UnityEvent's BoolArgument is 0 or 1).
+                    Some((to, tc)) if class_of(to, tc) == "PhysicalBehaviour" && method == "Ignite" => {
+                        let ignore = call.get("m_Arguments").and_then(|a| a.get("m_BoolArgument")).is_some_and(|b| b.bool() == Some(true) || b.i64() == Some(1));
+                        targets.push(ActTarget::Ignite(l.arenas.physical[&to], ignore));
+                    }
                     // The CarBehaviour calls car_calls keeps (the same argument reads).
                     Some((to, tc)) if class_of(to, tc) == "CarBehaviour" && method == "SetHealth" => {
                         let h = call.get("m_Arguments").and_then(|a| a.get("m_FloatArgument")).and_then(Value::f32).ok_or("CarBehaviour.SetHealth without its float argument")?;
