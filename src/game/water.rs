@@ -413,6 +413,8 @@ impl Game {
                     }
                     // OnEnable shows the text screen (presentation).
                     "DefibrillatorBehaviour" => {}
+                    // OnEnable clears the trail mesh (rendering).
+                    "EnergySwordMotionBlur" => {}
                     // OnEnable: UpdateActivation.
                     "CardiopulmonaryBypassMachineBehaviour" => {
                         if self.script_enabled(id, *enabled) {
@@ -457,6 +459,12 @@ impl Game {
                     self.physicals[p].active = false;
                     if *enabled {
                         self.physical_on_disable(p);
+                    }
+                }
+                "EnergySwordBehaviour" => {
+                    let i = self.energy_swords.iter().position(|c| c.id == id).expect("an EnergySwordBehaviour in the arena");
+                    if self.energy_swords[i].enabled {
+                        self.energy_sword_on_disable(i, inst);
                     }
                 }
                 // OnDisable -> OnDestroy

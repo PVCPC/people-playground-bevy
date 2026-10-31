@@ -86,11 +86,12 @@ impl Game {
     /// the saw's Rigidbody2D at the hit point, and the victim's collider stops colliding with the saw's. `stab`
     /// (SharpOnAllSidesBehaviour) then sends Stabbed to the victim and Lodged to the blade's GameObject.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn soft_connect(&mut self, connections: &mut SoftConnections, saw: usize, saw_collider: i32, other: usize, coll: i32, strength: f32, stab: bool) {
+    /// `hit` is the script's GetHitPoint (and what precedes it).
+    pub(super) fn soft_connect(&mut self, connections: &mut SoftConnections, saw: usize, saw_collider: i32, other: usize, coll: i32, strength: f32, stab: bool, hit: &mut dyn FnMut(&mut Game) -> [f32; 2]) {
         if self.physicals[other].destroyed || !self.collider_exists(coll) {
             return;
         }
-        let hit = self.saw_hit_point(saw, saw_collider, coll);
+        let hit = hit(self);
         // AddComponent<FrictionJoint2D>() takes an instance id.
         self.allocate_instance_id();
         let f = self.add_friction_joint_component(other);

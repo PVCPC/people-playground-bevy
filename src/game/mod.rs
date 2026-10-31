@@ -50,6 +50,7 @@ pub mod thermometer;
 pub mod syringe;
 pub mod jet_engine;
 pub mod chainsaw;
+pub mod energy_sword;
 pub mod soft_connect;
 pub mod signal_converter;
 pub mod flamethrower;
@@ -827,6 +828,23 @@ impl Rigidbody {
         let q = w.body(self.body).xf.q;
         w.body_mut(self.body).apply_force_to_center(V::new(q.c * force[0] - q.s * force[1], q.s * force[0] + q.c * force[1]));
     }
+    /// Rigidbody2D::AddRelativeForce (180c1c1b0) with ForceMode2D.Impulse: the impulse turned by the body's rotation,
+    /// then a Dynamic body wakes and its velocity gains it times the inverse mass.
+    pub fn add_relative_force_impulse(&self, w: &mut World, impulse: [f32; 2]) {
+        if self.detached.is_some() || self.bodyType != 0 {
+            return;
+        }
+        let b = w.body_mut(self.body);
+        let (x, y) = (b.xf.q.c * impulse[0] - b.xf.q.s * impulse[1], b.xf.q.s * impulse[0] + b.xf.q.c * impulse[1]);
+        if b.kind != BodyType::Dynamic {
+            return;
+        }
+        if b.flags & BODY_AWAKE == 0 {
+            b.flags |= BODY_AWAKE;
+            b.sleep_time = 0.0;
+        }
+        b.linear_velocity = V::new(x * b.inv_mass + b.linear_velocity.x, y * b.inv_mass + b.linear_velocity.y);
+    }
     /// Rigidbody2D::AddForceAtPosition (180c1c030) with ForceMode2D.Impulse.
     pub fn add_impulse_at_position(&self, w: &mut World, impulse: [f32; 2], point: [f32; 2]) {
         if self.detached.is_some() || self.bodyType != 0 {
@@ -1203,6 +1221,7 @@ pub enum Behaviour {
     Syringe(usize),
     JetEngine(usize),
     Chainsaw(usize),
+    EnergySword(usize),
     SignalConverter(usize),
     Blaster(usize),
     Blasterbolt(usize),
@@ -1271,6 +1290,7 @@ impl Behaviour {
             Behaviour::Display(_) => "DisplayBehaviour",
             Behaviour::JetEngine(_) => "JetEngineBehaviour",
             Behaviour::Chainsaw(_) => "ChainsawBehaviour",
+            Behaviour::EnergySword(_) => "EnergySwordBehaviour",
             Behaviour::Blaster(_) => "BlasterBehaviour",
             Behaviour::Blasterbolt(_) => "BlasterboltBehaviour",
             Behaviour::Beamformer(_) => "BeamformerBehaviour",
@@ -1476,6 +1496,11 @@ pub struct Game {
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,
     pub chainsaws: Vec<chainsaw::Chainsaw>,
+    pub energy_swords: Vec<energy_sword::EnergySword>,
+    /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
+    pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,
+    /// A MapConfig was woken (FindObjectOfType<MapConfig>() is not null).
+    pub map_config_present: bool,
     pub blasters: Vec<blaster::Blaster>,
     pub blasterbolts: Vec<blaster::Blasterbolt>,
     pub beamformers: Vec<scifi::Beamformer>,

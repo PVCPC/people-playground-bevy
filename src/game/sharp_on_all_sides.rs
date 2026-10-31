@@ -87,7 +87,7 @@ impl Game {
                 && (self.properties[self.physicals[v].Properties].Softness >= self.sharp_on_all_sides[s].MinSoftness
                     || (self.properties[self.physicals[me].Properties].IgnoreStabResistance && !self.properties[self.physicals[v].Properties].IgnoreStabResistance))
             {
-                self.soft_connect(&mut conns, me, sharp, v, coll, strength, true);
+                self.soft_connect(&mut conns, me, sharp, v, coll, strength, true, &mut |g| g.saw_hit_point(me, sharp, coll));
             }
         }
         self.soft_connections_prune(&mut conns, sharp);

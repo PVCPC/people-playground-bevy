@@ -114,7 +114,7 @@ impl Game {
                 }
                 let softness = self.properties[self.physicals[v].Properties].Softness;
                 if softness >= self.chainsaws[i].MinSoftness {
-                    self.soft_connect(&mut conns, p, saw_collider, v, coll, strength, false);
+                    self.soft_connect(&mut conns, p, saw_collider, v, coll, strength, false, &mut |g| g.saw_hit_point(p, saw_collider, coll));
                     continue;
                 }
                 let hit = self.saw_hit_point(p, saw_collider, coll);

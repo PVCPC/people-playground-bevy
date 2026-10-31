@@ -117,6 +117,7 @@ pub struct Linked {
     pub syringes: HashMap<usize, usize>,
     pub jet_engines: HashMap<usize, usize>,
     pub chainsaws: HashMap<usize, usize>,
+    pub energy_swords: HashMap<usize, usize>,
     pub blasters: HashMap<usize, usize>,
     pub blasterbolts: HashMap<usize, usize>,
     pub beamformers: HashMap<usize, usize>,
@@ -559,6 +560,14 @@ pub(super) fn check_rewritten(class: &str) {
         // chainsaw.rs: Start draws the seed, FixedUpdate saws, Update adds speed, OnDestroy destroys the joints; the
         // audio, particles and the saw sprite are presentation.
         "ChainsawBehaviour" => {}
+        // energy_sword.rs: Awake hides the blade, Start, Use, FixedUpdate, Update, OnDisable and OnDestroy are
+        // rewritten; the audio and particles are presentation.
+        "EnergySwordBehaviour" => {}
+        // OnCollisionEnter2D instantiates CollideWithOtherSwordVFX (simulate.rs).
+        "EnergySwordBladeClashBehaviour" => {}
+        // The blade's trail mesh: Awake, OnEnable, Update and OnDestroy are rendering (it moves only its own
+        // Transform, which nothing simulated reads).
+        "EnergySwordMotionBlur" => {}
         // blaster.rs, scifi.rs: Awake caches components (the Disassembler's takes an AudioSource id), Start flips the
         // muzzle flash (BlasterBehaviour), shows or hides lines (BeamformerBehaviour); the bolt only has Update.
         "BlasterBehaviour" | "BlasterboltBehaviour" | "BeamformerBehaviour" | "GenericScifiWeapon40Behaviour" => {}
@@ -3123,6 +3132,7 @@ impl Game {
         // The classes that read the translated behaviours: JetEngineBehaviour toggles its GuideTemperatureBehaviour.
         let mut jet_engines = HashMap::new();
         let mut chainsaws = HashMap::new();
+        let mut energy_swords = HashMap::new();
         let mut signal_converters = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "JetEngineBehaviour") {
@@ -3175,6 +3185,64 @@ impl Game {
                 chainsaws.insert(o, self.chainsaws.len());
                 self.chainsaws.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "EnergySwordBehaviour") {
+                let mut x = super::energy_sword::EnergySword::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.unwrap_or_else(|| unimplemented!("EnergySwordBehaviour.PhysicalBehaviour null (NullReferenceException)"));
+                let collider = |name: &str| -> Result<(usize, usize), String> {
+                    let p = field(v, name)?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("EnergySwordBehaviour.{name} null or outside its prefab (NullReferenceException)"));
+                    let k = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).ok_or_else(|| format!("EnergySwordBehaviour.{name}: dangling reference"))?;
+                    match prefab.objects[k.0].components[k.1].1 {
+                        Component::Collider2D(_) => Ok(k),
+                        _ => Err(format!("EnergySwordBehaviour.{name} is not a Collider2D")),
+                    }
+                };
+                let main = collider("MainCollider")?;
+                x.MainCollider = inst.objects[main.0].components[main.1];
+                x.BladeCollider = collider("BladeCollider")?;
+                x.blade_collider_id = inst.objects[x.BladeCollider.0].components[x.BladeCollider.1];
+                let line = field(v, "LocalBladeLine")?;
+                for (k, name) in ["A", "B"].into_iter().enumerate() {
+                    super::Field::set(&mut x.LocalBladeLine[k], field(line, name)?).map_err(|e| format!("EnergySwordBehaviour.LocalBladeLine.{name}: {e}"))?;
+                }
+                x.BladeObject = l.object(field(v, "BladeObject")?)?.unwrap_or_else(|| unimplemented!("EnergySwordBehaviour.BladeObject null (NullReferenceException in Awake)"));
+                x.MotionBlur = l.object(field(v, "MotionBlur")?)?.unwrap_or_else(|| unimplemented!("EnergySwordBehaviour.MotionBlur null (NullReferenceException in Awake)"));
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                x.ImpactSound = array(v, "ImpactSound")?.len();
+                // SetActivation plays and stops these and the particles unconditionally.
+                for name in ["HitParticle", "BoilingVFX", "RainParticles", "LoopSource"] {
+                    if l.object(field(v, name)?)?.is_none() {
+                        unimplemented!("EnergySwordBehaviour.{name} null (NullReferenceException in SetActivation)");
+                    }
+                }
+                // ImpactSource: its isPlaying draws Random.value on Play. A looping, enabled source with a clip plays
+                // until Stop.
+                let a = field(v, "ImpactSource")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("EnergySwordBehaviour.ImpactSource null or outside its prefab"));
+                let source = crate::assets::classes::AudioSource::read(db.data(ObjRef { file, path_id: a.path_id }))?;
+                let so = prefab.index[&ObjRef { file, path_id: a.path_id }].0;
+                if !source.enabled || source.clip.is_null() || !source.looping || so == x.BladeObject || inst.descendants(x.BladeObject).contains(&so) {
+                    unimplemented!("EnergySwordBehaviour.ImpactSource: disabled, without a clip, not looping or under BladeObject (its isPlaying)");
+                }
+                if v.get("SerialisableVictims").and_then(Value::array).is_some_and(|a| !a.is_empty()) {
+                    unimplemented!("EnergySwordBehaviour.SerialisableVictims: OnAfterDeserialise (GUID lookup of the victims)");
+                }
+                energy_swords.insert(o, self.energy_swords.len());
+                self.energy_swords.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "EnergySwordBladeClashBehaviour") {
+                let p = field(v, "CollideWithOtherSwordVFX")?.pptr().ok_or("CollideWithOtherSwordVFX")?;
+                if p.is_null() {
+                    unimplemented!("EnergySwordBladeClashBehaviour: Instantiate(null CollideWithOtherSwordVFX) (ArgumentException)");
+                }
+                let r = db.resolve(file, p).ok_or("EnergySwordBladeClashBehaviour.CollideWithOtherSwordVFX outside the data")?;
+                if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                    unimplemented!("EnergySwordBladeClashBehaviour: a CollideWithOtherSwordVFX with physics (its pose)");
+                }
+                let colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, k))| matches!(k, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                self.blade_clashes.push((inst.objects[o].components[c], colliders, r));
+            }
             if let Some((_, _, v)) = script(prefab, o, "SignalConverterBehaviour") {
                 let mut x = super::signal_converter::SignalConverter::default();
                 load_values(x.fields(), v)?;
@@ -3183,7 +3251,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3598,6 +3666,13 @@ impl Game {
                 }
                 "DetectorBehaviour" => self.detector_awake(linked.detectors[&o]),
                 "TelevisionBehaviour" => self.television_awake(linked.televisions[&o]),
+                "EnergySwordBehaviour" => {
+                    // Awake: BladeObject.SetActive(false), MotionBlur.SetActive(false).
+                    let x = &self.energy_swords[linked.energy_swords[&o]];
+                    let (blade, blur) = (x.BladeObject, x.MotionBlur);
+                    self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, blade);
+                    self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, blur);
+                }
                 "CardiopulmonaryBypassMachineBehaviour" if *enabled => {
                     // OnEnable: UpdateActivation. Activated shows the Cosmetics object, which the prefab has active already.
                     let x = &self.cardiopulmonary_bypasses[linked.cardiopulmonary_bypasses[&o]];
@@ -3811,6 +3886,7 @@ impl Game {
                 "InfraredThermometer" => Some(Behaviour::InfraredThermometer(linked.infrared_thermometers[&o])),
                 "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
                 "ChainsawBehaviour" => Some(Behaviour::Chainsaw(linked.chainsaws[&o])),
+                "EnergySwordBehaviour" => Some(Behaviour::EnergySword(linked.energy_swords[&o])),
                 "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
                 "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
                 "BeamformerBehaviour" => Some(Behaviour::Beamformer(linked.beamformers[&o])),
@@ -3973,6 +4049,7 @@ impl Game {
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
                 "ChainsawBehaviour" => PendingStart::Chainsaw(linked.chainsaws[&o]),
+                "EnergySwordBehaviour" => PendingStart::EnergySword(linked.energy_swords[&o]),
                 "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
                 // Start reads Slider.limits: the component's state, taken from the spawn when the Start runs.
                 "PistonBehaviour" => {
@@ -4010,6 +4087,7 @@ impl Game {
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {
+                    self.map_config_present = true;
                     let db = db.as_deref_mut().unwrap_or_else(|| unimplemented!("MapConfig.Start on a first GameObject.SetActive(true)"));
                     let file = prefab.objects[o].game_object.file;
                     let mut weather = Vec::new();

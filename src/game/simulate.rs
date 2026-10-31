@@ -570,6 +570,15 @@ impl Game {
                 // The collider's own GameObject first (a TorchBehaviour without a PhysicalBehaviour), then the physical's.
                 self.torch_collision_on_collider(collider.id, r.message, &c);
                 self.gorse_projectile_collision(collider.id, r.message, &c);
+                // EnergySwordBladeClashBehaviour.OnCollisionEnter2D: Instantiate(CollideWithOtherSwordVFX,
+                // GetContact(0).point, identity). The VFX has no physics; only its instance ids matter.
+                if r.message == Message::CollisionEnter {
+                    let vfx: Vec<_> = self.blade_clashes.iter().filter(|(id, cs, _)| cs.contains(&collider.id) && !self.destroyed_components.contains(id)).map(|x| x.2).collect();
+                    for v in vfx {
+                        let p = c.contacts.first().unwrap_or_else(|| unimplemented!("EnergySwordBladeClashBehaviour: GetContact(0) without contacts (IndexOutOfRangeException)")).point;
+                        self.spawn_prefab(v, [p.x, p.y, 0.0]);
+                    }
+                }
                 if let Some(p) = self.physical_of_collider(collider.id) {
                     self.send_collision_message(p, r.message, &c);
                 }

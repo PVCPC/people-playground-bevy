@@ -290,6 +290,13 @@ impl Game {
                             let i = g.sharp_on_all_sides.iter().position(|s| s.id == cid).expect("the SharpOnAllSidesBehaviour");
                             g.sharp_on_all_sides_destroy(i);
                         }
+                        // Destroys its trail mesh (rendering).
+                        "EnergySwordMotionBlur" => {}
+                        "EnergySwordBehaviour" => {
+                            let i = g.energy_swords.iter().position(|s| s.id == cid).expect("the EnergySwordBehaviour");
+                            let blur = inst.objects[g.energy_swords[i].MotionBlur].components[0];
+                            g.energy_sword_destroy(i, blur);
+                        }
                         "ChainsawBehaviour" => {
                             let i = g.chainsaws.iter().position(|s| s.id == cid).expect("the ChainsawBehaviour");
                             g.chainsaw_destroy(i);

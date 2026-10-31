@@ -243,10 +243,15 @@ impl Game {
 
     /// SendMessage("Damage", float.MaxValue, DontRequireReceiver): LimbBehaviour is the only class with a Damage method.
     fn send_damage_max(&mut self, p: usize) {
+        self.send_damage(p, f32::MAX);
+    }
+
+    /// SendMessage("Damage", amount, DontRequireReceiver)
+    pub(super) fn send_damage(&mut self, p: usize, amount: f32) {
         let id = self.physicals[p].id;
         if self.tr_has_script(id, "LimbBehaviour") {
             let l = self.limbs.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's LimbBehaviour");
-            self.limb_damage(l, f32::MAX);
+            self.limb_damage(l, amount);
         }
     }
 

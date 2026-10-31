@@ -967,6 +967,8 @@ impl Game {
                 (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
                 (Phase::Fixed, B::Chainsaw(i)) => self.chainsaw_fixed_update(i),
                 (Phase::Update, B::Chainsaw(i)) => self.chainsaw_update(i),
+                (Phase::Fixed, B::EnergySword(i)) => self.energy_sword_fixed_update(i),
+                (Phase::Update, B::EnergySword(i)) => self.energy_sword_update(i),
                 (Phase::Update, B::Syringe(i)) => self.syringe_update(i),
                 (Phase::Update, B::Piston(i)) => self.piston_update(i),
                 // TemperatureRayGunBehaviour.Update: the line renderer's start.

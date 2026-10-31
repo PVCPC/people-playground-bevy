@@ -165,6 +165,29 @@ mod tests {
     }
 }
 
+/// AudioSource (82), up to Loop.
+pub struct AudioSource {
+    pub enabled: bool,
+    pub clip: PPtr,
+    pub looping: bool,
+}
+
+impl AudioSource {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let _game_object = PPtr::read(r)?;
+        let enabled = r.bool()?;
+        r.align();
+        let _mixer_group = PPtr::read(r)?;
+        let clip = PPtr::read(r)?;
+        let _play_on_awake = r.bool()?;
+        r.align();
+        let (_volume, _pitch) = (r.f32()?, r.f32()?);
+        let looping = r.bool()?;
+        Ok(Self { enabled, clip, looping })
+    }
+}
+
 /// AudioClip (83), up to m_Length.
 pub struct AudioClip {
     pub frequency: i32,

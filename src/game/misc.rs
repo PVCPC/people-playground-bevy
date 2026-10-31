@@ -514,6 +514,8 @@ pub enum PendingStart {
     Bulb(usize),
     /// ChainsawBehaviour.Start: the `Game::chainsaws` index.
     Chainsaw(usize),
+    /// EnergySwordBehaviour.Start: the `Game::energy_swords` index.
+    EnergySword(usize),
     /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
     Thrusterbed(usize),
     /// PistonBehaviour.Start: the `Game::pistons` index and the `autofix_joints` entry holding its SliderJoint2D.
@@ -1000,6 +1002,7 @@ impl Game {
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
                 PendingStart::Bulb(i) => self.bulb_start(i),
                 PendingStart::Chainsaw(i) => self.chainsaw_start(i),
+                PendingStart::EnergySword(i) => self.energy_sword_start(i),
                 PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
                 PendingStart::Piston(i, joints) => {
                     let a = std::mem::take(&mut self.autofix_joints[joints]).sliders.remove(0);
