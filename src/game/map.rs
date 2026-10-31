@@ -37,6 +37,10 @@ script! {
         /// Switches.Length; None when Switches is null.
         switches: Option<usize> = None,
         hasAudio: bool = false,
+        /// OnGroup's Transform id (SetActive on that GameObject); None when the field is null.
+        on_group: Option<i32> = None,
+        /// The OnGroup GameObject's m_IsActive in the prefab: SetActive(false) at Start changes nothing unless it is true.
+        on_group_active: bool = false,
         /// The pending DelayedActivation's WaitForSeconds: Time.timeAsDouble it resumes at.
         wake: Option<f64> = None,
         /// The switch clip the audio layer plays next.
@@ -89,8 +93,20 @@ impl Game {
     /// MapLightBehaviour.Start: Activated = StartEnabled (Global.Awake clears it), UpdateActivated(playSound:
     /// true) on the off branch (rendering only), then DelayedActivation(4) up to its WaitForSeconds, whose
     /// DelayedCallManager entry is the current time plus the float seconds.
+    /// OnGroup.SetActive(active) of a map light: its GameObject's scripts are enabled or disabled with it.
+    fn map_light_set_group(&mut self, l: usize, active: bool) {
+        if let Some(id) = self.map_lights[l].on_group {
+            self.with_component_instance(id, |g, inst, o| g.set_active_scripts(inst, o, active));
+        }
+    }
+
     pub fn map_light_start(&mut self, l: usize) {
         self.map_lights[l].Activated = false;
+        // UpdateActivated(!StartEnabled) takes the off branch: OnDeactivate, then OnGroup.SetActive(false), which
+        // changes nothing for a group that starts inactive.
+        if self.map_lights[l].on_group_active {
+            self.map_light_set_group(l, false);
+        }
         let m = &self.map_lights[l];
         let (interval, order) = (m.TimeIntervalInSeconds, m.Order);
         let seconds = interval * self.random.range(1.0, 1.1) * (order + 4.0);
@@ -177,13 +193,14 @@ impl Game {
             let m = &mut self.map_lights[l];
             m.wake = None;
             m.Activated = true;
-            // UpdateActivated(playSound: true). ponytail: OnActivate listeners and OnGroup's scripts are
-            // rendering only on the shipped maps (one Random draw per wake, per the trace).
+            // UpdateActivated(playSound: true): OnActivate (no listeners on any shipped map: no persistent calls in the
+            // export, none added by code), the switch clip's PickRandom, then OnGroup.SetActive(true).
             if m.hasAudio {
                 let n = m.switches;
                 let clip = self.pick_random(n.unwrap_or(0));
                 self.map_lights[l].play = Some(clip);
             }
+            self.map_light_set_group(l, true);
         }
     }
 }
@@ -233,7 +250,9 @@ mod tests {
         }
         let prefab = db.prefab(map.unwrap()).unwrap();
         let mut g = Game::load_main(&mut db, &game).unwrap();
-        g.load_map(&mut db, &prefab).unwrap();
+        // As scene.rs does: the map instance is queued for its transform sync (and its scripts can then find it).
+        let (inst, _) = g.load_map(&mut db, &prefab).unwrap();
+        g.unsynced.push(inst);
         g.run_pending_starts();
         let snap = |k: &str| first.snap.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()).unwrap();
         assert_eq!(format!("{:08x}", g.AmbientTemperature.to_bits()), snap("ambient"));
