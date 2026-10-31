@@ -406,7 +406,7 @@ impl Game {
 
     /// Collider2D.bounds (Collider2D::GetBounds, 180c11150): the union of the shapes' AABBs (ComputeAABB with the
     /// radius) as center and extents, z from the Transform. The caller runs the AutoSyncTransforms it starts with.
-    fn collider_bounds(&self, p: usize, collider: i32) -> ([f32; 3], [f32; 3]) {
+    pub(super) fn collider_bounds(&self, p: usize, collider: i32) -> ([f32; 3], [f32; 3]) {
         let body = self.world.body(self.physicals[p].rigidbody.body);
         let mut aabb: Option<crate::b2::broadphase::Aabb> = None;
         for &f in &body.fixtures {
@@ -956,22 +956,31 @@ impl Game {
 
     /// Global.GetPhysicsObjectsNearPositionAccurate(position, radius) at accuracy 1: for each cell of a CeilToInt(radius)
     /// square around the position, GetChunkNear(cell, 0) (one Random.insideUnitCircle draw each) and the chunk's objects
-    /// that are not disintegrated, a chunk met again yielding its objects again. The iterator is lazy, but its
-    /// callers draw nothing, so the order of the draws is the same.
-    pub(super) fn physics_objects_near_position_accurate(&mut self, position: [f32; 2], radius: f32) -> Vec<usize> {
+    /// that are not disintegrated, a chunk met again yielding its objects again. The iterator is lazy: `each` runs on an
+    /// object before the next cell's draw, as a foreach body does. Nothing a caller does changes chunk membership, so
+    /// a copy of the chunk is the live one.
+    pub(super) fn physics_objects_near_position_accurate_each(&mut self, position: [f32; 2], radius: f32, mut each: impl FnMut(&mut Game, usize)) {
         self.refresh_physical_chunks();
         let res = radius.ceil() as i32;
         let half = res as f32 * 0.5;
-        let mut out = Vec::new();
         for x in 0..res {
             for y in 0..res {
                 let v = [(d(position[0]) - half + x as f32).f(), (d(position[1]) - half + y as f32).f()];
                 let key = self.chunk_near([v[0], v[1], 0.0], 0.0);
-                if let Some(chunk) = self.physical_chunks.get(&key) {
-                    out.extend(chunk.iter().copied().filter(|&o| !self.physicals[o].isDisintegrated));
+                let Some(chunk) = self.physical_chunks.get(&key).cloned() else { continue };
+                for o in chunk {
+                    if !self.physicals[o].isDisintegrated {
+                        each(self, o);
+                    }
                 }
             }
         }
+    }
+
+    /// `physics_objects_near_position_accurate_each` for callers that draw nothing in the loop body.
+    pub(super) fn physics_objects_near_position_accurate(&mut self, position: [f32; 2], radius: f32) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.physics_objects_near_position_accurate_each(position, radius, |_, o| out.push(o));
         out
     }
 

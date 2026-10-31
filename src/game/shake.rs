@@ -27,7 +27,7 @@ impl Game {
     /// AudioSource.isPlaying: a one-shot is still sounding.
     // ponytail: the mixer runs on the DSP clock; with pitch = Time.timeScale a clip lasts its length in scaled time,
     // which Time.fixedTime only matches while frames keep up with the wall clock (the game's own isPlaying drifts too).
-    fn audio_is_playing(&self, source: i32) -> bool {
+    pub(super) fn audio_is_playing(&self, source: i32) -> bool {
         self.audio_playing_until.get(&source).is_some_and(|&t| self.time.fixedTimeAsDouble < t)
     }
 

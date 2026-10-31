@@ -383,7 +383,7 @@ impl Game {
     /// level1 object, never a physical's root.
     fn bullet_target(&self, f: Shooter, p: Option<usize>) -> Option<usize> {
         let root = match f {
-            Shooter::Firearm(f) => Some(self.root_id(self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D"))),
+            Shooter::Firearm(f) => Some(self.firearm_root_id(f)),
             Shooter::MachineGun(m) => Some(self.root_id(self.machine_guns[m].physical)),
             Shooter::Shrapnel => None,
         };
@@ -718,6 +718,11 @@ impl Game {
                 ("BalloonBehaviour", true) => {
                     let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
                     self.balloon_exit_shot(b);
+                }
+                // SentryTurretBehaviour.Shot(shot) (not an ExitShot receiver).
+                ("SentryTurretBehaviour", false) => {
+                    let s = self.sentry_turrets.iter().position(|s| s.id == id).expect("the object's SentryTurretBehaviour");
+                    self.sentry_turret_shot(s, damage);
                 }
                 ("DestroyableBehaviour" | "VaseBehaviour", _) => {
                     let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");

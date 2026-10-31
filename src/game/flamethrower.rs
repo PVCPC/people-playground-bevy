@@ -1,7 +1,6 @@
 //! FlamethrowerBehaviour (the flamethrower and the fire extinguisher). Audio, the particle's pose and the context menu are
 //! presentation; the continuous-use timer, the particle request, the recoil, the overlap queries and their burn or
-//! extinguish effects stay. AffectAoe (DestroyableBehaviour.OnBreak) is not rewritten: the break event stops in
-//! `destroyable_break`.
+//! extinguish effects stay, and so does AffectAoe (the DestroyableBehaviour.OnBreak call).
 #![allow(non_snake_case)]
 
 use super::explosion::DEFAULT_RAYCAST_LAYERS;
@@ -47,6 +46,28 @@ impl Game {
             (v, r) = (global_position(n, v), global_rotation(n, r));
         }
         ([v[0], v[1], v[2]], r)
+    }
+
+    /// FlamethrowerBehaviour.AffectAoe of component `id`: every physical in the chunks around the object is lit (by its
+    /// flammability) or put out. The chunk iterator is lazy, so each item's draws come before the next cell's.
+    pub fn flamethrower_affect_aoe(&mut self, id: i32) {
+        let i = self.flamethrowers.iter().position(|x| x.id == id).expect("a FlamethrowerBehaviour");
+        let (effect, range, p) = (self.flamethrowers[i].Effect, self.flamethrowers[i].AoeRange, self.flamethrowers[i].phys);
+        let at = self.physicals[p].transform.position;
+        self.physics_objects_near_position_accurate_each([at[0], at[1]], range, |g, item| {
+            if g.physicals[item].destroyed {
+                return;
+            }
+            if effect == 0 {
+                if g.properties[g.physicals[item].Properties].Flammability >= g.random.value() {
+                    g.physicals[item].burnIntensity = g.random.value();
+                    g.ignite(item, false);
+                }
+            } else {
+                g.physicals[item].burnIntensity = 0.0;
+                g.extinguish(item);
+            }
+        });
     }
 
     /// FlamethrowerBehaviour.Update

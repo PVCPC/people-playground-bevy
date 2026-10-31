@@ -27,6 +27,9 @@ script! {
         enabled: bool = true,
         /// Phys (GetComponent<PhysicalBehaviour>); None without one.
         physical: Option<usize> = None,
+        /// Without a PhysicalBehaviour: the Rigidbody2D's NodeBody (`Game::node_rigidbodies`) and its Transform node.
+        node_body: Option<usize> = None,
+        node: Option<usize> = None,
         /// Instance ids of the Prefabs/BulletCasing clone, and of the Prefabs/MuzzleSmoke one (0 with a
         /// MuzzleFlashEffectOverride).
         casing_ids: usize = 0,
@@ -127,10 +130,117 @@ impl Game {
         self.firearm_shoot(f);
     }
 
-    /// BarrelPosition: rb.GetRelativePoint(barrelPosition * lossyScale).
+    /// GetComponent<Rigidbody2D>(): the physical object's body, else the bare body's NodeBody.
+    pub(super) fn firearm_rigidbody(&self, f: usize) -> Option<super::Rigidbody> {
+        let g = &self.firearms[f];
+        match (g.physical, g.node_body) {
+            (Some(p), _) => Some(self.physicals[p].rigidbody.clone()),
+            (None, Some(n)) => Some(self.node_rigidbodies[n].rigidbody.clone()),
+            (None, None) => None,
+        }
+    }
+
+    /// The Transform chain of the firearm's object, root first: a physical object's (local_chain), or a bare node's.
+    pub(super) fn firearm_chain(&self, f: usize) -> Vec<crate::unity::transform::Trs> {
+        let g = &self.firearms[f];
+        match (g.physical, g.node) {
+            (Some(p), _) => self.local_chain(p),
+            (None, Some(n)) => self.node_chain(n),
+            (None, None) => unimplemented!("FirearmBehaviour without a Transform"),
+        }
+    }
+
+    /// The Transform id of the firearm object's root (root_id for a physical object, the top node's for a bare one).
+    pub(super) fn firearm_root_id(&self, f: usize) -> i32 {
+        match (self.firearms[f].physical, self.firearms[f].node) {
+            (Some(p), _) => self.root_id(p),
+            (None, Some(n)) => {
+                let mut t = n;
+                while let Some(up) = self.transform_nodes[t].parent {
+                    t = up;
+                }
+                self.transform_nodes[t].id
+            }
+            (None, None) => unimplemented!("FirearmBehaviour without a Transform"),
+        }
+    }
+
+    /// A transform node's world position, rotation and lossy scale (from its chain).
+    pub(super) fn node_pose(&self, n: usize) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        let chain = self.node_chain(n);
+        let mut v = [0.0f32; 4];
+        for node in chain.iter().rev() {
+            v = crate::unity::transform::global_position(node, v);
+        }
+        let mut q = chain.last().unwrap().q;
+        for node in chain.iter().rev().skip(1) {
+            q = crate::unity::transform::global_rotation(node, q);
+        }
+        let mut direct_first = chain.clone();
+        direct_first.reverse();
+        let lossy = crate::unity::transform::lossy_scale(&direct_first, q);
+        ([v[0], v[1], v[2]], q, lossy)
+    }
+
+    /// A bare GameObject's chain: its parent nodes root first, then its own pose (node_trs).
+    pub(super) fn node_chain(&self, n: usize) -> Vec<crate::unity::transform::Trs> {
+        let mut chain = Vec::new();
+        let mut up = self.transform_nodes[n].parent;
+        while let Some(i) = up {
+            chain.push(self.node_trs(i));
+            up = self.transform_nodes[i].parent;
+        }
+        chain.reverse();
+        chain.push(self.node_trs(n));
+        chain
+    }
+
+    /// The firearm's world position, world rotation and lossy scale: a physical object's cached transform, else from its chain.
+    pub(super) fn firearm_pose(&self, f: usize) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        match self.firearms[f].physical {
+            Some(p) => (self.physicals[p].transform.position, self.physicals[p].transform.rotation, self.lossy_scale(p)),
+            None => {
+                let chain = self.firearm_chain(f);
+                let mut v = [0.0f32; 4];
+                for node in chain.iter().rev() {
+                    v = crate::unity::transform::global_position(node, v);
+                }
+                let mut q = chain.last().unwrap().q;
+                for node in chain.iter().rev().skip(1) {
+                    q = crate::unity::transform::global_rotation(node, q);
+                }
+                let mut direct_first = chain.clone();
+                direct_first.reverse();
+                let lossy = crate::unity::transform::lossy_scale(&direct_first, q);
+                ([v[0], v[1], v[2]], q, lossy)
+            }
+        }
+    }
+
+    /// BarrelPosition: rb.GetRelativePoint(barrelPosition * lossyScale), or TransformPoint(barrelPosition) without a rigidbody.
     pub(super) fn barrel_position(&mut self, f: usize) -> [f32; 2] {
-        let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
-        self.rigidbody_relative_point(p, self.firearms[f].barrelPosition)
+        let local = self.firearms[f].barrelPosition;
+        match self.firearm_rigidbody(f) {
+            Some(rb) => {
+                let (_, _, lossy) = self.firearm_pose(f);
+                self.rigidbody_point_relative(&rb, [local[0] * lossy[0], local[1] * lossy[1]])
+            }
+            None => {
+                let chain = self.firearm_chain(f);
+                let mut v = [local[0], local[1], 0.0, 0.0];
+                for node in chain.iter().rev() {
+                    v = crate::unity::transform::global_position(node, v);
+                }
+                [v[0], v[1]]
+            }
+        }
+    }
+
+    /// Rigidbody2D.GetRelativePoint of body `rb` for a scaled local point.
+    fn rigidbody_point_relative(&mut self, rb: &super::Rigidbody, v: [f32; 2]) -> [f32; 2] {
+        self.sync_pending();
+        let xf = self.world.body(rb.body).xf;
+        [xf.q.c * v[0] - xf.q.s * v[1] + xf.p.x, xf.q.s * v[0] + xf.q.c * v[1] + xf.p.y]
     }
 
     /// Rigidbody2D.GetRelativePoint(local * transform.lossyScale) of physical `p`'s body (shared by the barrels).
@@ -144,14 +254,19 @@ impl Game {
 
     /// BarrelDirection: transform.TransformVector(barrelDirection) (each node's scale and rotation, no translation).
     pub(super) fn barrel_direction(&self, f: usize) -> [f32; 2] {
-        let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
-        self.transform_vector_chain(p, self.firearms[f].barrelDirection)
+        let chain = self.firearm_chain(f);
+        Self::transform_vector_of(&chain, self.firearms[f].barrelDirection)
     }
 
     /// transform.TransformVector(local) of physical `p`'s object: each node's scale and rotation, no translation.
     pub(super) fn transform_vector_chain(&self, p: usize, local: [f32; 2]) -> [f32; 2] {
+        Self::transform_vector_of(&self.local_chain(p), local)
+    }
+
+    /// TransformVector over a chain (root first).
+    fn transform_vector_of(chain: &[crate::unity::transform::Trs], local: [f32; 2]) -> [f32; 2] {
         let mut v = [local[0], local[1], 0.0, 0.0];
-        for node in self.local_chain(p).iter().rev() {
+        for node in chain.iter().rev() {
             let node = crate::unity::transform::Trs { t: [0.0; 4], ..*node };
             v = crate::unity::transform::global_position(&node, v);
         }
@@ -164,7 +279,6 @@ impl Game {
             return;
         }
         let g = &self.firearms[f];
-        let p = g.physical.expect("a FirearmBehaviour without a Rigidbody2D");
         let first = g.shotIndex == 0;
         // audioSource.PlayOneShot(ShotSounds.PickRandom()): audio, the draw stays.
         if g.ShotSounds != 0 {
@@ -179,10 +293,13 @@ impl Game {
             self.firearm_set_traversal(f);
         }
         let c = self.firearms[f].Cartridge;
-        let hc = self.heat_capacity(p);
-        let heat = self.firearms[f].ShotHeatMultiplier;
-        let t = self.physicals[p].Temperature;
-        self.physicals[p].Temperature = (d(t) + d(c.Recoil) / hc * 0.05f32 * heat).f();
+        // (bool)Phys && (bool)Cartridge: the heat only with a PhysicalBehaviour.
+        if let Some(p) = self.firearms[f].physical {
+            let hc = self.heat_capacity(p);
+            let heat = self.firearms[f].ShotHeatMultiplier;
+            let t = self.physicals[p].Temperature;
+            self.physicals[p].Temperature = (d(t) + d(c.Recoil) / hc * 0.05f32 * heat).f();
+        }
         self.firearms[f].shotIndex += 1;
         if self.firearms[f].MuzzleShockwave {
             let at = self.barrel_position(f);
@@ -192,7 +309,7 @@ impl Game {
         match self.firearms[f].MuzzleFlashEffectOverride {
             None => {
                 // The muzzle smoke's scale and flash are particles.
-                let at = self.physicals[p].transform.position;
+                let (at, _, _) = self.firearm_pose(f);
                 let intensity = (d(c.ImpactForce) * 0.8f32 * n as f32 / 0.9f32).f();
                 self.camera_shake(intensity, [at[0], at[1]]);
             }
@@ -212,14 +329,23 @@ impl Game {
 
     /// FirearmBehaviour.Fire
     fn firearm_fire(&mut self, f: usize) {
-        let p = self.firearms[f].physical.unwrap();
         let recoil = self.firearms[f].Cartridge.Recoil;
-        let s = (d(0.5f32) * (0.0 - recoil) * self.lossy_scale(p)[0]).f();
-        let right = mathf::rotate(self.physicals[p].transform.rotation, [1.0, 0.0, 0.0]);
+        let (_, rot, lossy) = self.firearm_pose(f);
+        let s = (d(0.5f32) * (0.0 - recoil) * lossy[0]).f();
+        let right = mathf::rotate(rot, [1.0, 0.0, 0.0]);
         let at = self.barrel_position(f);
-        let rb = self.physicals[p].rigidbody.clone();
+        // rb.AddForceAtPosition: a null rb throws.
+        let rb = self.firearm_rigidbody(f).unwrap_or_else(|| unimplemented!("FirearmBehaviour.Fire: rb.AddImpulseAtPosition on no Rigidbody2D (NullReferenceException)"));
         rb.add_impulse_at_position(&mut self.world, [s * right[0], s * right[1]], at);
-        let charge = if self.firearms[f].ApplyCharge { self.physicals[p].Charge() } else { 0.0 };
+        let charge = if self.firearms[f].ApplyCharge {
+            // BallisticsEmitter.Charge = Phys.Charge: a null Phys throws.
+            match self.firearms[f].physical {
+                Some(p) => self.physicals[p].Charge(),
+                None => unimplemented!("FirearmBehaviour.Fire: ApplyCharge without a PhysicalBehaviour (NullReferenceException on Phys.Charge)"),
+            }
+        } else {
+            0.0
+        };
         self.firearms[f].emitter.as_mut().unwrap().Charge = charge;
         let origin = self.barrel_position(f);
         let direction = self.barrel_direction(f);

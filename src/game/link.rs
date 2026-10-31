@@ -123,6 +123,11 @@ pub struct Linked {
     pub freeze_serialisations: HashMap<usize, usize>,
     pub ceiling_turrets: HashMap<usize, usize>,
     pub temperature_transfers: HashMap<usize, usize>,
+    pub worm_staffs: HashMap<usize, usize>,
+    pub prefab_bombs: HashMap<usize, usize>,
+    pub laser_turrets: HashMap<usize, usize>,
+    pub sentry_turrets: HashMap<usize, usize>,
+    pub sentry_guns: HashMap<usize, usize>,
     pub emps: HashMap<usize, usize>,
     pub decimators: HashMap<usize, usize>,
     pub immobility_fields: HashMap<usize, usize>,
@@ -317,6 +322,16 @@ impl Linker<'_> {
     }
 }
 
+/// The lengths of an array of AudioClips (their `m_Length`), in order.
+fn audio_clip_lengths(db: &crate::assets::db::AssetDb, file: usize, v: &Value, name: &str) -> Result<Vec<f32>, String> {
+    let mut out = Vec::new();
+    for x in array(v, name)? {
+        let r = db.resolve(file, x.pptr().ok_or(name)?).unwrap_or_else(|| unimplemented!("a null AudioClip in {name}"));
+        out.push(crate::assets::classes::AudioClip::read(db.data(r))?.length);
+    }
+    Ok(out)
+}
+
 /// Whether every persistent call of a UnityEvent that runs on Invoke targets an AudioSource, an audio filter or
 /// reverb zone, a ParticleSystem or a RectangleAudioSourceBehaviour.
 pub(super) fn presentation_event(prefab: &Prefab, file: usize, event: &Value) -> bool {
@@ -373,6 +388,8 @@ pub enum EventCall {
     AddTorque(i32, f32),
     /// LiquidSpreadAoEBehaviour.Spread by its component id.
     LiquidSpread(i32),
+    /// FlamethrowerBehaviour.AffectAoe by its component id.
+    FlamethrowerAoe(i32),
 }
 
 /// UseEventTrigger: Use runs Event while enabled and (not OnlyOnce or never used). Nothing sets its Action.
@@ -418,6 +435,7 @@ fn try_event_calls(prefab: &Prefab, file: usize, event: &Value, inst: &Instance,
                 ("DamagableMachineryBehaviour", "set_enabled") if on == Some(false) => Some(EventCall::DisableMachinery(inst.objects[o].components[c])),
                 ("JetEngineBehaviour", "ForceShutoff") => Some(EventCall::JetForceShutoff(inst.objects[o].components[c])),
                 ("LiquidSpreadAoEBehaviour", "Spread") => Some(EventCall::LiquidSpread(inst.objects[o].components[c])),
+                ("FlamethrowerBehaviour", "AffectAoe") => Some(EventCall::FlamethrowerAoe(inst.objects[o].components[c])),
                 ("UseEventTrigger", "set_enabled") if on.is_some() => Some(EventCall::SetUseEventEnabled(inst.objects[o].components[c], on.unwrap())),
                 ("DeleteAfterTime", "set_enabled") if on == Some(true) => Some(EventCall::EnableDeleteAfter(inst.objects[o].components[c])),
                 ("RandomForceAtStart", "set_enabled") if on == Some(true) => {
@@ -584,6 +602,15 @@ pub(super) fn check_rewritten(class: &str) {
         "CeilingTurretBehaviour" => {}
         // temperature_transfer.rs: Awake caches the PhysicalBehaviour (link block); FixedUpdate moves the temperatures.
         "TemperatureTransferBehaviour" => {}
+        // worm_staff.rs: Start and Update (the line vertices are rendering).
+        "WormStaffBehaviour" => {}
+        // prefab_bomb.rs: Use instantiates ExplosionPrefab and destroys the GameObject.
+        "AtomBombBehaviour" | "SeismicChargeBehaviour" => {}
+        // laser_turret.rs: FixedUpdate aims and fires (automatic_sentry.rs), Use shoots, OnEMPHit breaks it.
+        "LaserTurretBehaviour" => {}
+        // sentry_turret.rs: the root's state machine and the gun's aim and fire; Explode is the EMP, burning and shot paths.
+        "SentryTurretBehaviour" => {}
+        "SentryTurretGunBehaviour" => {}
         // emp.rs: Use runs Activate; Awake's Killzone clone is presentation (no collider, sized for rendering).
         "EMPBehaviour" => {}
         // decimator.rs
@@ -1287,7 +1314,9 @@ impl Game {
             load_values(fa.fields(), v)?;
             fa.physical = l.arenas.physical.get(&o).copied();
             if fa.physical.is_none() {
-                unimplemented!("FirearmBehaviour without a Rigidbody2D (NullReferenceException in Fire)");
+                // A bare Rigidbody2D on the object (its NodeBody); without one, Fire's recoil throws.
+                fa.node_body = Some(*node_rigidbodies.get(&o).unwrap_or_else(|| unimplemented!("FirearmBehaviour without a Rigidbody2D (NullReferenceException in Fire)")));
+                fa.node = Some(l.arenas.node[&o]);
             }
             (fa.id, fa.enabled) = (inst.objects[o].components[c], enabled);
             let cartridge = field(v, "Cartridge")?.pptr().ok_or("Cartridge")?;
@@ -3208,6 +3237,11 @@ impl Game {
         let mut freeze_serialisations = HashMap::new();
         let mut ceiling_turrets = HashMap::new();
         let mut temperature_transfers = HashMap::new();
+        let mut worm_staffs = HashMap::new();
+        let mut prefab_bombs = HashMap::new();
+        let mut laser_turrets = HashMap::new();
+        let mut sentry_turrets = HashMap::new();
+        let mut sentry_guns = HashMap::new();
         let mut emps = HashMap::new();
         let mut decimators = HashMap::new();
         let mut immobility_fields = HashMap::new();
@@ -3422,6 +3456,105 @@ impl Game {
                 temperature_transfers.insert(o, self.temperature_transfers.len());
                 self.temperature_transfers.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "LaserTurretBehaviour") {
+                let mut x = super::laser_turret::LaserTurret::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // physicalBehaviour: the turret's PhysicalBehaviour (null throws in FixedUpdate).
+                x.physical = l.physical(field(v, "physicalBehaviour")?)?.unwrap_or_else(|| unimplemented!("LaserTurretBehaviour.physicalBehaviour null (NullReferenceException in FixedUpdate)"));
+                let jt = field(v, "joint")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("LaserTurretBehaviour.joint null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                let at = *prefab.index.get(&ObjRef { file, path_id: jt.path_id }).ok_or("LaserTurretBehaviour.joint: dangling reference")?;
+                x.joint = *l.arenas.hinge.get(&at).ok_or("LaserTurretBehaviour.joint: not a HingeJoint2D")?;
+                x.LayerMask = field(field(v, "layerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                // projectile: the bolt prefab; the audio, flash, glow and break effect are presentation.
+                x.projectile = db.resolve(file, field(v, "projectile")?.pptr().ok_or("LaserTurretBehaviour.projectile")?);
+                laser_turrets.insert(o, self.laser_turrets.len());
+                self.laser_turrets.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "SentryTurretBehaviour") {
+                let mut x = super::sentry_turret::SentryTurret::default();
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // Awake: GetComponent<PhysicalBehaviour>(); MaxAngle = 100.
+                x.phys = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("SentryTurretBehaviour without a PhysicalBehaviour (NullReferenceException in FixedUpdate)"));
+                x.controller.MaxAngle = 100.0;
+                x.BlockingLayers = field(field(v, "BlockingLayers")?, "m_Bits")?.i64().ok_or("BlockingLayers.m_Bits")? as u32;
+                x.state = field(v, "State")?.i64().and_then(super::sentry_turret::SentryState::from_int).ok_or("SentryTurretBehaviour.State")?;
+                x.disabled = field(v, "disabled")?.bool().ok_or("SentryTurretBehaviour.disabled")?;
+                x.timeStartedSearching = float(v, "timeStartedSearching")?;
+                // turretGun: the SentryTurretGunBehaviour's object (its index after both are linked).
+                let gun = field(v, "turretGun")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SentryTurretBehaviour.turretGun null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                x.gun_object = prefab.index.get(&ObjRef { file, path_id: gun.path_id }).ok_or("SentryTurretBehaviour.turretGun: dangling reference")?.0;
+                // AudioSource: its component id; the clip lists' lengths for PlaySound's draws and isPlaying.
+                let src = field(v, "AudioSource")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SentryTurretBehaviour.AudioSource null (NullReferenceException in PlaySound)"));
+                let k = *prefab.index.get(&ObjRef { file, path_id: src.path_id }).ok_or("SentryTurretBehaviour.AudioSource: dangling reference")?;
+                x.audio = inst.objects[k.0].components[k.1];
+                x.clips = super::sentry_turret::SentryClips {
+                    TargetAcquired: audio_clip_lengths(db, file, v, "TargetAcquired")?,
+                    TargetLost: audio_clip_lengths(db, file, v, "TargetLost")?,
+                    Flying: audio_clip_lengths(db, file, v, "Flying")?,
+                    ShotAt: audio_clip_lengths(db, file, v, "ShotAt")?,
+                    OnFire: audio_clip_lengths(db, file, v, "OnFire")?,
+                    Tipped: audio_clip_lengths(db, file, v, "Tipped")?,
+                    Retiring: audio_clip_lengths(db, file, v, "Retiring")?,
+                };
+                sentry_turrets.insert(o, self.sentry_turrets.len());
+                self.sentry_turrets.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "SentryTurretGunBehaviour") {
+                let mut x = super::sentry_turret::SentryTurretGun::default();
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                let jt = field(v, "turretJoint")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SentryTurretGunBehaviour.turretJoint null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                let at = *prefab.index.get(&ObjRef { file, path_id: jt.path_id }).ok_or("SentryTurretGunBehaviour.turretJoint: dangling reference")?;
+                x.joint = *l.arenas.hinge.get(&at).ok_or("SentryTurretGunBehaviour.turretJoint: not a HingeJoint2D")?;
+                // firearmBehaviour: the FirearmBehaviour on this object (MinigunBehaviour's lookup).
+                let fr = field(v, "firearmBehaviour")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SentryTurretGunBehaviour.firearmBehaviour null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                let (fo, _) = *prefab.index.get(&ObjRef { file, path_id: fr.path_id }).ok_or("SentryTurretGunBehaviour.firearmBehaviour: dangling reference")?;
+                x.firearm = *firearms.get(&fo).unwrap_or_else(|| unimplemented!("SentryTurretGunBehaviour.firearmBehaviour on an object without a FirearmBehaviour in this clone"));
+                // sentryBehaviour: the SentryTurretBehaviour's object (its index after both are linked).
+                let sb = field(v, "sentryBehaviour")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SentryTurretGunBehaviour.sentryBehaviour null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                x.sentry_object = prefab.index.get(&ObjRef { file, path_id: sb.path_id }).ok_or("SentryTurretGunBehaviour.sentryBehaviour: dangling reference")?.0;
+                x.node = l.arenas.node[&o];
+                sentry_guns.insert(o, self.sentry_guns.len());
+                self.sentry_guns.push(x);
+            }
+            for class in ["AtomBombBehaviour", "SeismicChargeBehaviour"] {
+                if let Some((c, enabled, v)) = script(prefab, o, class) {
+                    let mut x = super::prefab_bomb::PrefabBomb { id: inst.objects[o].components[c], enabled, ..Default::default() };
+                    x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("{class} without a PhysicalBehaviour on its GameObject"));
+                    let e = field(v, "ExplosionPrefab")?.pptr().ok_or("ExplosionPrefab")?;
+                    if !e.is_null() {
+                        x.ExplosionPrefab = Some(db.resolve(file, e).ok_or_else(|| format!("{class}.ExplosionPrefab outside the data"))?);
+                    }
+                    prefab_bombs.insert(o, self.prefab_bombs.len());
+                    self.prefab_bombs.push(x);
+                }
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "WormStaffBehaviour") {
+                let mut x = super::worm_staff::WormStaff::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("WormStaffBehaviour without a PhysicalBehaviour"));
+                if l.object(field(v, "Rigidbody")?)? != Some(o) {
+                    unimplemented!("WormStaffBehaviour.Rigidbody: not the staff's own Rigidbody2D");
+                }
+                x.Layer = field(field(v, "Layer")?, "m_Bits")?.i64().ok_or("WormStaffBehaviour.Layer.m_Bits")? as u32;
+                // LineRenderer.transform: its object's local TRS and each parent's below the staff's own object.
+                for r in field(v, "LineRenderers")?.array().ok_or("WormStaffBehaviour.LineRenderers")?.to_vec() {
+                    let mut at = l.object(&r)?.unwrap_or_else(|| unimplemented!("WormStaffBehaviour: a null LineRenderer (NullReferenceException in Start)"));
+                    let mut chain = Vec::new();
+                    while at != o {
+                        chain.push(inst.objects[at].trs);
+                        at = inst.objects[at].parent.ok_or("WormStaffBehaviour: a LineRenderer outside the staff")?;
+                    }
+                    x.LineRenderers.push(chain);
+                }
+                worm_staffs.insert(o, self.worm_staffs.len());
+                self.worm_staffs.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "EnergySwordBehaviour") {
                 let mut x = super::energy_sword::EnergySword::default();
                 load_values(x.fields(), v)?;
@@ -3488,7 +3621,16 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers,decimators, immobility_fields, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        // SentryTurretBehaviour.turretGun and SentryTurretGunBehaviour.sentryBehaviour: each other's index, once both exist.
+        for &i in sentry_turrets.values() {
+            let go = self.sentry_turrets[i].gun_object;
+            self.sentry_turrets[i].gun = *sentry_guns.get(&go).ok_or("SentryTurretBehaviour.turretGun is not a SentryTurretGunBehaviour")?;
+        }
+        for &i in sentry_guns.values() {
+            let go = self.sentry_guns[i].sentry_object;
+            self.sentry_guns[i].sentry = *sentry_turrets.get(&go).ok_or("SentryTurretGunBehaviour.sentryBehaviour is not a SentryTurretBehaviour")?;
+        }
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns,decimators, immobility_fields, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3549,6 +3691,8 @@ impl Game {
             EventCall::Car(car, c) => self.car_invoke(car, c),
             EventCall::LiquidSpread(id) if self.destroyed_components.contains(&id) => {}
             EventCall::LiquidSpread(id) => self.liquid_spread(id),
+            EventCall::FlamethrowerAoe(id) if self.destroyed_components.contains(&id) => {}
+            EventCall::FlamethrowerAoe(id) => self.flamethrower_affect_aoe(id),
             // DetachFromParent.Detach: transform.parent = null.
             EventCall::Detach(id) => self.set_parent_null_of(id, |_, _, _| {}),
             // ActOnDestroy.Clear: DestroyWith = null. A destroyed ActOnDestroy (its entry is gone) is a destroyed target: the call is skipped.
@@ -4147,6 +4291,12 @@ impl Game {
                 "ChainsawBehaviour" => Some(Behaviour::Chainsaw(linked.chainsaws[&o])),
                 "CeilingTurretBehaviour" => Some(Behaviour::CeilingTurret(linked.ceiling_turrets[&o])),
                 "TemperatureTransferBehaviour" => Some(Behaviour::TemperatureTransfer(linked.temperature_transfers[&o])),
+                "WormStaffBehaviour" => Some(Behaviour::WormStaff(linked.worm_staffs[&o])),
+                "AtomBombBehaviour" => Some(Behaviour::AtomBomb(linked.prefab_bombs[&o])),
+                "SeismicChargeBehaviour" => Some(Behaviour::SeismicCharge(linked.prefab_bombs[&o])),
+                "LaserTurretBehaviour" => Some(Behaviour::LaserTurret(linked.laser_turrets[&o])),
+                "SentryTurretBehaviour" => Some(Behaviour::SentryTurret(linked.sentry_turrets[&o])),
+                "SentryTurretGunBehaviour" => Some(Behaviour::SentryTurretGun(linked.sentry_guns[&o])),
                 "EMPBehaviour" => Some(Behaviour::Emp(linked.emps[&o])),
                 "DecimatorBehaviour" => Some(Behaviour::Decimator(linked.decimators[&o])),
                 "ImmobilityFieldBehaviour" => Some(Behaviour::ImmobilityField(linked.immobility_fields[&o])),
@@ -4310,6 +4460,8 @@ impl Game {
                 "LiquidContainerController" => PendingStart::LiquidContainer(linked.liquid_containers[&o]),
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
                 "LaserBehaviour" => PendingStart::Laser(linked.lasers[&o]),
+                "LaserTurretBehaviour" => PendingStart::LaserTurret(linked.laser_turrets[&o]),
+                "SentryTurretBehaviour" => PendingStart::SentryTurret(linked.sentry_turrets[&o]),
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
@@ -4317,6 +4469,7 @@ impl Game {
                 "FreezeBehaviour" => PendingStart::Freeze(linked.freezes[&o]),
                 "FreezeSerialisationHelper" => PendingStart::FreezeSerialisation(linked.freeze_serialisations[&o]),
                 "CeilingTurretBehaviour" => PendingStart::CeilingTurret(linked.ceiling_turrets[&o]),
+                "WormStaffBehaviour" => PendingStart::WormStaff(linked.worm_staffs[&o]),
                 "DecimatorBehaviour" => PendingStart::Decimator(linked.decimators[&o]),
                 "ImmobilityFieldBehaviour" => PendingStart::ImmobilityField(linked.immobility_fields[&o]),
                 "TeslaCoilBehaviour" => PendingStart::TeslaCoil(linked.tesla_coils[&o]),

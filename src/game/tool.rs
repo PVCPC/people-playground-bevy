@@ -517,7 +517,7 @@ impl Game {
                     continue;
                 }
                 match self.behaviour_of.get(&inst.objects[x].components[k]) {
-                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::Emp(_) | Behaviour::Decimator(_) | Behaviour::ImmobilityField(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::ActivatorElectrode(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_) | Behaviour::TeslaCoil(_))))=> out.push(UseReceiver::Behaviour(b)),
+                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::Emp(_) | Behaviour::Decimator(_) | Behaviour::ImmobilityField(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::ActivatorElectrode(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::LaserTurret(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_) | Behaviour::TeslaCoil(_) | Behaviour::AtomBomb(_) | Behaviour::SeismicCharge(_))))=> out.push(UseReceiver::Behaviour(b)),
                     Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                     _ => unimplemented!("{class}.Use"),
                 }
@@ -585,10 +585,12 @@ impl Game {
                 // ChainsawBehaviour.Use: PlayClipOnce(Rev) when not destroyed (audio).
                 Behaviour::Chainsaw(_) => {}
                 Behaviour::Emp(i) => self.emp_use(i),
+                Behaviour::LaserTurret(i) => self.laser_turret_use(i),
                 Behaviour::Decimator(i) => self.decimator_use(i),
                 Behaviour::ImmobilityField(i) => self.immobility_field_use(i),
                 // TeslaCoilBehaviour.Use() takes no parameter; SendMessage calls it all the same.
                 Behaviour::TeslaCoil(i) => self.tesla_coil_use(i),
+                Behaviour::AtomBomb(i) | Behaviour::SeismicCharge(i) => self.prefab_bomb_use(i),
                 Behaviour::EnergySword(i) => self.energy_sword_use(i),
                 // MetronomeBehaviour.Use: `base.enabled && !activation.Contains(base.transform.root)`.
                 Behaviour::Metronome(m) => {
@@ -1474,6 +1476,23 @@ mod tests {
     }
 
     #[test]
+    fn worm_staff_cuts_a_human() {
+        let Some((mut g, _)) = spawned("Worm Staff") else { return };
+        let staff = g.worm_staffs[0].physical;
+        let at = g.physicals[staff].transform.position;
+        let first_limb = g.limbs.len();
+        spawn_at(&mut g, "Human", [at[0], at[1] + 1.0, 0.0]);
+        let limbs: Vec<usize> = (first_limb..g.limbs.len()).collect();
+        assert_eq!(g.worm_staffs[0].worms.len(), 3, "Start made no worms");
+        let mut frame = 0;
+        while frame < 1200 && limbs.iter().all(|&l| g.circulations[l].StabWoundCount == 0) {
+            frames(&mut g, 1);
+            frame += 1;
+        }
+        assert!(limbs.iter().any(|&l| g.circulations[l].StabWoundCount > 0), "no worm cut the human in 1200 frames");
+    }
+
+    #[test]
     fn tesla_coil_bolts_charge_a_human() {
         let Some((mut g, _)) = spawned("Tesla Coil") else { return };
         let coil = g.tesla_coils[0].physical;
@@ -1527,6 +1546,56 @@ mod tests {
             }
         }
         assert!(hit, "the turret never hit the human ({before} health)");
+    }
+
+    #[test]
+    fn laser_sentry_turret_shoots_a_human_in_front() {
+        let Some((mut g, _)) = spawned("Laser sentry turret") else { return };
+        let laser = g.laser_turrets.last().expect("a LaserTurretBehaviour").physical;
+        let at = g.physicals[laser].transform.position;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        // The barrel points along +x: the human stands 8 units in front of it.
+        g.input.mouse = [at[0] + 8.0, at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        let health = |g: &Game| -> f32 { (first_limb..g.limbs.len()).map(|l| g.limbs[l].Health).sum() };
+        let before = health(&g);
+        let mut hit = false;
+        for _ in 0..400 {
+            frames(&mut g, 1);
+            if health(&g) < before {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the laser turret never hit the human ({before} health)");
+    }
+
+    #[test]
+    fn sentry_turret_shoots_a_human_in_front() {
+        let Some((mut g, _)) = spawned("Sentry Turret") else { return };
+        let gun = g.sentry_guns.last().expect("a SentryTurretGunBehaviour").node;
+        let at = g.node_pose(gun).0;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        // The gun's barrel points out of its node: the human stands 8 units in front of it.
+        g.input.mouse = [at[0] + 8.0, at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        let health = |g: &Game| -> f32 { (first_limb..g.limbs.len()).map(|l| g.limbs[l].Health).sum() };
+        let before = health(&g);
+        let mut hit = false;
+        for _ in 0..400 {
+            frames(&mut g, 1);
+            if health(&g) < before {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the sentry turret never hit the human ({before} health)");
     }
 
     #[test]
@@ -1751,5 +1820,50 @@ mod tests {
         g.broadcast_use_continuous(ep, &Act::direct(0));
         let again: i32 = (0..g.physicals.len()).filter(|&p| p != ep).map(|p| g.physicals[p].ContinuousActivationTracker[0].Value).sum();
         assert_eq!(again, after);
+    }
+
+    /// Spawns `item` facing right, 1.2 to the left of the human's leftmost limb at its height, and holds its
+    /// continuous use for `n` frames. Returns the item's physical and the human's limb physicals.
+    fn spray_at_human(g: &mut Game, item: &str, n: usize, mut each: impl FnMut(&mut Game)) -> (usize, Vec<usize>) {
+        let centre = |g: &Game, p: usize| g.world.body(g.physicals[p].rigidbody.body).sweep.c;
+        let human: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+        let left = human.iter().copied().min_by(|&a, &b| centre(g, a).x.partial_cmp(&centre(g, b).x).unwrap()).unwrap();
+        let c = centre(g, left);
+        let first = spawn_at(g, item, [c.x - 1.2, c.y, 0.0]);
+        for _ in 0..n {
+            g.physicals[first].ContinuousActivationTracker[0].Value = 1;
+            each(g);
+            frames(g, 1);
+        }
+        (first, human)
+    }
+
+    #[test]
+    fn flamethrower_heats_and_ignites_the_human_it_sprays() {
+        let Some((mut g, _)) = spawned("Human") else { return };
+        let human: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+        let before: Vec<f32> = human.iter().map(|&p| g.physicals[p].Temperature).collect();
+        assert!(human.iter().all(|&p| !g.physicals[p].OnFire));
+        let mut lit = false;
+        spray_at_human(&mut g, "Flamethrower", 120, |g| lit |= g.limbs.iter().any(|l| g.physicals[l.PhysicalBehaviour].OnFire));
+        lit |= human.iter().any(|&p| g.physicals[p].OnFire);
+        let heated = human.iter().zip(&before).any(|(&p, &t)| g.physicals[p].Temperature > t + 0.5);
+        assert!(lit || heated, "the flames never reached the human");
+    }
+
+    #[test]
+    fn fire_extinguisher_puts_out_the_burning_limb_it_sprays() {
+        let Some((mut g, _)) = spawned("Human") else { return };
+        let centre = |g: &Game, p: usize| g.world.body(g.physicals[p].rigidbody.body).sweep.c;
+        let human: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+        let left = human.iter().copied().min_by(|&a, &b| centre(&g, a).x.partial_cmp(&centre(&g, b).x).unwrap()).unwrap();
+        let right = human.iter().copied().max_by(|&a, &b| centre(&g, a).x.partial_cmp(&centre(&g, b).x).unwrap()).unwrap();
+        for &p in &[left, right] {
+            g.physicals[p].OnFire = true;
+            g.physicals[p].burnIntensity = 1.0;
+        }
+        spray_at_human(&mut g, "Fire Extinguisher", 60, |_| {});
+        assert!(!g.physicals[left].OnFire && g.physicals[left].burnIntensity == 0.0, "the sprayed limb is still burning");
+        assert!(g.physicals[right].OnFire, "the limb out of reach was put out too");
     }
 }

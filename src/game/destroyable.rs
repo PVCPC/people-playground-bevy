@@ -42,7 +42,7 @@ script! {
 }
 
 /// Vector2.ClampMagnitude: sqrMagnitude is stored as a float, the comparison and the division are Mono doubles.
-fn clamp_magnitude(v: [f32; 2], max: f32) -> [f32; 2] {
+pub(super) fn clamp_magnitude(v: [f32; 2], max: f32) -> [f32; 2] {
     let sqr = (d(v[0]) * v[0] + d(v[1]) * v[1]).f();
     if (sqr as f64) > d(max).0 * max as f64 {
         let n = (sqr as f64).sqrt() as f32;
@@ -166,7 +166,7 @@ impl Game {
 
     /// DestroyableBehaviour.ApplyAncestorProperties over the debris' active Rigidbody2Ds and PhysicalBehaviours
     /// (GetComponentsInChildren: hierarchy order).
-    fn destroyable_apply_ancestor_properties(&mut self, ancestor: usize, original: usize, velocity: [f32; 2], debris: &super::link::Linked) {
+    pub(super) fn destroyable_apply_ancestor_properties(&mut self, ancestor: usize, original: usize, velocity: [f32; 2], debris: &super::link::Linked) {
         let mut parts: Vec<(usize, usize)> = debris.physicals.iter().map(|(&o, &p)| (o, p)).filter(|&(_, p)| self.physicals[p].active).collect();
         parts.sort();
         // The active Rigidbody2Ds (an inactive object's has no body), physical or not.
@@ -674,6 +674,7 @@ impl Game {
             }
             Step::ExplosiveEndOfFrame(e, seq) => self.explosive_end_of_frame(e, seq),
             Step::DestroyableShotBreak(x, normal) => self.destroyable_shot_break(x, normal),
+            Step::SentryTurretExplode(i) => self.sentry_turret_explode(i),
             Step::Bullet(b) => self.bullet_resume(b),
             Step::AttachmentConnectDelay(pt) => self.attachment_points[pt].ignoreConnect = false,
             Step::LimbCrushEndOfFrame(l) => {
@@ -748,6 +749,8 @@ pub enum Step {
     ExplosiveEndOfFrame(usize, u64),
     /// DestroyableBehaviour.Shot's WaitAFrame: (destroyable, shot.normal).
     DestroyableShotBreak(usize, [f32; 2]),
+    /// SentryTurretBehaviour.Shot's DelayCoroutine(Random.value, Explode): the `Game::sentry_turrets` index.
+    SentryTurretExplode(usize),
     /// A BallisticIteration coroutine (`Game::bullets`).
     Bullet(usize),
     /// FirearmAttachmentPointBehaviour.ConnectDelay after its WaitForSeconds(0.75): `ignoreConnect = false` (attachment point).

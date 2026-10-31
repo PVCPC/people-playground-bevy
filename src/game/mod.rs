@@ -56,6 +56,10 @@ pub mod chainsaw;
 pub mod automatic_sentry;
 pub mod ceiling_turret;
 pub mod temperature_transfer;
+pub mod worm_staff;
+pub mod prefab_bomb;
+pub mod laser_turret;
+pub mod sentry_turret;
 pub mod decimator;
 pub mod immobility_field;
 pub mod tesla_coil;
@@ -1238,6 +1242,18 @@ pub enum Behaviour {
     CeilingTurret(usize),
     /// TemperatureTransferBehaviour.FixedUpdate: the `Game::temperature_transfers` index.
     TemperatureTransfer(usize),
+    /// WormStaffBehaviour.Update: the `Game::worm_staffs` index.
+    WormStaff(usize),
+    /// AtomBombBehaviour.Use: the `Game::prefab_bombs` index.
+    AtomBomb(usize),
+    /// SeismicChargeBehaviour.Use: the `Game::prefab_bombs` index.
+    SeismicCharge(usize),
+    /// LaserTurretBehaviour.FixedUpdate: the `Game::laser_turrets` index.
+    LaserTurret(usize),
+    /// SentryTurretBehaviour.Start/Update/FixedUpdate: the `Game::sentry_turrets` index.
+    SentryTurret(usize),
+    /// SentryTurretGunBehaviour.Update/FixedUpdate: the `Game::sentry_guns` index.
+    SentryTurretGun(usize),
     Decimator(usize),
     ImmobilityField(usize),
     TeslaCoil(usize),
@@ -1319,6 +1335,12 @@ impl Behaviour {
             Behaviour::Chainsaw(_) => "ChainsawBehaviour",
             Behaviour::CeilingTurret(_) => "CeilingTurretBehaviour",
             Behaviour::TemperatureTransfer(_) => "TemperatureTransferBehaviour",
+            Behaviour::WormStaff(_) => "WormStaffBehaviour",
+            Behaviour::AtomBomb(_) => "AtomBombBehaviour",
+            Behaviour::SeismicCharge(_) => "SeismicChargeBehaviour",
+            Behaviour::LaserTurret(_) => "LaserTurretBehaviour",
+            Behaviour::SentryTurret(_) => "SentryTurretBehaviour",
+            Behaviour::SentryTurretGun(_) => "SentryTurretGunBehaviour",
             Behaviour::Decimator(_) => "DecimatorBehaviour",
             Behaviour::ImmobilityField(_) => "ImmobilityFieldBehaviour",
             Behaviour::TeslaCoil(_) => "TeslaCoilBehaviour",
@@ -1547,6 +1569,11 @@ pub struct Game {
     pub freeze_serialisations: Vec<freeze::FreezeSerialisation>,
     pub ceiling_turrets: Vec<ceiling_turret::CeilingTurret>,
     pub temperature_transfers: Vec<temperature_transfer::TemperatureTransfer>,
+    pub worm_staffs: Vec<worm_staff::WormStaff>,
+    pub prefab_bombs: Vec<prefab_bomb::PrefabBomb>,
+    pub laser_turrets: Vec<laser_turret::LaserTurret>,
+    pub sentry_turrets: Vec<sentry_turret::SentryTurret>,
+    pub sentry_guns: Vec<sentry_turret::SentryTurretGun>,
     pub energy_swords: Vec<energy_sword::EnergySword>,
     /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
     pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,

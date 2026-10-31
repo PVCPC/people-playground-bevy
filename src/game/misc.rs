@@ -522,12 +522,18 @@ pub enum PendingStart {
     FreezeSerialisation(usize),
     /// CeilingTurretBehaviour.Start (the sentry's settings): the `Game::ceiling_turrets` index.
     CeilingTurret(usize),
+    /// LaserTurretBehaviour.Start: the `Game::laser_turrets` index.
+    LaserTurret(usize),
+    /// SentryTurretBehaviour.Start: the `Game::sentry_turrets` index.
+    SentryTurret(usize),
     /// DecimatorBehaviour.Start: the `Game::decimators` index.
     Decimator(usize),
     /// ImmobilityFieldBehaviour.Start: the `Game::immobility_fields` index.
     ImmobilityField(usize),
     /// TeslaCoilBehaviour.Start: the `Game::tesla_coils` index.
     TeslaCoil(usize),
+    /// WormStaffBehaviour.Start: the `Game::worm_staffs` index.
+    WormStaff(usize),
     /// EnergySwordBehaviour.Start: the `Game::energy_swords` index.
     EnergySword(usize),
     /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
@@ -1022,9 +1028,12 @@ impl Game {
                 PendingStart::Freeze(i) => self.freeze_start(i),
                 PendingStart::FreezeSerialisation(i) => self.freeze_serialisation_start(i),
                 PendingStart::CeilingTurret(i) => self.ceiling_turret_start(i),
+                PendingStart::LaserTurret(i) => self.laser_turret_start(i),
+                PendingStart::SentryTurret(i) => self.sentry_turret_start(i),
                 PendingStart::Decimator(i) => self.decimator_start(i),
                 PendingStart::ImmobilityField(i) => self.immobility_field_start(i),
                 PendingStart::TeslaCoil(i) => self.tesla_coil_start(i),
+                PendingStart::WormStaff(i) => self.worm_staff_start(i),
                 PendingStart::EnergySword(i) => self.energy_sword_start(i),
                 PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
                 PendingStart::Piston(i, joints) => {

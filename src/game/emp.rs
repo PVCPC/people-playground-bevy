@@ -10,7 +10,7 @@ use super::{script, Game};
 /// hit object stops the run.
 const EMP_RECEIVERS: &[&str] = &[
     "BatteryAttachmentBehaviour", "BulbBehaviour", "CarBehaviour", "CathodeLightBehaviour",
-    "GlowtubeBehaviour", "JavelinMissileBehaviour", "LaserTurretBehaviour", "SentryTurretBehaviour", "StickyGrenadeBehaviour",
+    "GlowtubeBehaviour", "JavelinMissileBehaviour", "StickyGrenadeBehaviour",
     "TelevisionBehaviour",
 ];
 
@@ -66,6 +66,17 @@ impl Game {
             self.machinery_on_emp_hit(m);
         }
         let id = self.physicals[p].id;
+        // LaserTurretBehaviour.OnEMPHit on a turret of this GameObject: SetAsBroken (laser_turret.rs).
+        let components = self.with_component_instance(id, |_, inst, o| inst.objects[o].components.clone());
+        let lasers: Vec<usize> = (0..self.laser_turrets.len()).filter(|&l| components.contains(&self.laser_turrets[l].id)).collect();
+        for l in lasers {
+            self.laser_turret_set_as_broken(l);
+        }
+        // SentryTurretBehaviour.OnEMPHit: Explode (sentry_turret.rs).
+        let sentries: Vec<usize> = (0..self.sentry_turrets.len()).filter(|&s| components.contains(&self.sentry_turrets[s].id)).collect();
+        for s in sentries {
+            self.sentry_turret_on_emp_hit(s);
+        }
         let hit = self.with_component_instance(id, |_, inst, o| {
             inst.prefab.objects[o].components.iter().find_map(|(_, c)| match c {
                 crate::assets::db::Component::Script { class, .. } if EMP_RECEIVERS.contains(&class.as_str()) => Some(class.clone()),
