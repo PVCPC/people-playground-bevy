@@ -273,8 +273,7 @@ pub struct Decal {
     pub colour: [f32; 4],
 }
 
-/// A DecalDescriptor asset: the fields DecalControllerBehaviour reads (DripParticle only feeds the drip streaks,
-/// which are not rewritten).
+/// A DecalDescriptor asset: the fields DecalControllerBehaviour reads (DripParticle is only the streaks' sprite).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecalDescriptor {
     pub name: String,
@@ -380,6 +379,8 @@ impl Game {
 pub struct DecalController {
     pub descriptor: usize,
     pub decals: Vec<Decal>,
+    /// `dirty`: CreateContainer has made the decalHolder.
+    pub holder: bool,
 }
 
 /// A BloodPuff poolable (the Human PhysicalProperties' ShotImpact), from the pool PoolGenerator made for it.
@@ -546,6 +547,8 @@ pub enum PendingStart {
     MapConfig(super::map::MapConfigStart),
     /// ExplosionSoundBehviour on a BloodExplosion (three Near clips, StartWhenAwake, no distant sound).
     BloodExplosionSound,
+    /// DecalDripStreakBehaviour.Start: speed and length draws (the streak's growth is presentation).
+    DecalDripStreak,
     /// A new BloodPuff's ExplosionSoundBehviour (eight Near clips).
     BloodPuffSound,
     /// A new pooled clone's ExplosionSoundBehviour.Start: Play draws one of its `Near` clips (the count).
@@ -849,6 +852,7 @@ impl Game {
         self.fixed_joints.push(super::simulate::FixedJoint {
             state: a.state.clone(),
             slider: a.slider.clone(),
+            spring: None,
             joint: a.joint,
             attached: a.attached,
             connected: a.connected,
@@ -909,6 +913,10 @@ impl Game {
                 // Play(Delay): audioSource.clip = Near.PickRandom(); DistantSound is None.
                 PendingStart::BloodExplosionSound => {
                     self.pick_random(3);
+                }
+                PendingStart::DecalDripStreak => {
+                    self.random.range(0.5, 1.0);
+                    self.random.range(1.0, 3.0);
                 }
                 PendingStart::BloodPuffSound => {
                     self.pick_random(8);

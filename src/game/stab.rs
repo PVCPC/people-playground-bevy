@@ -170,7 +170,8 @@ impl Game {
         if axis.LooseUpperLimit {
             return lerp_unclamped(position, end, axis.UpperLimit);
         }
-        unimplemented!("PhysicalBehaviour.GetSharpEnd: Debug.LogError for an object with no sharp ends");
+        // Debug.LogError (the log only), then default(Vector2).
+        [0.0, 0.0]
     }
 
     /// PhysicalBehaviour.GetRelativeStabSpeed: the Joint.jointSpeed magnitude of the penetration into `victim`.

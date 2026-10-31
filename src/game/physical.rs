@@ -341,10 +341,10 @@ impl Game {
         self.physicals[p].rigidbody = rb;
         self.physical_recalculate_mass_based_on_size(p);
         if self.physicals[p].IsWeightless {
-            unimplemented!("PhysicalBehaviour.MakeWeightless");
+            self.physical_make_weightless(p);
         }
         if self.physicals[p].isDisintegrated {
-            unimplemented!("PhysicalBehaviour.Disintegrate");
+            self.physical_disintegrate(p);
         }
         // SetupSpawnPrefab: Instantiate(Resources.Load("Prefabs/SpawnParticles")) under this transform, then
         // AddComponent<Optout>(). The clone is a particle effect that deletes itself after a second; it draws no
@@ -425,8 +425,9 @@ impl Game {
                 });
             }
         }
-        let Some(a) = aabb else { unimplemented!("Collider2D.bounds of a collider without shapes") };
         let z = self.physicals[p].transform.position[2];
+        // Without shapes (GetBounds, 180c11150): the Transform's position with zero extents (Vector3f zero).
+        let Some(a) = aabb else { return (self.physicals[p].transform.position, [0.0; 3]) };
         ([(a.upper.x + a.lower.x) * 0.5, (a.upper.y + a.lower.y) * 0.5, z], [(a.upper.x - a.lower.x) * 0.5, (a.upper.y - a.lower.y) * 0.5, 0.0])
     }
 
@@ -507,6 +508,25 @@ impl Game {
             }
         }
         list
+    }
+
+    /// PhysicalBehaviour.MakeWeightless. BroadcastMessage("OnMakeWeightless") reaches only WeightlessHelper.
+    pub fn physical_make_weightless(&mut self, p: usize) {
+        let rb = self.physicals[p].rigidbody.clone();
+        rb.set_gravity_scale(&mut self.world, 0.0);
+        let m = rb.mass(&self.world);
+        self.physicals[p].InitialMass = m;
+        self.body_set_mass(rb.body, mathf::max(mathf::min(m, 0.02), m * 0.02));
+        self.physicals[p].IsWeightless = true;
+        let id = self.physicals[p].id;
+        let helper = self.with_component_instance(id, |_, inst, o| {
+            std::iter::once(o).chain(inst.descendants(o)).any(|x| {
+                inst.prefab.objects[x].components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "WeightlessHelper"))
+            })
+        });
+        if helper {
+            unimplemented!("WeightlessHelper.OnMakeWeightless (its Bodies are not linked)");
+        }
     }
 
     /// PhysicalBehaviour.RecalculateMassBasedOnSize
@@ -1013,7 +1033,9 @@ impl Game {
         let size = mathf::max(0.05, size);
         let ph = &mut self.physicals[p];
         if ph.DisplayBloodDecals && self.prefs.Decals && ph.decal_controllers.iter().all(|c| c.descriptor != ty) {
-            ph.decal_controllers.push(super::misc::DecalController { descriptor: ty, decals: Vec::new() });
+            ph.decal_controllers.push(super::misc::DecalController { descriptor: ty, decals: Vec::new(), holder: false });
+            // AddComponent<DecalControllerBehaviour>()
+            self.allocate_instance_id();
             let c = self.physicals[p].decal_controllers.len() - 1;
             self.decal_controller_decal(p, c, ty, position, size, colour);
         }
@@ -1030,7 +1052,7 @@ impl Game {
         }
     }
 
-    /// DecalControllerBehaviour.Decal. CreateContainer and the sprite objects are presentation.
+    /// DecalControllerBehaviour.Decal. The objects it makes are presentation apart from their instance ids.
     fn decal_controller_decal(&mut self, p: usize, c: usize, ty: usize, position: [f32; 2], size: f32, colour: [f32; 4]) {
         if !self.prefs.Decals || self.physicals[p].decal_controllers[c].descriptor != ty {
             return;
@@ -1039,6 +1061,14 @@ impl Game {
         // (DecalControllerBehaviour.Start then destroys the controller and logs the error).
         if ty == NULL_DECAL {
             return;
+        }
+        if !self.physicals[p].decal_controllers[c].holder {
+            // CreateContainer: no child is named "<descriptor> container" (the descriptors are Blast mark, Dense blood
+            // and Sparse blood), so new GameObject (GameObject, Transform), then Optout, SortingGroup and SpriteMask.
+            for _ in 0..5 {
+                self.allocate_instance_id();
+            }
+            self.physicals[p].decal_controllers[c].holder = true;
         }
         let local = self.inverse_transform_point(p, [position[0], position[1], 0.0]);
         let local = [local[0], local[1]];
@@ -1054,6 +1084,10 @@ impl Game {
         if near {
             return;
         }
+        // new GameObject("decal") (GameObject, Transform) and its SpriteRenderer.
+        for _ in 0..3 {
+            self.allocate_instance_id();
+        }
         let size = size * self.random.range(1.0, 1.2);
         // Sprites.PickRandom(); Color times the instruction's multiplier.
         let sprite = self.pick_random(ty.Sprites).unwrap();
@@ -1062,7 +1096,19 @@ impl Game {
             colour = super::circulation::change_red_to_orange(colour);
         }
         if ty.MaxDripCount > 0 {
-            unimplemented!("DecalControllerBehaviour.Decal: {} drip streaks", ty.name);
+            let (lo, hi) = (ty.MaxDripCount.min(ty.MinDripCount), ty.MaxDripCount.max(ty.MinDripCount));
+            // The loop condition draws Random.Range(minInclusive, maxExclusive) again on every pass.
+            let mut i = 0;
+            while i <= self.random.range_int(lo, hi) {
+                // new GameObject("streak") (GameObject, Transform), SpriteRenderer, DecalDripStreakBehaviour.
+                for _ in 0..4 {
+                    self.allocate_instance_id();
+                }
+                self.random.inside_unit_circle();
+                self.random.range(0.02, 0.05);
+                self.pending_starts.push(super::misc::PendingStart::DecalDripStreak);
+                i += 1;
+            }
         }
         self.physicals[p].decal_controllers[c].decals.push(super::misc::Decal { position: local, size, sprite, colour });
     }
@@ -1461,6 +1507,10 @@ impl Game {
             self.limb_on_disintegration(l);
             self.person_on_child_disintegrated(self.limbs[l].Person);
         }
+        // A gore shard registered as a pseudo child of a person's DisintegrationCounterBehaviour.
+        for person in (0..self.people.len()).filter(|&i| self.people[i].pseudo_children.contains(&p)).collect::<Vec<_>>() {
+            self.person_on_child_disintegrated(person);
+        }
         self.disintegration_counters_on_disintegration(p);
         // GetComponentsInChildren<Collider2D>().enabled = false: the object's own collider. Renderers are presentation.
         self.collider_disable(p);
@@ -1475,6 +1525,17 @@ impl Game {
             self.with_component_instance(id, |g, inst, o| g.attached_set_active(inst, o, false));
         }
         self.deactivate(p);
+        // The shard's GameObject is inactive now, its body, shapes and joints gone: a later Destroy finds nothing to deactivate.
+        let id = self.physicals[p].transform_id;
+        if let Some(inst) = self.unsynced.iter_mut().chain(self.retained.iter_mut()).find(|i| i.objects.iter().any(|x| x.components.contains(&id))) {
+            let o = inst.objects.iter().position(|x| x.components.contains(&id)).unwrap();
+            if inst.prefab.objects[o].components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if class == "ShatteredShardBehaviour")) {
+                inst.objects[o].active = false;
+                inst.objects[o].self_active = false;
+                inst.bodies.remove(&o);
+                inst.fixtures.retain(|&(x, _), _| x != o);
+            }
+        }
         self.physicals[p].isDisintegrated = true;
         // InvokeOnItemRemoved: the modding event only.
     }
