@@ -42,7 +42,7 @@ pub enum Start {
 fn load(start: &Start, rig: &HumanRig, prefs: Option<Prefs>) -> Result<Option<Game>, String> {
     let recording = match start {
         Start::Recording(recording) => recording,
-        Start::Map(game, map, item, _) => return new_game(game, map, item.as_deref(), prefs).map(Some),
+        Start::Map(game, map, item, _) => return new_game(game, map, item.as_deref(), prefs, 0).map(Some),
         Start::Menu(_) => return Ok(None),
     };
     let start = dump::snapshots(recording)?
@@ -64,9 +64,15 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 
 /// SceneManager.LoadScene("Main") with the main menu's map choice: level1's managers and natives, then the
 /// MapLoaderBehaviour's Awake. Its behaviours' Starts run in the first frame.
-pub(crate) fn new_game(game: &Path, map: &str, item: Option<&str>, prefs: Option<Prefs>) -> Result<Game, String> {
+/// `seed` is UnityEngine.Random's startup seed.
+pub(crate) fn new_game(game: &Path, map: &str, item: Option<&str>, prefs: Option<Prefs>, seed: i32) -> Result<Game, String> {
     let mut db = AssetDb::open(game)?;
     let mut g = Game::load_main(&mut db, game)?;
+    g.random = crate::unity::Random::new(seed);
+    // The heap addresses behind GetHashCode (which reseeds Random in PhysicalBehaviour.Start) differ per session too.
+    if seed != 0 {
+        g.heap_base = Some(0x0100_0000 + (((seed as u32) as u64 & 0xf_ffff) << 11));
+    }
     if let Some(prefs) = prefs {
         g.prefs = prefs;
     }
@@ -136,6 +142,22 @@ pub fn test(start: &Start, rig: &HumanRig) -> Result<(), String> {
                 g.input.controls.insert(key.into(), crate::game::tool::Control { down: n == at - 1, held: n == at - 1, up: n == at });
                 if n == at {
                     g.input.mouse = [g.BoundingBox.center[0] + dx, g.BoundingBox.center[1], 0.0];
+                }
+            }
+            // PP_ATTACH=<attachment item>[,<point index>]: on frame 900 that item is dropped on the gun's attachment point.
+            if let Ok(spec) = std::env::var("PP_ATTACH") {
+                let mut it = spec.split(',');
+                let name = it.next().unwrap();
+                let pt: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                if n == 899 {
+                    g.catalog_selected = Some(name.to_string());
+                    g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: true, held: true, up: false });
+                }
+                if n == 900 {
+                    g.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: false, held: false, up: true });
+                    let at = g.attachment_point_position(pt);
+                    g.input.mouse = at;
+                    println!("attachment point {pt} at {at:?}");
                 }
             }
         }

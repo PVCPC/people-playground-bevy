@@ -187,6 +187,7 @@ impl Game {
             self.node_rigidbodies[k].rigidbody.movement.current = pose;
             self.node_rigidbodies[k].rigidbody.movement.body = pose;
         }
+        self.update_attached_clones();
     }
 
     /// Simulate's write-back for a kinematic body below an awake parent body: the body goes to its Transform (x/y,
@@ -535,12 +536,19 @@ impl Game {
     fn send_callback_reports(&mut self, reports: &[Report]) {
         for r in reports {
             let Some(col) = &r.collision else {
-                // OnTriggerEnter2D/OnTriggerExit2D(other) of the WaterBehaviour on the trigger's GameObject; the other
-                // rewritten OnTrigger*2D (FirearmAttachmentPointBehaviour) does nothing without attachments.
+                // OnTriggerEnter2D/OnTriggerExit2D(other) of the WaterBehaviour on the trigger's GameObject; a point's
+                // FirearmAttachmentPointBehaviour.OnTriggerEnter2D.
                 if matches!(r.message, Message::TriggerEnter | Message::TriggerExit) {
                     for (own, other) in [(r.collider_a, r.collider_b), (r.collider_b, r.collider_a)] {
                         if let Some(w) = self.waters.iter().position(|w| w.trigger == own.id) {
                             self.water_on_trigger(w, other.id);
+                        }
+                    }
+                }
+                if r.message == Message::TriggerEnter {
+                    for (own, other) in [(r.collider_a, r.collider_b), (r.collider_b, r.collider_a)] {
+                        if let Some(pt) = self.attachment_points.iter().position(|x| x.colliders.contains(&own.id)) {
+                            self.attachment_point_trigger_enter(pt, other.id);
                         }
                     }
                 }
@@ -552,6 +560,8 @@ impl Game {
             };
             for (collider, rigidbody) in [(r.collider_a, r.rigidbody_a), (r.collider_b, r.rigidbody_b)] {
                 let c = self.world.script_collision(col, collider.id);
+                // The collider's own GameObject first (a TorchBehaviour without a PhysicalBehaviour), then the physical's.
+                self.torch_collision_on_collider(collider.id, r.message, &c);
                 if let Some(p) = self.physical_of_collider(collider.id) {
                     self.send_collision_message(p, r.message, &c);
                 }
@@ -600,6 +610,12 @@ impl Game {
             }
             if let Some(b) = g.balloons.iter().position(|x| x.physical == Some(p) && x.after_physical == after) {
                 v.push((g.balloons[b].index, S::Balloon(b)));
+            }
+            if let Some(t) = g.torches.iter().position(|x| x.physical == Some(p) && x.after_physical == after) {
+                v.push((g.torches[t].index, S::Torch(t)));
+            }
+            if let Some(t) = g.televisions.iter().position(|x| x.physical == p && x.after_physical == after) {
+                v.push((g.televisions[t].index, S::Television(t)));
             }
             v.extend(g.tr.collision_scripts.iter().filter(|s| s.physical == p && s.after_physical == after).map(|s| (s.index, S::Translated(s.b))));
             v.sort_by_key(|&(i, _)| i);

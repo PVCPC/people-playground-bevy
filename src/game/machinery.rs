@@ -253,6 +253,29 @@ impl Game {
                     self.thrusterbed_on_disable(i);
                 }
             }
+            "BlasterBehaviour" => {
+                let i = self.blasters.iter().position(|x| x.id == id).expect("a BlasterBehaviour in the arena");
+                if !std::mem::replace(&mut self.blasters[i].enabled, false) {
+                    return;
+                }
+                // No OnDisable.
+                self.behaviours.remove(super::Behaviour::Blaster(i));
+            }
+            "BeamformerBehaviour" => {
+                let i = self.beamformers.iter().position(|x| x.id == id).expect("a BeamformerBehaviour in the arena");
+                if !std::mem::replace(&mut self.beamformers[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Beamformer(i));
+                if active {
+                    self.beamformer_on_disable(i);
+                }
+            }
+            "GenericScifiWeapon40Behaviour" => {
+                let i = self.scifi40s.iter().position(|x| x.id == id).expect("a GenericScifiWeapon40Behaviour in the arena");
+                // No OnDisable, and no manager message.
+                self.scifi40s[i].enabled = false;
+            }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
         }
     }
@@ -275,5 +298,8 @@ impl Game {
             || self.spike_grenades.iter().any(|x| x.id == id && !x.enabled)
             || self.ray_guns.iter().any(|x| x.id == id && !x.enabled)
             || self.thrusterbeds.iter().any(|x| x.id == id && !x.enabled)
+            || self.blasters.iter().any(|x| x.id == id && !x.enabled)
+            || self.beamformers.iter().any(|x| x.id == id && !x.enabled)
+            || self.scifi40s.iter().any(|x| x.id == id && !x.enabled)
     }
 }

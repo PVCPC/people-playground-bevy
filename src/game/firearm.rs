@@ -36,6 +36,8 @@ script! {
         /// ShotSounds length.
         ShotSounds: usize = 0,
         InaccuracyMultipliers: Vec<f32> = Vec::new(),
+        /// The attachments in BallisticsEmitter.BulletEntryEvent and OnFire (added and removed together), in order.
+        attachments: Vec<usize> = Vec::new(),
         MuzzleFlashEffectOverride: Option<ObjRef> = None,
         Cartridge: Cartridge = Cartridge::default(),
         /// LayersToHit (Awake's WaterLayer is Water | LayersToHit).
@@ -128,9 +130,13 @@ impl Game {
     /// BarrelPosition: rb.GetRelativePoint(barrelPosition * lossyScale).
     fn barrel_position(&mut self, f: usize) -> [f32; 2] {
         let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
+        self.rigidbody_relative_point(p, self.firearms[f].barrelPosition)
+    }
+
+    /// Rigidbody2D.GetRelativePoint(local * transform.lossyScale) of physical `p`'s body (shared by the barrels).
+    pub(super) fn rigidbody_relative_point(&mut self, p: usize, local: [f32; 2]) -> [f32; 2] {
         let s = self.lossy_scale(p);
-        let b = self.firearms[f].barrelPosition;
-        let v = [b[0] * s[0], b[1] * s[1]];
+        let v = [local[0] * s[0], local[1] * s[1]];
         self.sync_pending();
         let xf = self.world.body(self.physicals[p].rigidbody.body).xf;
         [xf.q.c * v[0] - xf.q.s * v[1] + xf.p.x, xf.q.s * v[0] + xf.q.c * v[1] + xf.p.y]
@@ -139,8 +145,12 @@ impl Game {
     /// BarrelDirection: transform.TransformVector(barrelDirection) (each node's scale and rotation, no translation).
     fn barrel_direction(&self, f: usize) -> [f32; 2] {
         let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
-        let b = self.firearms[f].barrelDirection;
-        let mut v = [b[0], b[1], 0.0, 0.0];
+        self.transform_vector_chain(p, self.firearms[f].barrelDirection)
+    }
+
+    /// transform.TransformVector(local) of physical `p`'s object: each node's scale and rotation, no translation.
+    pub(super) fn transform_vector_chain(&self, p: usize, local: [f32; 2]) -> [f32; 2] {
+        let mut v = [local[0], local[1], 0.0, 0.0];
         for node in self.local_chain(p).iter().rev() {
             let node = crate::unity::transform::Trs { t: [0.0; 4], ..*node };
             v = crate::unity::transform::global_position(&node, v);

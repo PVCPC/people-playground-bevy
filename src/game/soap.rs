@@ -58,6 +58,11 @@ impl Game {
     /// (the object first, then its parents), of those with DecalControllerBehaviours. Controllers sit on physical
     /// objects only; a bare collider's chain holds none below its anchor physical.
     fn soap_decal_physicals(&mut self, c: &ScriptCollision) -> Vec<usize> {
+        // A DecalControllerBehaviour on a non-physical object above the hit collider (a bare collider's chain up to its
+        // anchor, or past it): the search over those objects is not rewritten.
+        if self.decal_chain_colliders.contains(&c.collider) {
+            unimplemented!("SoapBehaviour.Clean: a DecalControllerBehaviour on a non-physical object above the hit collider (GetComponentsInParent)");
+        }
         let start = match self.physical_of_collider(c.collider) {
             Some(p) => p,
             None => match self.bare_colliders.get(&c.collider).map(|b| b.anchor) {

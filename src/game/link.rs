@@ -14,6 +14,10 @@ use super::*;
 use crate::assets::classes::PPtr;
 use crate::assets::components::{JointKind, PhysicsMaterial2D, Sprite};
 use crate::assets::db::{AssetDb, Component, ObjRef, Prefab, PrefabObject};
+
+/// Where the modelled managed heap starts (see `Game::spawn`): a 2048-aligned address. Any value is as real as another
+/// (the game's own differs per run); this one is a fixed pick.
+const MODELLED_HEAP_BASE: u64 = 0x0000_0000_014f_5000;
 use crate::assets::mono::Value;
 use crate::game_assets::{Curve, CurveCache};
 use crate::unity::transform::Node as TransformNode;
@@ -55,6 +59,9 @@ pub struct Linked {
     pub launchers: HashMap<usize, usize>,
     pub bells: HashMap<usize, usize>,
     pub machine_guns: HashMap<usize, usize>,
+    pub miniguns: HashMap<usize, usize>,
+    pub accelerators: HashMap<usize, usize>,
+    pub accelerator_bolts: HashMap<usize, usize>,
     pub explosives: HashMap<usize, usize>,
     pub delete_afters: HashMap<usize, usize>,
     pub point_to_velocities: HashMap<usize, usize>,
@@ -83,8 +90,24 @@ pub struct Linked {
     pub soaps: HashMap<usize, usize>,
     pub power_hammers: HashMap<usize, usize>,
     pub balloons: HashMap<usize, usize>,
+    pub metronomes: HashMap<usize, usize>,
+    pub thermometers: HashMap<usize, usize>,
+    pub infrared_thermometers: HashMap<usize, usize>,
+    pub activation_toggles: HashMap<usize, usize>,
+    pub power_gauges: HashMap<usize, usize>,
+    pub torches: HashMap<usize, usize>,
+    pub flares: HashMap<usize, usize>,
+    pub buttons: HashMap<usize, usize>,
+    pub lasers: HashMap<usize, usize>,
+    pub firearm_attachments: HashMap<usize, usize>,
+    pub televisions: HashMap<usize, usize>,
+    pub displays: HashMap<usize, usize>,
     pub syringes: HashMap<usize, usize>,
     pub jet_engines: HashMap<usize, usize>,
+    pub blasters: HashMap<usize, usize>,
+    pub blasterbolts: HashMap<usize, usize>,
+    pub beamformers: HashMap<usize, usize>,
+    pub scifi40s: HashMap<usize, usize>,
     pub signal_converters: HashMap<usize, usize>,
     pub syringe_explosions: HashMap<usize, usize>,
     pub point_liquids: HashMap<usize, usize>,
@@ -483,9 +506,42 @@ pub(super) fn check_rewritten(class: &str) {
         | "DestroyWhenAllChildrenDestroyed" | "InstantiateObjectBehaviour" | "DetachFromParentOnStart" | "RandomForceAtStart" | "DoAtTimeOnce" | "RandomSpriteBehaviour" | "LavaBehaviour" | "RandomPrefabSpawnerBehaviour"
         | "TemperatureTargetRectangleBehaviour" | "ExistByChance" | "ExplosiveBehaviour" | "DeleteAfterTime" | "ActOnCollide" | "NoCollide" | "StickyGrenadeBehaviour" | "ActOnHingeJointLimit" | "PointToVelocityBehaviour" | "AndroidSparkCreator" | "ActivateIfFancyEffects" | "ExistInDetailView" | "IgnoreParentSize" | "LocalFirePropagationMap" | "RandomSpawnedSize" | "NoChildrenCollide" | "FirearmBehaviour" | "CarBehaviour" | "TyreDeflationBehaviour" | "GasTankBehaviour" | "FlaskBehaviour" | "LiquidContainerController" | "PointLiquidTransferBehaviour" | "TruckDoorBehaviour" | "GlowtubeBehaviour" | "LEDBulbBehaviour" | "DetectorBehaviour" | "RandomCarTextureBehaviour" | "NoCollideGm" | "JointSerialisationHelper" | "BatchJointSerialisationHelper" | "ProjectileLauncherBehaviour" | "OnlyExplosionBehaviour" | "BellBehaviour" | "MachineGunBehaviour" | "GeneratorBehaviour" | "SingleFloodlightBehaviour" | "SpikeGrenadeBehaviour" | "HeatingElementBehaviour" | "TemperatureRayGunBehaviour" | "BulbBehaviour" | "ThrusterbedBehaviour" | "PistonBehaviour" | "FlamethrowerBehaviour" | "LaunchedRocketBehaviour"
         // Airfoil's Awake, Start and FixedUpdate are rewritten (airfoil.rs; its context menu buttons are UI). Stunner's Update is (stunner.rs).
-        | "AirfoilBehaviour" | "StunnerBehaviour" | "SoapBehaviour" | "PowerHammerBehaviour" | "BalloonBehaviour" => {}
+        | "AirfoilBehaviour" | "StunnerBehaviour" | "SoapBehaviour" | "PowerHammerBehaviour" | "BalloonBehaviour" | "MetronomeBehaviour" => {}
+        // Start, OnEnable, FixedUpdate and OnDisable only show or hide readouts; Use and OnDisable's state is rewritten (thermometer.rs).
+        // InfraredThermometer.Update is rewritten (thermometer.rs: infrared_update); its text and line are presentation.
+        "ThermometerBehaviour" | "InfraredThermometer" => {}
+        // Start flips a negative local scale.x back (thermometer.rs: maintain_scale_start).
+        "MaintainScaleSignBehaviour" => {}
+        // Awake only fetches components; Update only moves the arm (presentation). Start spawns the labels (gauge.rs).
+        "PowerGaugeBehaviour" => {}
+        // Start enables its TorchBehaviour while Activated; Use lights it (flare.rs).
+        "FlareBehaviour" => {}
+        // OnEnable registers contacts, OnCollisionEnter2D and Exit2D and FixedUpdate are rewritten (torch.rs).
+        "TorchBehaviour" => {}
+        // Awake draws the glow seed, Start is presentation and the context menu, and Update, Use, OnCollisionEnter2D and
+        // Shot/Break are rewritten (television.rs).
+        "TelevisionBehaviour" => {}
+        // Awake subscribes to the continuous listener and FixedUpdate presses (button.rs); Start is the context menu, and
+        // Update and OnDisable only drive the light.
+        "ButtonBehaviour" => {}
+        // Start and Use run UpdateLaser and LateUpdate fires it (laser.rs); OnDisable and OnDestroy only hide the beam.
+        "LaserBehaviour" => {}
+        // Awake adds a CheckOnDestroyAttachment; Use and Battery's FixedUpdate need a connection, which the point makes and
+        // this file refuses (attachment.rs). The base class is the scope's and the others' Awake.
+        "FirearmAttachmentBehaviour" | "ScopeAttachmentBehaviour" | "BatteryAttachmentBehaviour" | "ExplosiveAttachmentBehaviour" | "FlashlightAttachmentBehaviour" | "IncendiaryAttachmentBehaviour" => {}
+        // Awake draws the start string and Use and OnDisable flip Activated (display.rs); Start writes the text and menu.
+        "DisplayBehaviour" => {}
+        // Awake draws its offset (the draw stays, in awake_behaviours); OnWillRenderObject's colour and the text object's
+        // localPosition from the offset's Perlin noise are rendering.
+        "HologramJitter" => {}
+        // Awake subscribes to the physical's OnSingleUse (activate_direct), Start and OnDisable are rewritten
+        // (activation_toggle.rs), OnDestroy only removes the listener (destroyable.rs).
+        "ActivationToggleBehaviour" => {}
         // jet_engine.rs: Awake caches components and clears the plasma colour (rendering).
         "JetEngineBehaviour" => {}
+        // blaster.rs, scifi.rs: Awake caches components (the Disassembler's takes an AudioSource id), Start flips the
+        // muzzle flash (BlasterBehaviour), shows or hides lines (BeamformerBehaviour); the bolt only has Update.
+        "BlasterBehaviour" | "BlasterboltBehaviour" | "BeamformerBehaviour" | "GenericScifiWeapon40Behaviour" => {}
         // syringe.rs: Awake and OnWillRenderObject are rendering, Start's AddButtons is UI.
         c if super::syringe::is_syringe(c) || c == "SyringeExplosionBehaviour" => {}
         // Renderer sorting from the parent's SpriteRenderer; SpriteRenderer.color from Temperature when visible.
@@ -493,8 +549,8 @@ pub(super) fn check_rewritten(class: &str) {
         "SortingLayerChild" | "VertexColourBasedOnTemperatureBehaviour" | "SmoothLineControllerBehaviour" => {}
         // OnEnable's two Random.value (`color_wave_on_enable`) feed only OnWillRenderObject's SpriteRenderer.color.
         "ColorWave" => {}
-        // Start: see PendingStart::FirearmAttachmentPoint. OnTriggerEnter2D only takes a FirearmAttachmentBehaviour (whose
-        // Awake stops the rewrite), and OnDestroy only destroys a connected one.
+        // Start: see PendingStart::FirearmAttachmentPoint; OnTriggerEnter2D: `attachment_point_trigger_enter`; OnDestroy only
+        // destroys a connected attachment (none connects yet).
         "FirearmAttachmentPointBehaviour" => {}
         // Awake keeps the bodies' masses for OnMakeWeightful; nothing rewritten sends OnMakeWeightless/OnMakeWeightful.
         "WeightlessHelper" => {}
@@ -516,6 +572,17 @@ pub(super) fn check_rewritten(class: &str) {
         | "ParticleSystemSerialisationHelper" => {}
         // Start adds a context menu button and sets AudioSource.enabled on its Sources.
         "MuteBehaviour" => {}
+        // Use and Update are rewritten (minigun.rs). Awake caches components, FixedUpdate only decays the barrel's spin
+        // and OnWillRenderObject sets its property block: presentation. The sound coroutine is audio.
+        "MinigunBehaviour" => {}
+        // Update (the charge and the shots) is rewritten (accelerator.rs).
+        "AcceleratorGunBehaviour" => {}
+        // Update and FixedUpdate are rewritten (accelerator.rs, bolt.rs for the flight); the bolt has no Awake or Start.
+        "AcceleratorBoltBehaviour" => {}
+        // Start sets the static Instance that the bolt's lightning calls Emit on (lightning.rs); it has no other state.
+        "SimpleLightningEmitterBehaviour" => {}
+        // Awake only subscribes SyncSprite to the parent's OnAfterChange (the sprite is presentation). It draws nothing.
+        "RandomSpriteChildBehaviour" => {}
         name if super::translated::CLASSES.contains(&name) => {}
         _ => {
             let messages = super::lifecycle::LIFECYCLE.iter().find(|(k, _)| *k == class).map_or(&[][..], |(_, m)| *m);
@@ -626,6 +693,25 @@ impl Game {
             }
             node_rigidbodies.insert(o, self.node_rigidbodies.len());
             self.node_rigidbodies.push(NodeBody { node: l.arenas.node[&o], rigidbody, driven_by });
+        }
+        // Soap's Clean walks a hit collider's ancestors for DecalControllers; the non-physical ones are not rewritten.
+        for o in 0..n {
+            for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
+                if !matches!(comp, Component::Collider2D(_)) {
+                    continue;
+                }
+                let (mut up, mut decal) = (Some(o), false);
+                while let Some(t) = up {
+                    if !l.arenas.physical.contains_key(&t) && prefab.objects[t].components.iter().any(|(_, x)| matches!(x, Component::Script { class, .. } if class == "DecalControllerBehaviour")) {
+                        decal = true;
+                        break;
+                    }
+                    up = inst.objects[t].parent;
+                }
+                if decal {
+                    self.decal_chain_colliders.insert(inst.objects[o].components[c]);
+                }
+            }
         }
         // Colliders and sprites without a PhysicalBehaviour on their GameObject: the Transforms down from the
         // nearest physical or node.
@@ -1094,6 +1180,77 @@ impl Game {
             machine_guns.insert(o, self.machine_guns.len());
             self.machine_guns.push(x);
         }
+        // MinigunBehaviour: fires and resets the FirearmBehaviour field (a null one is a NullReferenceException on Update).
+        let mut miniguns = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "MinigunBehaviour") else { continue };
+            let mut x = super::minigun::Minigun::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("MinigunBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+            let fr = field(v, "FirearmBehaviour")?.pptr().ok_or("MinigunBehaviour.FirearmBehaviour")?;
+            if fr.is_null() || fr.file != 0 {
+                unimplemented!("MinigunBehaviour.FirearmBehaviour null or outside the prefab (NullReferenceException in Update)");
+            }
+            let (fo, _) = *prefab.index.get(&ObjRef { file, path_id: fr.path_id }).ok_or("MinigunBehaviour.FirearmBehaviour: dangling reference")?;
+            x.firearm = *firearms.get(&fo).unwrap_or_else(|| unimplemented!("MinigunBehaviour.FirearmBehaviour on an object without a FirearmBehaviour in this clone"));
+            miniguns.insert(o, self.miniguns.len());
+            self.miniguns.push(x);
+        }
+        // AcceleratorGunBehaviour: the charge is PhysicalBehaviour's; a release spawns the bolt (accelerator.rs).
+        let mut accelerators = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "AcceleratorGunBehaviour") else { continue };
+            let mut x = super::accelerator::Accelerator::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            let ph = field(v, "PhysicalBehaviour")?.pptr().ok_or("AcceleratorGunBehaviour.PhysicalBehaviour")?;
+            if ph.is_null() || ph.file != 0 {
+                unimplemented!("AcceleratorGunBehaviour.PhysicalBehaviour null or outside the prefab (NullReferenceException in Update)");
+            }
+            let (po, _) = *prefab.index.get(&ObjRef { file, path_id: ph.path_id }).ok_or("AcceleratorGunBehaviour.PhysicalBehaviour: dangling reference")?;
+            x.physical = l.arenas.physical.get(&po).copied().unwrap_or_else(|| unimplemented!("AcceleratorGunBehaviour.PhysicalBehaviour on an object without a physical behaviour in this clone"));
+            x.SingleShotSound = array(v, "SingleShotSound")?.len();
+            // The barrel is the Rigidbody2D's of this GameObject (BarrelPosition and the recoil use the physical's body).
+            let rbp = field(v, "Rigidbody")?.pptr().ok_or("AcceleratorGunBehaviour.Rigidbody")?;
+            if rbp.is_null() || rbp.file != 0 || prefab.index.get(&ObjRef { file, path_id: rbp.path_id }).map(|&(ro, _)| ro) != Some(o) {
+                unimplemented!("AcceleratorGunBehaviour.Rigidbody not on its own GameObject");
+            }
+            let proj = field(v, "ProjectilePrefab")?.pptr().ok_or("AcceleratorGunBehaviour.ProjectilePrefab")?;
+            if !proj.is_null() {
+                x.ProjectilePrefab = Some(db.resolve(file, proj).ok_or("AcceleratorGunBehaviour.ProjectilePrefab outside the data")?);
+            }
+            accelerators.insert(o, self.accelerators.len());
+            self.accelerators.push(x);
+        }
+        // AcceleratorBoltBehaviour: a bare Transform the gun's shots instantiate (its prefab has no physics).
+        let mut accelerator_bolts = HashMap::new();
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "AcceleratorBoltBehaviour") else { continue };
+            if prefab.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                unimplemented!("AcceleratorBoltBehaviour on a prefab with physics (its pose)");
+            }
+            let mut x = super::accelerator::AcceleratorBolt::default();
+            load_values(x.fields(), v)?;
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("AcceleratorBoltBehaviour.Layers.m_Bits")? as u32;
+            x.ImmobiltyFieldLayer = field(field(v, "ImmobiltyFieldLayer")?, "m_Bits")?.i64().ok_or("AcceleratorBoltBehaviour.ImmobiltyFieldLayer.m_Bits")? as u32;
+            for (name, slot) in [("ImpactEffect", &mut x.ImpactEffect), ("LargeImpactEffect", &mut x.LargeImpactEffect)] {
+                let p = field(v, name)?.pptr().ok_or(name)?;
+                if !p.is_null() {
+                    let r = db.resolve(file, p).ok_or_else(|| format!("AcceleratorBoltBehaviour.{name} outside the data"))?;
+                    if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("AcceleratorBoltBehaviour: an {name} with physics (its pose)");
+                    }
+                    *slot = Some(r);
+                }
+            }
+            accelerator_bolts.insert(o, self.accelerator_bolts.len());
+            self.accelerator_bolts.push(x);
+        }
         let mut bells = HashMap::new();
         for o in 0..n {
             let Some((_, _, v)) = script(prefab, o, "BellBehaviour") else { continue };
@@ -1176,7 +1333,251 @@ impl Game {
                 self.liquid_containers.push(x);
             }
         }
+        // The sci-fi weapons the ActOnCollide and ActOnShot Actions call.
+        let (mut blasters, mut blasterbolts, mut beamformers, mut scifi40s) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
+            if let Some((c, enabled, v)) = script(prefab, o, "BlasterBehaviour") {
+                let mut x = super::blaster::Blaster::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("BlasterBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+                let bolt = field(v, "Bolt")?.pptr().ok_or("BlasterBehaviour.Bolt")?;
+                if !bolt.is_null() {
+                    let r = db.resolve(file, bolt).ok_or("BlasterBehaviour.Bolt outside the data")?;
+                    // The bolt's pose is the script's: Transform.right and position on a bare Transform.
+                    if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("BlasterBehaviour: a Bolt with physics (its pose)");
+                    }
+                    x.Bolt = Some(r);
+                }
+                x.Clips = array(v, "Clips")?.len();
+                x.ScreenShakeMultiplier = float(v, "ScreenShakeMultiplier")?;
+                blasters.insert(o, self.blasters.len());
+                self.blasters.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "BlasterboltBehaviour") {
+                let mut x = super::blaster::Blasterbolt::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.layers = field(field(v, "layers")?, "m_Bits")?.i64().ok_or("BlasterboltBehaviour.layers.m_Bits")? as u32;
+                for (name, slot) in [("ImpactEffect", &mut x.ImpactEffect), ("HitDecal", &mut x.HitDecal)] {
+                    let p = field(v, name)?.pptr().ok_or(name)?;
+                    if !p.is_null() {
+                        let r = db.resolve(file, p).ok_or_else(|| format!("BlasterboltBehaviour.{name} outside the data"))?;
+                        if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                            unimplemented!("BlasterboltBehaviour: an {name} with physics (its pose)");
+                        }
+                        *slot = Some(r);
+                    }
+                }
+                let decal = field(v, "ImpactDecal")?.pptr().ok_or("BlasterboltBehaviour.ImpactDecal")?;
+                if !decal.is_null() {
+                    let r = db.resolve(file, decal).ok_or("BlasterboltBehaviour.ImpactDecal outside the data")?;
+                    x.ImpactDecal = Some(self.load_decal_descriptor(db, r)?);
+                }
+                if prefab.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                    unimplemented!("BlasterboltBehaviour on a prefab with physics (its pose)");
+                }
+                blasterbolts.insert(o, self.blasterbolts.len());
+                self.blasterbolts.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "BeamformerBehaviour") {
+                let mut x = super::scifi::Beamformer::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.phys = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("BeamformerBehaviour without a PhysicalBehaviour (NullReferenceException)"));
+                x.LayersToHit = field(field(v, "LayersToHit")?, "m_Bits")?.i64().ok_or("BeamformerBehaviour.LayersToHit.m_Bits")? as i32;
+                // Start: BeamLineRenderer.gameObject.SetActive(false) must only hide a line.
+                let line = field(v, "BeamLineRenderer")?.pptr().ok_or("BeamformerBehaviour.BeamLineRenderer")?;
+                let (lo, _) = *prefab.index.get(&ObjRef { file, path_id: line.path_id }).filter(|_| line.file == 0 && !line.is_null()).ok_or("BeamformerBehaviour.BeamLineRenderer outside the prefab")?;
+                if std::iter::once(lo).chain(inst.descendants(lo)).any(|d| prefab.objects[d].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)) || matches!(c, Component::Script { class, .. } if super::declares(class, "OnEnable") || super::declares(class, "OnDisable")))) {
+                    unimplemented!("BeamformerBehaviour.BeamLineRenderer on a GameObject with physics or an OnEnable/OnDisable script");
+                }
+                beamformers.insert(o, self.beamformers.len());
+                self.beamformers.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "GenericScifiWeapon40Behaviour") {
+                let mut x = super::scifi::Scifi40::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("GenericScifiWeapon40Behaviour without a PhysicalBehaviour (NullReferenceException)"));
+                x.LayersToHit = field(field(v, "LayersToHit")?, "m_Bits")?.i64().ok_or("GenericScifiWeapon40Behaviour.LayersToHit.m_Bits")? as u32;
+                // Rigidbody is the physical's own Rigidbody2D.
+                let rb = field(v, "Rigidbody")?.pptr().ok_or("GenericScifiWeapon40Behaviour.Rigidbody")?;
+                let own = prefab.index.get(&ObjRef { file, path_id: rb.path_id }).filter(|_| rb.file == 0 && !rb.is_null()).is_some_and(|&(ro, rc)| ro == o && matches!(prefab.objects[ro].components[rc].1, Component::Rigidbody2D(_)));
+                if !own {
+                    unimplemented!("GenericScifiWeapon40Behaviour.Rigidbody that is not the Rigidbody2D of its own GameObject");
+                }
+                let impact = field(v, "Impact")?.pptr().ok_or("GenericScifiWeapon40Behaviour.Impact")?;
+                if !impact.is_null() {
+                    let r = db.resolve(file, impact).ok_or("GenericScifiWeapon40Behaviour.Impact outside the data")?;
+                    if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("GenericScifiWeapon40Behaviour: an Impact with physics (its pose)");
+                    }
+                    x.Impact = Some(r);
+                }
+                scifi40s.insert(o, self.scifi40s.len());
+                self.scifi40s.push(x);
+            }
+        }
+        // A UnityEvent of persistent calls: ExplosiveBehaviour.Activate (the mine), FirearmBehaviour.Shoot,
+        // ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, BlasterBehaviour.Shoot,
+        // BeamformerBehaviour.Shoot, GenericScifiWeapon40Behaviour.Fire and PhysicalBehaviour.ForceSendUse, audio and particles.
+        // `machinery` is `Game::machinery.len()` before this clone's DamagableMachineryBehaviours.
+        let act_targets = |actions: &Value, machinery: usize, what: &str| -> Result<Vec<super::acts::ActTarget>, String> {
+            use super::acts::ActTarget;
+            let mut targets = Vec::new();
+            for call in invoked_calls(actions) {
+                let method = string(call, "m_MethodName")?;
+                let class_of = |to: usize, tc: usize| match &prefab.objects[to].components[tc].1 {
+                    Component::Script { class, .. } => class.as_str(),
+                    _ => "",
+                };
+                match call_target(prefab, file, call) {
+                    Some((to, tc)) if class_of(to, tc) == "ExplosiveBehaviour" && method == "Activate" => targets.push(ActTarget::Activate(explosives[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "FirearmBehaviour" && method == "Shoot" => targets.push(ActTarget::Shoot(firearms[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "ProjectileLauncherBehaviour" && method == "Launch" => targets.push(ActTarget::Launch(launchers[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "DamagableMachineryBehaviour" && method == "ForceBreak" => {
+                        // The machinery loop below pushes this clone's DamagableMachineryBehaviours in object order.
+                        let before = (0..to).filter(|&x| script(prefab, x, "DamagableMachineryBehaviour").is_some()).count();
+                        targets.push(ActTarget::ForceBreak(machinery + before));
+                    }
+                    Some((to, tc)) if class_of(to, tc) == "BlasterBehaviour" && method == "Shoot" => targets.push(ActTarget::Blast(blasters[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "BeamformerBehaviour" && method == "Shoot" => targets.push(ActTarget::Beam(beamformers[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "GenericScifiWeapon40Behaviour" && method == "Fire" => targets.push(ActTarget::Fire(scifi40s[&to])),
+                    Some((to, tc)) if class_of(to, tc) == "PhysicalBehaviour" && method == "ForceSendUse" => targets.push(ActTarget::ForceSendUse(l.arenas.physical[&to])),
+                    _ if presentation_call(prefab, file, call) => {}
+                    _ => unimplemented!("{what}.Actions: a persistent call beyond ExplosiveBehaviour.Activate, FirearmBehaviour.Shoot, ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, BlasterBehaviour.Shoot, BeamformerBehaviour.Shoot, GenericScifiWeapon40Behaviour.Fire, PhysicalBehaviour.ForceSendUse, audio and particles ({method})"),
+                }
+            }
+            Ok(targets)
+        };
+        let (mut buttons, mut displays, mut lasers) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let mut firearm_attachments = HashMap::new();
+        let mut attachment_points: HashMap<usize, usize> = HashMap::new();
+        let mut televisions = HashMap::new();
+        for o in 0..n {
+            if let Some((c, _, v)) = script(prefab, o, "ButtonBehaviour") {
+                let mut x = super::button::Button::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                // FixedUpdate's press sends and the continuous listener's sends reach this object's receivers only.
+                if prefab.objects[o].components.iter().any(|(_, comp)| matches!(comp, Component::Script { class, .. } if class == "UseWireBehaviour" || super::translated::receives(class, "IsolatedActivation") || super::translated::receives(class, "IsolatedContinuousActivation"))) {
+                    unimplemented!("ButtonBehaviour: IsolatedActivation or IsolatedContinuousActivation to a receiver on its own object");
+                }
+                let file = prefab.objects[o].game_object.file;
+                let slider = field(v, "slider")?.pptr().filter(|p| !p.is_null()).unwrap_or_else(|| unimplemented!("ButtonBehaviour.slider is null (NullReferenceException)"));
+                assert_eq!(slider.file, 0, "ButtonBehaviour.slider outside its prefab");
+                let (so, sc) = prefab.index[&ObjRef { file, path_id: slider.path_id }];
+                if !matches!(&prefab.objects[so].components[sc].1, Component::Joint2D(j) if matches!(j.kind, JointKind::Slider { .. })) {
+                    unimplemented!("ButtonBehaviour.slider is not a SliderJoint2D");
+                }
+                (x.slider_object, x.slider_component) = (so, sc);
+                buttons.insert(o, self.buttons.len());
+                self.buttons.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "DisplayBehaviour") {
+                let mut x = super::display::Display::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Value = string(v, "Value")?;
+                x.randomStartStrings = array(v, "randomStartStrings")?
+                    .iter()
+                    .map(|s| match s {
+                        Value::Str(s) => Ok(s.clone()),
+                        _ => Err("DisplayBehaviour.randomStartStrings: not a string".to_string()),
+                    })
+                    .collect::<Result<_, String>>()?;
+                // The Edit text dialog's DontMindMe events: audio is presentation, and a ForceBreak runs through act_targets.
+                x.DontMindMe = array(v, "DontMindMe")?
+                    .iter()
+                    .map(|e| Ok(super::display::EasterEgg { Match: string(e, "Match")?, Event: act_targets(field(e, "Event")?, self.machinery.len(), "DisplayBehaviour.DontMindMe")? }))
+                    .collect::<Result<_, String>>()?;
+                displays.insert(o, self.displays.len());
+                self.displays.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "LaserBehaviour") {
+                let mut x = super::laser::Laser::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("LaserBehaviour.PhysicalBehaviour is null")?;
+                x.LayersToHit = field(field(v, "LayersToHit")?, "m_Bits")?.i64().ok_or("LaserBehaviour.LayersToHit.m_Bits")? as u32;
+                lasers.insert(o, self.lasers.len());
+                self.lasers.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TelevisionBehaviour") {
+                let mut x = super::television::Television::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).ok_or("TelevisionBehaviour without a PhysicalBehaviour (GetComponent is null)")?;
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                x.break_sounds = array(v, "BreakSounds")?.len();
+                televisions.insert(o, self.televisions.len());
+                self.televisions.push(x);
+            }
+            for class in super::attachment::CLASSES {
+                if let Some((c, enabled, v)) = script(prefab, o, class) {
+                    let mut x = super::attachment::FirearmAttachment::default();
+                    load_values(x.fields(), v)?;
+                    x.id = inst.objects[o].components[c];
+                    x.enabled = enabled;
+                    x.physical = l.arenas.physical.get(&o).copied();
+                    x.laser = lasers.get(&o).copied();
+                    let int = |name: &str| field(v, name)?.i64().map(|x| x as i32).ok_or_else(|| format!("{name}: not an integer"));
+                    (x.kind, ()) = match class {
+                        "ScopeAttachmentBehaviour" => {
+                            x.AccuracyPercent = int("AccuracyPercent")?;
+                            (super::attachment::Kind::Scope, ())
+                        }
+                        "BatteryAttachmentBehaviour" => {
+                            x.BaseCharge = float(v, "BaseCharge")?;
+                            (super::attachment::Kind::Battery, ())
+                        }
+                        "ExplosiveAttachmentBehaviour" => {
+                            x.ExplosionParams = explosion_parameters(field(v, "ExplosionParams")?)?;
+                            (super::attachment::Kind::Explosive, ())
+                        }
+                        "FlashlightAttachmentBehaviour" => (super::attachment::Kind::Flashlight, ()),
+                        _ => {
+                            x.FireChance = int("FireChance")?;
+                            (super::attachment::Kind::Incendiary, ())
+                        }
+                    };
+                    // GetLocalJointAnchor reads the SpriteRenderer's sprite rect height.
+                    let renderer = prefab.objects[o].components.iter().find_map(|(_, x)| match x {
+                        Component::SpriteRenderer(r) => Some(r),
+                        _ => None,
+                    });
+                    if let Some(r) = renderer {
+                        let sprite = db.resolve(file, r.sprite).ok_or("a SpriteRenderer without a sprite")?;
+                        x.sprite_height = Sprite::read(db.data(sprite))?.rect[3];
+                    }
+                    firearm_attachments.insert(o, self.firearm_attachments.len());
+                    self.firearm_attachments.push(x);
+                }
+            }
+            if let Some((c, _, v)) = script(prefab, o, "FirearmAttachmentPointBehaviour") {
+                // Start: firearmBehaviour = transform.parent.GetComponent<FirearmBehaviour>().
+                let firearm = prefab.objects[o].parent.and_then(|t| firearms.get(&t).copied());
+                let colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, x))| matches!(x, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                attachment_points.insert(o, self.attachment_points.len());
+                self.attachment_points.push(super::attachment::AttachmentPoint { id: inst.objects[o].components[c], colliders, AttachmentType: field(v, "AttachmentType")?.i64().ok_or("AttachmentType")? as i32, firearm, ..Default::default() });
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ActOnShot") {
+                let mut x = super::acts::ActOnShot::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.targets = act_targets(field(v, "Actions")?, self.machinery.len(), "ActOnShot")?;
+                self.act_on_shots.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "ActOnCollide") {
                 let mut x = super::acts::ActOnCollide::default();
                 load_values(x.fields(), v)?;
@@ -1186,27 +1587,7 @@ impl Game {
                     let (co, cc) = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).filter(|_| p.file == 0).ok_or("ActOnCollide.Collider outside the prefab")?;
                     x.Collider = Some(inst.objects[co].components[cc]);
                 }
-                // Actions: ExplosiveBehaviour.Activate (the mine), audio and particles.
-                for call in invoked_calls(field(v, "Actions")?) {
-                    match call_target(prefab, file, call) {
-                        Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "ExplosiveBehaviour") && string(call, "m_MethodName")? == "Activate" => {
-                            x.targets.push(super::acts::ActTarget::Activate(explosives[&to]));
-                        }
-                        Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "FirearmBehaviour") && string(call, "m_MethodName")? == "Shoot" => {
-                            x.targets.push(super::acts::ActTarget::Shoot(firearms[&to]));
-                        }
-                        Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "ProjectileLauncherBehaviour") && string(call, "m_MethodName")? == "Launch" => {
-                            x.targets.push(super::acts::ActTarget::Launch(launchers[&to]));
-                        }
-                        Some((to, tc)) if matches!(&prefab.objects[to].components[tc].1, Component::Script { class, .. } if class == "DamagableMachineryBehaviour") && string(call, "m_MethodName")? == "ForceBreak" => {
-                            // The machinery loop below pushes this clone's DamagableMachineryBehaviours in object order.
-                            let before = (0..to).filter(|&x| script(prefab, x, "DamagableMachineryBehaviour").is_some()).count();
-                            x.targets.push(super::acts::ActTarget::ForceBreak(self.machinery.len() + before));
-                        }
-                        _ if presentation_call(prefab, file, call) => {}
-                        _ => unimplemented!("ActOnCollide.Actions: a persistent call beyond ExplosiveBehaviour.Activate, FirearmBehaviour.Shoot, ProjectileLauncherBehaviour.Launch, DamagableMachineryBehaviour.ForceBreak, audio and particles ({})", string(call, "m_MethodName")?),
-                    }
-                }
+                x.targets = act_targets(field(v, "Actions")?, self.machinery.len(), "ActOnCollide")?;
                 act_on_collides.insert(o, self.act_on_collides.len());
                 self.act_on_collides.push(x);
             }
@@ -1442,6 +1823,9 @@ impl Game {
         let mut soaps = HashMap::new();
         let mut power_hammers = HashMap::new();
         let mut balloons = HashMap::new();
+        let (mut metronomes, mut thermometers, mut infrared_thermometers) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let (mut activation_toggles, mut power_gauges) = (HashMap::new(), HashMap::new());
+        let (mut torches, mut flares) = (HashMap::new(), HashMap::new());
         let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers, mut rockets) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let (mut generators, mut floodlights, mut spike_grenades, mut heating_elements, mut ray_guns) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         for o in 0..n {
@@ -1699,6 +2083,94 @@ impl Game {
                 x.PoppedEffect = inst.objects[effect].components[0];
                 balloons.insert(o, self.balloons.len());
                 self.balloons.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "MetronomeBehaviour") {
+                let mut x = super::metronome::Metronome::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.phys = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("MetronomeBehaviour.PhysicalBehaviour is null")?;
+                // Its ticks SendMessage IsolatedActivation to this object: a receiver on it is not rewritten.
+                if prefab.objects[o].components.iter().any(|(_, comp)| matches!(comp, Component::Script { class, .. } if class == "UseWireBehaviour" || super::translated::receives(class, "IsolatedActivation"))) {
+                    unimplemented!("MetronomeBehaviour: IsolatedActivation to a receiver on its own object");
+                }
+                metronomes.insert(o, self.metronomes.len());
+                self.metronomes.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ThermometerBehaviour") {
+                let mut x = super::thermometer::Thermometer::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                thermometers.insert(o, self.thermometers.len());
+                self.thermometers.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "InfraredThermometer") {
+                let mut x = super::thermometer::InfraredThermometer::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).ok_or("InfraredThermometer without a PhysicalBehaviour (NullReferenceException)")?;
+                let mut at = l.object(field(v, "RayPoint")?)?.ok_or("InfraredThermometer.RayPoint is null")?;
+                while at != o {
+                    x.RayPoint.push(inst.objects[at].trs);
+                    at = inst.objects[at].parent.ok_or("InfraredThermometer.RayPoint is outside the thermometer")?;
+                }
+                if x.RayPoint.is_empty() {
+                    unimplemented!("InfraredThermometer.RayPoint on the thermometer's own object");
+                }
+                x.LayersToHit = field(field(v, "LayersToHit")?, "m_Bits")?.i64().ok_or("InfraredThermometer.LayersToHit.m_Bits")? as u32;
+                infrared_thermometers.insert(o, self.infrared_thermometers.len());
+                self.infrared_thermometers.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ActivationToggleBehaviour") {
+                let mut x = super::activation_toggle::ActivationToggle::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).ok_or("ActivationToggleBehaviour without a PhysicalBehaviour (GetComponent is null)")?;
+                x.light = l.object(field(v, "LightObject")?)?.ok_or("ActivationToggleBehaviour.LightObject is null")?;
+                // Its ContinuousActivation listener sends IsolatedContinuousActivation to this object: a receiver there is not rewritten.
+                if prefab.objects[o].components.iter().any(|(_, comp)| matches!(comp, Component::Script { class, .. } if class == "UseWireBehaviour" || super::translated::receives(class, "IsolatedContinuousActivation"))) {
+                    unimplemented!("ActivationToggleBehaviour: IsolatedContinuousActivation to a receiver on its own object");
+                }
+                activation_toggles.insert(o, self.activation_toggles.len());
+                self.activation_toggles.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "PowerGaugeBehaviour") {
+                let mut x = super::gauge::PowerGauge::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                let file = prefab.objects[o].game_object.file;
+                let label = field(v, "GaugeLabelPrefab")?.pptr().ok_or("GaugeLabelPrefab")?;
+                x.label = if label.is_null() { None } else { Some(db.resolve(file, label).ok_or("PowerGaugeBehaviour.GaugeLabelPrefab outside the data")?) };
+                x.center = l.object(field(v, "GaugeCenter")?)?.ok_or("PowerGaugeBehaviour.GaugeCenter is null")?;
+                power_gauges.insert(o, self.power_gauges.len());
+                self.power_gauges.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TorchBehaviour") {
+                let mut x = super::torch::Torch::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied();
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                x.colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, comp))| matches!(comp, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                torches.insert(o, self.torches.len());
+                self.torches.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "FlareBehaviour") {
+                let mut x = super::flare::Flare::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                let file = prefab.objects[o].game_object.file;
+                let torch = field(v, "TorchBehaviour")?.pptr().filter(|p| !p.is_null()).ok_or("FlareBehaviour.TorchBehaviour is null")?;
+                let (to, tc) = prefab.index[&ObjRef { file, path_id: torch.path_id }];
+                x.torch = inst.objects[to].components[tc];
+                flares.insert(o, self.flares.len());
+                self.flares.push(x);
             }
         }
         let mut fire_maps = HashMap::new();
@@ -2052,7 +2524,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, syringes, jet_engines, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, blasters, blasterbolts, beamformers, scifi40s, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -2068,10 +2540,13 @@ impl Game {
         let mut linked = self.link_instance(db, prefab, &inst)?;
         linked.parent_audio = parent_audio;
         // GetHashCode (Random.InitState in PhysicalBehaviour.Start) is Mono's object hash, (address >> 3) *
-        // 0x9e3779b1 (mono_object_hash, 180116520), of a managed heap address that differs per run in the game too.
-        // A PhysicalBehaviour is a Boehm large object, 2048-aligned (every recorded hash has a zero low byte).
+        // 0x9e3779b1 (mono_object_hash, 180116520), of the managed heap address. That address is not defined by the
+        // game: it varies from run to run with the OS's heap placement. The rewrite must not (the same input gives the
+        // same frames), so the address is modelled: Boehm hands out large objects upward from the heap base, so the
+        // n-th PhysicalBehaviour sits `n` objects above it. A PhysicalBehaviour is a large object, 2048-aligned (every
+        // recorded hash has a zero low byte). Recorded runs (dump.rs) carry the real hash instead.
         for p in first..self.physicals.len() {
-            let address = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), p) << 11;
+            let address = self.heap_base.unwrap_or(MODELLED_HEAP_BASE) + ((p as u64) << 11);
             self.physicals[p].hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         }
         self.awake_behaviours(prefab, &mut inst, &linked, &behaviours);
@@ -2398,6 +2873,15 @@ impl Game {
                             "SpikeGrenadeBehaviour" => self.spike_grenade_on_disable(linked.spike_grenades[&d]),
                             "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
                             "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
+                            "MetronomeBehaviour" => self.metronome_on_disable(linked.metronomes[&d]),
+                            "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
+                            "ActivationToggleBehaviour" => self.activation_toggle_on_disable(linked.activation_toggles[&d]),
+                            "DisplayBehaviour" => self.display_on_disable(linked.displays[&d]),
+                            // OnDisable only hides the light (button.rs).
+                            "ButtonBehaviour" => {}
+                            "LaserBehaviour" => {}
+                            // OnDisable only hides the readout (TextMesh and Light).
+                            "ThermometerBehaviour" => {}
                             // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
                             "ActivateIfTutorial" | "ActivateIfFancyEffects" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "DebrisComponent" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
                             name if super::translated::CLASSES.contains(&name) => self.tr_on_disable(linked.translated[&(d, k)]),
@@ -2429,7 +2913,19 @@ impl Game {
                 "LiquidContainerController" => self.liquid_container_awake(linked.liquid_containers[&o]),
                 // No Awake; its OnEnable follows here.
                 "ColorWave" if *enabled => self.color_wave_on_enable(),
+                // OnEnable while the instance is still being built: its colliders come from the instance in hand.
+                "TorchBehaviour" if *enabled => {
+                    let colliders = Game::torch_child_colliders(inst, o);
+                    self.torch_enable_contacts(linked.torches[&o], colliders);
+                }
                 "DetectorBehaviour" => self.detector_awake(linked.detectors[&o]),
+                "TelevisionBehaviour" => self.television_awake(linked.televisions[&o]),
+                "FirearmAttachmentBehaviour" | "ScopeAttachmentBehaviour" | "BatteryAttachmentBehaviour" | "ExplosiveAttachmentBehaviour" | "FlashlightAttachmentBehaviour" | "IncendiaryAttachmentBehaviour" => self.firearm_attachment_awake(),
+                "DisplayBehaviour" => self.display_awake(linked.displays[&o]),
+                // offset = Random.Range(-1f, 1f) * 1500f: only OnWillRenderObject reads it.
+                "HologramJitter" => {
+                    self.random.range(-1.0, 1.0);
+                }
                 "PersonBehaviour" => {
                     if let Some(s) = self.person_awake(linked.person.unwrap()) {
                         inst.set_local_scale(0, s);
@@ -2455,6 +2951,7 @@ impl Game {
                 }
                 "GearBehaviour" => self.gear_awake(inst.objects[o].components[c]),
                 "LaunchedRocketBehaviour" => self.rocket_awake(linked.rockets[&o]),
+                "GenericScifiWeapon40Behaviour" => self.scifi40_awake(),
                 "AirfoilBehaviour" => self.airfoil_awake(linked.airfoils[&o]),
                 "DestroyWhenAllChildrenDestroyed" => {
                     let Component::Script { fields: v, .. } = &prefab.objects[o].components[c].1 else { unreachable!() };
@@ -2557,6 +3054,9 @@ impl Game {
                 "ProjectileLauncherBehaviour" => Some(Behaviour::Launcher(linked.launchers[&o])),
                 "BellBehaviour" => Some(Behaviour::Bell(linked.bells[&o])),
                 "MachineGunBehaviour" => Some(Behaviour::MachineGun(linked.machine_guns[&o])),
+                "MinigunBehaviour" => Some(Behaviour::Minigun(linked.miniguns[&o])),
+                "AcceleratorGunBehaviour" => Some(Behaviour::Accelerator(linked.accelerators[&o])),
+                "AcceleratorBoltBehaviour" => Some(Behaviour::AcceleratorBolt(linked.accelerator_bolts[&o])),
                 "ExplosiveBehaviour" => Some(Behaviour::Explosive(linked.explosives[&o])),
                 "DeleteAfterTime" => Some(Behaviour::DeleteAfter(linked.delete_afters[&o])),
                 "PointToVelocityBehaviour" => Some(Behaviour::PointToVelocity(linked.point_to_velocities[&o])),
@@ -2583,7 +3083,22 @@ impl Game {
                 "AirfoilBehaviour" => Some(Behaviour::Airfoil(linked.airfoils[&o])),
                 "StunnerBehaviour" => Some(Behaviour::Stunner(linked.stunners[&o])),
                 "BalloonBehaviour" => Some(Behaviour::Balloon(linked.balloons[&o])),
+                "TorchBehaviour" => Some(Behaviour::Torch(linked.torches[&o])),
+                "FlareBehaviour" => Some(Behaviour::Flare(linked.flares[&o])),
+                "ButtonBehaviour" => Some(Behaviour::Button(linked.buttons[&o])),
+                "DisplayBehaviour" => Some(Behaviour::Display(linked.displays[&o])),
+                "BatteryAttachmentBehaviour" => Some(Behaviour::BatteryAttachment(linked.firearm_attachments[&o])),
+                "TelevisionBehaviour" => Some(Behaviour::Television(linked.televisions[&o])),
+                "ScopeAttachmentBehaviour" | "ExplosiveAttachmentBehaviour" | "FlashlightAttachmentBehaviour" | "IncendiaryAttachmentBehaviour" => Some(Behaviour::FirearmAttachment(linked.firearm_attachments[&o])),
+                "LaserBehaviour" => Some(Behaviour::Laser(linked.lasers[&o])),
+                "MetronomeBehaviour" => Some(Behaviour::Metronome(linked.metronomes[&o])),
+                "ThermometerBehaviour" => Some(Behaviour::Thermometer(linked.thermometers[&o])),
+                "InfraredThermometer" => Some(Behaviour::InfraredThermometer(linked.infrared_thermometers[&o])),
                 "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
+                "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
+                "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
+                "BeamformerBehaviour" => Some(Behaviour::Beamformer(linked.beamformers[&o])),
+                "GenericScifiWeapon40Behaviour" => Some(Behaviour::Scifi40(linked.scifi40s[&o])),
                 "SignalConverterBehaviour" => Some(Behaviour::SignalConverter(linked.signal_converters[&o])),
                 c if super::syringe::is_syringe(c) => Some(Behaviour::Syringe(linked.syringes[&o])),
                 "PointLiquidTransferBehaviour" => Some(Behaviour::PointLiquid(linked.point_liquids[&o])),
@@ -2725,7 +3240,7 @@ impl Game {
                 "MachineGunBehaviour" => PendingStart::MachineGun(linked.machine_guns[&o]),
                 "FirearmAttachmentPointBehaviour" => {
                     if field(v, "FirearmAttachment")?.pptr().is_some_and(|p| !p.is_null()) {
-                        unimplemented!("FirearmAttachmentPointBehaviour.Start with a FirearmAttachment");
+                        unimplemented!("FirearmAttachmentPointBehaviour.Start with a FirearmAttachment (ConnectAttachment's Transform.SetParent is not rewritten)");
                     }
                     PendingStart::FirearmAttachmentPoint
                 }
@@ -2734,6 +3249,7 @@ impl Game {
                 "SyringeExplosionBehaviour" => PendingStart::SyringeExplosion(linked.syringe_explosions[&o]),
                 "LiquidContainerController" => PendingStart::LiquidContainer(linked.liquid_containers[&o]),
                 "DetectorBehaviour" => PendingStart::Detector(linked.detectors[&o]),
+                "LaserBehaviour" => PendingStart::Laser(linked.lasers[&o]),
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
@@ -2757,6 +3273,12 @@ impl Game {
                 "IgnoreParentSize" => PendingStart::IgnoreParentSize(inst.objects[o].components[c]),
                 "RandomSpriteBehaviour" => PendingStart::RandomSprite(linked.random_sprites[&o]),
                 "AirfoilBehaviour" => PendingStart::Airfoil(linked.airfoils[&o]),
+                "MetronomeBehaviour" => PendingStart::Metronome(linked.metronomes[&o]),
+                "MaintainScaleSignBehaviour" => PendingStart::MaintainScale(inst.objects[o].components[c]),
+                "ActivationToggleBehaviour" => PendingStart::ActivationToggle(linked.activation_toggles[&o]),
+                "PowerGaugeBehaviour" => PendingStart::PowerGauge(linked.power_gauges[&o]),
+                // A Signal Flare that starts Activated enables its TorchBehaviour (not rewritten); otherwise Start does nothing.
+                "FlareBehaviour" => PendingStart::Flare(linked.flares[&o]),
                 // CameraControlBehaviour takes the box.
                 "BoundingBoxBehaviour" => PendingStart::BoundingBox(map_bounds(v)?),
                 "MapConfig" => {

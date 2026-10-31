@@ -881,9 +881,8 @@ impl Game {
         self.chunk_near(ph.transform.position, ph.ObjectArea / 2.0)
     }
 
-    /// Global.GetPhysicsObjectsNear. The game's iterator reads the chunk live; nothing in
-    /// AffectSurroundings changes chunk membership, so a copy is the same.
-    fn physics_objects_near(&mut self, me: usize) -> Vec<usize> {
+    /// Global.UpdatePhysicalBehaviourChunks, when the chunks are stale.
+    fn refresh_physical_chunks(&mut self) {
         if !self.chunksUpToDate {
             for chunk in self.physical_chunks.values_mut() {
                 chunk.clear();
@@ -899,6 +898,21 @@ impl Game {
             }
             self.chunksUpToDate = true;
         }
+    }
+
+    /// Global.GetPhysicsObjectsNearPosition(position, radius): the chunk GetChunkNear picks (its draw included), the
+    /// objects in it that are not disintegrated.
+    pub(super) fn physics_objects_near_position(&mut self, position: [f32; 2], radius: f32) -> Vec<usize> {
+        self.refresh_physical_chunks();
+        let key = self.chunk_near([position[0], position[1], 0.0], radius);
+        let Some(chunk) = self.physical_chunks.get(&key) else { return Vec::new() };
+        chunk.iter().copied().filter(|&o| !self.physicals[o].isDisintegrated).collect()
+    }
+
+    /// Global.GetPhysicsObjectsNear. The game's iterator reads the chunk live; nothing in
+    /// AffectSurroundings changes chunk membership, so a copy is the same.
+    fn physics_objects_near(&mut self, me: usize) -> Vec<usize> {
+        self.refresh_physical_chunks();
         let key = self.chunk_of(me);
         let Some(chunk) = self.physical_chunks.get(&key) else { return Vec::new() };
         chunk.iter().copied().filter(|&o| o != me && !self.physicals[o].isDisintegrated).collect()
@@ -1412,6 +1426,11 @@ impl Game {
         let body = self.physicals[p].rigidbody.body;
         self.world.deactivate_body(body);
         self.physicals[p].rigidbody.simulated = false;
+        // SetActive(false) deactivates the clones parented under it too (their Renderers are presentation).
+        if !self.attached_clones.is_empty() {
+            let id = self.physicals[p].transform_id;
+            self.with_component_instance(id, |g, inst, o| g.attached_set_active(inst, o, false));
+        }
         self.deactivate(p);
         self.physicals[p].isDisintegrated = true;
         // InvokeOnItemRemoved: the modding event only.

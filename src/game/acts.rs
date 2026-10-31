@@ -66,6 +66,29 @@ pub enum ActTarget {
     Launch(usize),
     /// DamagableMachineryBehaviour.ForceBreak (`Game::machinery`)
     ForceBreak(usize),
+    /// BlasterBehaviour.Shoot (`Game::blasters`)
+    Blast(usize),
+    /// BeamformerBehaviour.Shoot (`Game::beamformers`)
+    Beam(usize),
+    /// GenericScifiWeapon40Behaviour.Fire (`Game::scifi40s`)
+    Fire(usize),
+    /// PhysicalBehaviour.ForceSendUse (`Game::physicals`)
+    ForceSendUse(usize),
+}
+
+script! {
+    ActOnShot {
+        ShotDamageThreshold: f32 = 0.0,
+        CartridgeDamageThreshold: f32 = 0.0,
+        Chance: f32 = 1.0,
+    }
+    links {
+        /// The component's instance id.
+        id: i32 = 0,
+        enabled: bool = true,
+        /// Actions: what it calls, in order.
+        targets: Vec<ActTarget> = Vec::new(),
+    }
 }
 
 /// A script that takes a physical object's collision messages besides the PhysicalBehaviour and LimbBehaviour.
@@ -80,6 +103,10 @@ pub enum CollisionScript {
     PowerHammer(usize),
     /// BalloonBehaviour: OnCollisionStay2D only.
     Balloon(usize),
+    /// TorchBehaviour: OnCollisionEnter2D and OnCollisionExit2D.
+    Torch(usize),
+    /// TelevisionBehaviour: OnCollisionEnter2D (television.rs).
+    Television(usize),
     Translated(super::translated::TBehaviour),
 }
 
@@ -94,6 +121,8 @@ impl Game {
             CollisionScript::Soap(s) => self.soap_on_collision_enter(s, c),
             CollisionScript::PowerHammer(h) => self.power_hammer_on_collision_enter(h, c),
             CollisionScript::Balloon(_) => {}
+            CollisionScript::Torch(t) => self.torch_on_collision_enter(t, c),
+            CollisionScript::Television(t) => self.television_on_collision_enter(t, c),
             CollisionScript::Translated(t) => self.tr_on_collision_enter2d(t, c),
         }
     }
@@ -113,6 +142,9 @@ impl Game {
         if let CollisionScript::Translated(t) = s {
             self.tr_on_collision_exit2d(t, c);
         }
+        if let CollisionScript::Torch(t) = s {
+            self.torch_on_collision_exit(t, c);
+        }
     }
 
     /// ActOnCollide.OnCollisionEnter2D: GetContacts fills the 4-entry buffer.
@@ -127,12 +159,38 @@ impl Game {
         let s = &self.act_on_collides[a];
         if s.Collider.is_none_or(|x| c.other_collider == x) && get_average_impulse_remove_outliers(&buffer, contacts) > s.ImpactForceThreshold {
             for t in s.targets.clone() {
-                match t {
-                    ActTarget::Activate(e) => self.explosive_activate(e),
-                    ActTarget::Shoot(f) => self.firearm_shoot(f),
-                    ActTarget::Launch(l) => self.launcher_launch(l),
-                    ActTarget::ForceBreak(m) => self.machinery_force_break(m),
-                }
+                self.run_act_target(t);
+            }
+        }
+    }
+
+    /// One persistent call of an Actions event.
+    pub(super) fn run_act_target(&mut self, t: ActTarget) {
+        match t {
+            ActTarget::Activate(e) => self.explosive_activate(e),
+            ActTarget::Shoot(f) => self.firearm_shoot(f),
+            ActTarget::Launch(l) => self.launcher_launch(l),
+            ActTarget::ForceBreak(m) => self.machinery_force_break(m),
+            ActTarget::Blast(b) => self.blaster_shoot(b),
+            ActTarget::Beam(b) => self.beamformer_shoot(b),
+            ActTarget::Fire(f) => self.scifi40_fire(f),
+            ActTarget::ForceSendUse(p) => self.physical_force_send_use(p),
+        }
+    }
+
+    /// ActOnShot.Shot. Shot.cartridge is not passed to SendMessage("Shot") here: a CartridgeDamageThreshold above 0
+    /// would need it (an absent or non-negative Damage passes a threshold of 0).
+    pub(super) fn act_on_shot_shot(&mut self, a: usize, damage: f32) {
+        let s = &self.act_on_shots[a];
+        if !s.enabled || !(damage >= s.ShotDamageThreshold) {
+            return;
+        }
+        if s.CartridgeDamageThreshold > 0.0 {
+            unimplemented!("ActOnShot.Shot: a CartridgeDamageThreshold above 0 (Shot.cartridge is not carried)");
+        }
+        if self.random.value() <= self.act_on_shots[a].Chance {
+            for t in self.act_on_shots[a].targets.clone() {
+                self.run_act_target(t);
             }
         }
     }

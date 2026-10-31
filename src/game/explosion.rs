@@ -555,7 +555,16 @@ impl Game {
 
     /// ExplosionCreator.CreatePulseExplosion(position, force, range, soundAndEffects: false, breakObjects: false)
     pub(super) fn create_pulse_explosion(&mut self, position: [f32; 3], force: f32, range: f32) {
+        self.create_pulse_explosion_with(position, force, range, false, false);
+    }
+
+    /// ExplosionCreator.CreatePulseExplosion(position, force, range, soundAndEffects, breakObjects)
+    pub(super) fn create_pulse_explosion_with(&mut self, position: [f32; 3], force: f32, range: f32, sound_and_effects: bool, break_objects: bool) {
         self.camera_shake((d(force) * range * 2.0f32).f(), [position[0], position[1]]);
+        if sound_and_effects {
+            // Instantiate(GetEffectPrefabForSize(EffectSize.Medium), position, identity)
+            self.spawn_resource("Prefabs/Explosion", position);
+        }
         // OverlapCircleNonAlloc into the 64-entry hitBuffer: Objects, Debris, CollidingDebris.
         let hits = self.overlap_circle(V::new(position[0], position[1]), range, (1 << 9) | (1 << 10) | (1 << 13));
         if hits.len() > 64 {
@@ -575,6 +584,11 @@ impl Game {
             let num3 = (d(force) / mathf::max(1.0, (d(sqr) / (d(range) * range)).f()) * 3.0f32).f();
             let num4 = mathf::min(rb.mass(&self.world), 1.0);
             rb.add_force_impulse(&mut self.world, [num3 * dir[0] * num4, num3 * dir[1] * num4]);
+            if break_objects && self.random.range_int(0, 10) as f32 > force {
+                // collider2D.BroadcastMessage("Break", (Vector2)(-1f * num3 * vector2), DontRequireReceiver)
+                let k = -1.0 * num3;
+                self.broadcast_break(collider, [k * dir[0], k * dir[1]]);
+            }
         }
     }
 

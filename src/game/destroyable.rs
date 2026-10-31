@@ -239,11 +239,18 @@ impl Game {
         if self.destroyed_components.contains(&id) {
             return;
         }
+        let mut orphans = Vec::new();
         let root = self.with_component_instance(id, |g, inst, o| {
             let prefab = inst.prefab.clone();
             let objects: Vec<usize> = std::iter::once(o).chain(inst.descendants(o)).collect();
             for &x in &objects {
                 g.destroyed_components.extend(inst.objects[x].components.iter().copied());
+            }
+            // Clones instantiated under these Transforms go with them (taken first: SetActive(false) below would
+            // otherwise find them).
+            for &x in &objects {
+                let key = inst.objects[x].components[0];
+                orphans.extend(g.attached_clones.remove(&key).unwrap_or_default().into_iter().map(|c| c.id));
             }
             // Its coroutines stop.
             let gone = &g.destroyed_components;
@@ -271,6 +278,8 @@ impl Game {
                             g.physicals[p].destroyed = true;
                         }
                         "ActOnDestroy" => g.act_on_destroy_run(key),
+                        // Its OnSingleUse listener goes with it: activate_direct skips a destroyed toggle.
+                        "ActivationToggleBehaviour" => {}
                         "NoCollide" => g.no_collide_destroy(cid),
                         "NoCollideGm" => g.no_collide_gm_destroy(cid, inst),
                         "TyreDeflationBehaviour" => g.tyre_destroy(cid),
@@ -281,6 +290,10 @@ impl Game {
                         "GearBehaviour" => g.gear_destroy(cid),
                         // DetectorBehaviour.OnDestroy removes its ContinuousActivationBehaviour listener, which sends nothing received.
                         "DetectorBehaviour" => {}
+                        // ButtonBehaviour.OnDestroy removes its ContinuousActivationBehaviour listener, which sends nothing received (button.rs).
+                        "ButtonBehaviour" => {}
+                        // LaserBehaviour.OnDestroy destroys its egg effect, which only the refused hoverbox branch creates (laser.rs).
+                        "LaserBehaviour" => {}
                         // BulbBehaviour.OnDestroy: Object.Destroy(OtherPart), a child (destroyed with the hierarchy already) until Break detaches it.
                         "BulbBehaviour" => {}
                         // FirearmAttachmentPointBehaviour.OnDestroy: Object.Destroy(FirearmAttachment); Start rejects a prefab with one.
@@ -346,11 +359,131 @@ impl Game {
             }
             inst.objects.iter().all(|x| g.destroyed_components.contains(&x.components[0]))
         });
+        for child in orphans {
+            self.run_object_destroy(child);
+        }
         // The whole clone went: nothing can reach its objects any more.
         if root {
             let owns = |i: &super::spawn::Instance| i.objects.iter().any(|x| x.components.contains(&id));
             self.unsynced.retain(|i| !owns(i));
             self.retained.retain(|i| !owns(i));
+        }
+    }
+}
+
+/// What a clone made by Instantiate(prefab, position, rotation, parent) hangs from.
+#[derive(Clone, Copy, Debug)]
+pub enum AttachParent {
+    /// hit.transform of a PhysicalBehaviour's Rigidbody2D.
+    Physical(usize),
+    /// hit.transform of a Collider2D without a Rigidbody2D (by the collider's id).
+    Bare(i32),
+}
+
+/// A clone parented under an existing GameObject: its root Transform's id and local TRS under the parent.
+#[derive(Clone, Copy, Debug)]
+pub struct AttachedClone {
+    pub id: i32,
+    pub parent: AttachParent,
+    pub local: crate::unity::transform::Trs,
+}
+
+impl Game {
+    /// The Transforms of an AttachParent's GameObject, the object first and then each ancestor up to the root.
+    fn attach_parent_nodes(&self, parent: AttachParent) -> Vec<crate::unity::transform::Trs> {
+        match parent {
+            AttachParent::Physical(p) => self.local_chain(p).into_iter().rev().collect(),
+            AttachParent::Bare(c) => {
+                let b = &self.bare_colliders[&c];
+                self.anchored_nodes(b.anchor, &b.chain)
+            }
+        }
+    }
+
+    /// Instantiate(prefab, position, rotation, parent) for the clone with root Transform `id`: position and rotation are
+    /// world values, stored as the local TRS under the parent (the prefab root's own local scale stays).
+    pub(super) fn attach_clone(&mut self, id: i32, parent: AttachParent, position: [f32; 3]) {
+        let nodes = self.attach_parent_nodes(parent);
+        let ((t, q), _) = crate::unity::transform::set_world(&nodes, position, [0.0, 0.0, 0.0, 1.0]);
+        let s = self.with_component_instance(id, |_, inst, o| inst.objects[o].trs.s);
+        let local = crate::unity::transform::Trs { t: [t[0], t[1], t[2], 0.0], q, s };
+        let key = match parent {
+            AttachParent::Physical(p) => self.physicals[p].transform_id,
+            AttachParent::Bare(c) => self.with_component_instance(c, |_, inst, o| inst.objects[o].components[0]),
+        };
+        self.attached_clones.entry(key).or_default().push(AttachedClone { id, parent, local });
+    }
+
+    /// The attached clones' world poses: the parent's Transform chain applied to the stored local TRS, after the
+    /// physics write-back has moved the parents.
+    pub(super) fn update_attached_clones(&mut self) {
+        use crate::unity::transform::{global_position, global_rotation, lossy_scale};
+        if self.attached_clones.is_empty() {
+            return;
+        }
+        let gone = &self.destroyed_components;
+        self.attached_clones.values_mut().for_each(|v| v.retain(|c| !gone.contains(&c.id)));
+        self.attached_clones.retain(|_, v| !v.is_empty());
+        let mut all: Vec<AttachedClone> = self.attached_clones.values().flatten().copied().collect();
+        // The map's order is arbitrary: ids give the spawn order.
+        all.sort_by_key(|c| std::cmp::Reverse(c.id));
+        for c in all {
+            let parents = self.attach_parent_nodes(c.parent);
+            let (mut v, mut r) = (c.local.t, c.local.q);
+            for n in &parents {
+                (v, r) = (global_position(n, v), global_rotation(n, r));
+            }
+            let mut nodes = vec![c.local];
+            nodes.extend(parents);
+            let s = lossy_scale(&nodes, r);
+            self.with_component_instance(c.id, |_, inst, o| {
+                inst.set_world_rotation(o, r);
+                inst.set_world_position(o, [v[0], v[1], v[2]]);
+                inst.set_local_scale(o, s);
+            });
+        }
+    }
+
+    /// GameObject.SetActive(`active`) on object `o` of `inst`: the clones parented under its subtree follow in
+    /// activeInHierarchy (their own activeSelf stays). A deactivation reaches them all; an activation only those whose
+    /// parent ended up active.
+    pub(super) fn attached_set_active(&mut self, inst: &super::spawn::Instance, o: usize, active: bool) {
+        if self.attached_clones.is_empty() {
+            return;
+        }
+        let mut clones = Vec::new();
+        for x in std::iter::once(o).chain(inst.descendants(o)) {
+            if let Some(v) = self.attached_clones.get(&inst.objects[x].components[0]).filter(|_| !active || inst.objects[x].active) {
+                clones.extend(v.iter().map(|c| c.id));
+            }
+        }
+        for id in clones {
+            if self.destroyed_components.contains(&id) {
+                continue;
+            }
+            self.with_component_instance(id, |g, clone, _| {
+                let prefab = clone.prefab.clone();
+                if !active {
+                    let mut scripts = Vec::new();
+                    g.deactivate_recursively(clone, &prefab, 0, &mut scripts);
+                    for (d, c) in scripts {
+                        let Component::Script { class, .. } = &prefab.objects[d].components[c].1 else { unreachable!() };
+                        if super::declares(class, "OnDisable") {
+                            unimplemented!("{class}.OnDisable of a clone whose parent (Instantiate(.., parent)) was deactivated");
+                        }
+                    }
+                } else if clone.objects[0].self_active && !clone.objects[0].active {
+                    let mut queued = Vec::new();
+                    g.activate_recursively(clone, &prefab, 0, &mut queued);
+                    for (d, c) in queued {
+                        if let Component::Script { class, .. } = &prefab.objects[d].components[c].1
+                            && (!clone.objects[d].activated || super::declares(class, "OnEnable"))
+                        {
+                            unimplemented!("{class}: Awake or OnEnable of a clone whose parent (Instantiate(.., parent)) was activated");
+                        }
+                    }
+                }
+            });
         }
     }
 }

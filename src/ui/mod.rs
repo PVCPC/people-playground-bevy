@@ -430,7 +430,9 @@ fn loading(
     *frames = 0;
     let Some(map) = ui.map.clone() else { return };
     let result = play::guarded(|| {
-        let mut g = play::new_game(&ui.game, &map, ui.item.as_deref(), Some(settings.prefs()))?;
+        // The player seeds UnityEngine.Random from the clock at startup, so each session differs; tests keep seed 0.
+        let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as i32);
+        let mut g = play::new_game(&ui.game, &map, ui.item.as_deref(), Some(settings.prefs()), seed)?;
         let catalog = match g.assets.as_deref_mut() {
             Some(db) => data::catalog(db)?,
             None => Default::default(),

@@ -459,12 +459,34 @@ impl Game {
 
     /// A direct activation of a physical object: Utils.Activations.SendOnce, then BroadcastMessage("Use").
     pub(super) fn activate_direct(&mut self, p: usize) {
-        // SendOnce: OnSingleUse.Invoke. Its only listener is ActivationToggleBehaviour, which link rejects.
+        // SendOnce: OnSingleUse.Invoke: the ActivationToggleBehaviour listeners.
+        self.activation_toggle_use_direct(p);
         self.broadcast_use(p);
     }
 
     /// BroadcastMessage("Use") on a physical object's GameObject: it and its active descendants, each object's
     /// components in order.
+    /// PhysicalBehaviour.ForceSendUse: BroadcastMessage("Use", ActivationPropagation(root, channel, root), DontRequireReceiver)
+    /// for each channel. PhysicalBehaviour.Use only invokes the modding event, so an object with no other Use receiver
+    /// below its root (including itself) takes no effect; a receiver would need the channel and the non-direct flag.
+    pub(super) fn physical_force_send_use(&mut self, p: usize) {
+        if self.physicals[p].parent.is_some() {
+            unimplemented!("PhysicalBehaviour.ForceSendUse of an object with a parent (BroadcastMessage on transform.root)");
+        }
+        let id = self.physicals[p].id;
+        let receiver = self.with_component_instance(id, |_, inst, start| {
+            std::iter::once(start).chain(inst.descendants(start)).filter(|&x| inst.objects[x].active).find_map(|x| {
+                inst.prefab.objects[x].components.iter().find_map(|(_, c)| match c {
+                    crate::assets::db::Component::Script { class, .. } if USE_RECEIVERS.contains(&class.as_str()) && class != "PhysicalBehaviour" => Some(class.clone()),
+                    _ => None,
+                })
+            })
+        });
+        if let Some(class) = receiver {
+            unimplemented!("PhysicalBehaviour.ForceSendUse: {class}.Use (its channel and non-direct activation)");
+        }
+    }
+
     fn broadcast_use(&mut self, p: usize) {
         let id = self.physicals[p].id;
         let receivers: Vec<UseReceiver> = self.with_component_instance(id, |g, inst, start| {
@@ -484,7 +506,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&inst.objects[x].components[k]) {
-                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::SignalConverter(_)))) => out.push(UseReceiver::Behaviour(b)),
+                        Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_))))=> out.push(UseReceiver::Behaviour(b)),
                         Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                         _ => unimplemented!("{class}.Use"),
                     }
@@ -506,6 +528,7 @@ impl Game {
                 Behaviour::Launcher(l) => self.launcher_use(l),
                 Behaviour::Bell(b) => self.bell_use(b),
                 Behaviour::MachineGun(m) => self.machine_gun_use(m),
+                Behaviour::Minigun(m) => self.minigun_use(m),
                 // A direct activation: new ActivationPropagation(direct: true, 0, ..).
                 Behaviour::Translated(t) => self.tr_use(t, super::translated::rt::Activation { Channel: 0 }),
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
@@ -522,6 +545,17 @@ impl Game {
                 Behaviour::Car(i) => self.car_use(i, 0),
                 Behaviour::Syringe(i) => self.syringe_use(i, 0),
                 Behaviour::JetEngine(i) => self.jet_engine_use(i),
+                Behaviour::Metronome(m) => self.metronome_use(m),
+                Behaviour::Thermometer(t) => self.thermometer_use(t),
+                Behaviour::Flare(f) => self.flare_use(f),
+                Behaviour::Display(d) => self.display_use(d),
+                Behaviour::Laser(l) => self.laser_use(l),
+                Behaviour::Television(t) => self.television_use(t),
+                Behaviour::FirearmAttachment(a) | Behaviour::BatteryAttachment(a) => self.firearm_attachment_use(a),
+                Behaviour::InfraredThermometer(i) => self.infrared_use(i),
+                Behaviour::Blaster(i) => self.blaster_use(i),
+                Behaviour::Beamformer(i) => self.beamformer_use(i),
+                Behaviour::Scifi40(i) => self.scifi40_use(i),
                 // A direct activation: ActivationPropagation.Direct.
                 Behaviour::SignalConverter(i) => self.signal_converter_use(i, true, 0),
                 _ => unreachable!(),
@@ -1061,7 +1095,7 @@ mod tests {
     /// without the installed game.
     fn spawned(item: &str) -> Option<(Game, usize)> {
         let game = crate::game_assets::find_game(None).ok()?;
-        let mut g = new_game(&game, "Default", Some(item), None).unwrap();
+        let mut g = new_game(&game, "Default", Some(item), None, 0).unwrap();
         frames(&mut g, 30);
         let first = g.physicals.len();
         let c = g.BoundingBox.center;

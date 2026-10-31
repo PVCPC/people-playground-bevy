@@ -474,6 +474,8 @@ pub enum PendingStart {
     LiquidContainer(usize),
     /// DetectorBehaviour.Start: the `Game::detectors` index.
     Detector(usize),
+    /// LaserBehaviour.Start: the `Game::lasers` index.
+    Laser(usize),
     /// SingleFloodlightBehaviour.Start: the `Game::floodlights` index.
     Floodlight(usize),
     /// SpikeGrenadeBehaviour.Start: the `Game::spike_grenades` index.
@@ -496,6 +498,16 @@ pub enum PendingStart {
     RandomSprite(usize),
     /// AirfoilBehaviour.Start: SetWingType(GetWingType(CurrentWingTypeName)).
     Airfoil(usize),
+    /// MetronomeBehaviour.Start: seed = Random.value * 1000 and UpdateActivation (`Game::metronomes`).
+    Metronome(usize),
+    /// MaintainScaleSignBehaviour.Start: EnsureScaling, by the component's instance id.
+    MaintainScale(i32),
+    /// ActivationToggleBehaviour.Start (UpdateActivation): `Game::activation_toggles`.
+    ActivationToggle(usize),
+    /// GaugeBehaviour.Start for a PowerGauge: `Game::power_gauges`.
+    PowerGauge(usize),
+    /// FlareBehaviour.Start: `Game::flares`.
+    Flare(usize),
     /// SyringeBehaviour.Start (any subclass): the `Game::syringes` index.
     Syringe(usize),
     /// SyringeExplosionBehaviour.Start: the `Game::syringe_explosions` index.
@@ -959,6 +971,7 @@ impl Game {
                 PendingStart::Flask(f) => self.flask_start(f),
                 PendingStart::LiquidContainer(c) => self.liquid_container_start(c),
                 PendingStart::Detector(i) => self.detector_start(i),
+                PendingStart::Laser(l) => self.laser_start(l),
                 PendingStart::Floodlight(i) => self.floodlight_start(i),
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
                 PendingStart::Bulb(i) => self.bulb_start(i),
@@ -981,6 +994,11 @@ impl Game {
                 PendingStart::IgnoreParentSize(id) => self.ignore_parent_size_start(id),
                 PendingStart::RandomSprite(r) => self.random_sprite_set_to_index(r),
                 PendingStart::Airfoil(a) => self.airfoil_start(a),
+                PendingStart::Metronome(m) => self.metronome_start(m),
+                PendingStart::MaintainScale(id) => self.maintain_scale_start(id),
+                PendingStart::ActivationToggle(t) => self.activation_toggle_start(t),
+                PendingStart::PowerGauge(g) => self.power_gauge_start(g),
+                PendingStart::Flare(f) => self.flare_start(f),
                 PendingStart::Syringe(s) => self.syringe_start(s),
                 PendingStart::SyringeExplosion(e) => self.syringe_explosion_start(e),
                 PendingStart::Limb(l) => self.limb_start(l),

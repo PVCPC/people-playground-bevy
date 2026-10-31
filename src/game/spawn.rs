@@ -546,12 +546,15 @@ impl Game {
     /// order.
     pub fn set_active(&mut self, inst: &mut Instance, o: usize, active: bool) -> Vec<(usize, usize)> {
         if active {
-            return self.activate(inst, o);
+            let scripts = self.activate(inst, o);
+            self.attached_set_active(inst, o, true);
+            return scripts;
         }
         inst.objects[o].self_active = false;
         let prefab = inst.prefab.clone();
         let mut scripts = Vec::new();
         self.deactivate_recursively(inst, &prefab, o, &mut scripts);
+        self.attached_set_active(inst, o, false);
         scripts
     }
 
@@ -618,7 +621,7 @@ impl Game {
         Vec::new()
     }
 
-    fn activate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, queued: &mut Vec<(usize, usize)>) {
+    pub(super) fn activate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, queued: &mut Vec<(usize, usize)>) {
         inst.objects[o].active = true;
         for &child in &prefab.objects[o].children {
             if inst.objects[child].self_active {
@@ -628,7 +631,7 @@ impl Game {
         queued.extend((0..prefab.objects[o].components.len()).map(|c| (o, c)));
     }
 
-    fn deactivate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, scripts: &mut Vec<(usize, usize)>) {
+    pub(super) fn deactivate_recursively(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, scripts: &mut Vec<(usize, usize)>) {
         if !inst.objects[o].active {
             return;
         }

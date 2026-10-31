@@ -20,9 +20,22 @@ pub mod messages;
 pub mod sort;
 pub mod airfoil;
 pub mod stunner;
+pub mod blaster;
+pub mod scifi;
 pub mod soap;
 pub mod power_hammer;
 pub mod balloon;
+pub mod metronome;
+pub mod button;
+pub mod laser;
+pub mod attachment;
+pub mod television;
+pub mod display;
+pub mod activation_toggle;
+pub mod gauge;
+pub mod torch;
+pub mod flare;
+pub mod thermometer;
 pub mod syringe;
 pub mod jet_engine;
 pub mod signal_converter;
@@ -40,6 +53,10 @@ pub mod firearm;
 pub mod launcher;
 pub mod bell;
 pub mod machinegun;
+pub mod minigun;
+pub mod accelerator;
+pub mod bolt;
+pub mod lightning;
 pub mod translated;
 pub mod limb;
 pub mod machinery;
@@ -1081,6 +1098,9 @@ pub enum Behaviour {
     Launcher(usize),
     Bell(usize),
     MachineGun(usize),
+    Minigun(usize),
+    Accelerator(usize),
+    AcceleratorBolt(usize),
     PointToVelocity(usize),
     AndroidSpark(usize),
     Car(usize),
@@ -1106,9 +1126,25 @@ pub enum Behaviour {
     Airfoil(usize),
     Stunner(usize),
     Balloon(usize),
+    Metronome(usize),
+    Thermometer(usize),
+    Torch(usize),
+    Flare(usize),
+    Button(usize),
+    Display(usize),
+    Laser(usize),
+    /// Scope, Explosive, Flashlight and Incendiary AttachmentBehaviours (class FirearmAttachmentBehaviour's Use).
+    FirearmAttachment(usize),
+    BatteryAttachment(usize),
+    Television(usize),
+    InfraredThermometer(usize),
     Syringe(usize),
     JetEngine(usize),
     SignalConverter(usize),
+    Blaster(usize),
+    Blasterbolt(usize),
+    Beamformer(usize),
+    Scifi40(usize),
     Translated(translated::TBehaviour),
 }
 
@@ -1154,7 +1190,22 @@ impl Behaviour {
             Behaviour::Airfoil(_) => "AirfoilBehaviour",
             Behaviour::Stunner(_) => "StunnerBehaviour",
             Behaviour::Balloon(_) => "BalloonBehaviour",
+            Behaviour::Metronome(_) => "MetronomeBehaviour",
+            Behaviour::Thermometer(_) => "ThermometerBehaviour",
+            Behaviour::InfraredThermometer(_) => "InfraredThermometer",
+            Behaviour::Torch(_) => "TorchBehaviour",
+            Behaviour::Flare(_) => "FlareBehaviour",
+            Behaviour::Button(_) => "ButtonBehaviour",
+            Behaviour::Laser(_) => "LaserBehaviour",
+            Behaviour::FirearmAttachment(_) => "FirearmAttachmentBehaviour",
+            Behaviour::BatteryAttachment(_) => "BatteryAttachmentBehaviour",
+            Behaviour::Television(_) => "TelevisionBehaviour",
+            Behaviour::Display(_) => "DisplayBehaviour",
             Behaviour::JetEngine(_) => "JetEngineBehaviour",
+            Behaviour::Blaster(_) => "BlasterBehaviour",
+            Behaviour::Blasterbolt(_) => "BlasterboltBehaviour",
+            Behaviour::Beamformer(_) => "BeamformerBehaviour",
+            Behaviour::Scifi40(_) => "GenericScifiWeapon40Behaviour",
             Behaviour::SignalConverter(_) => "SignalConverterBehaviour",
             // Every subclass has the lifecycle of SyringeBehaviour.
             Behaviour::Syringe(_) => "SyringeBehaviour",
@@ -1164,6 +1215,9 @@ impl Behaviour {
             Behaviour::Launcher(_) => "ProjectileLauncherBehaviour",
             Behaviour::Bell(_) => "BellBehaviour",
             Behaviour::MachineGun(_) => "MachineGunBehaviour",
+            Behaviour::Minigun(_) => "MinigunBehaviour",
+            Behaviour::Accelerator(_) => "AcceleratorGunBehaviour",
+            Behaviour::AcceleratorBolt(_) => "AcceleratorBoltBehaviour",
             Behaviour::Translated(t) => t.class(),
         }
     }
@@ -1261,6 +1315,9 @@ pub struct Game {
     pub launchers: Vec<launcher::Launcher>,
     pub bells: Vec<bell::Bell>,
     pub machine_guns: Vec<machinegun::MachineGun>,
+    pub miniguns: Vec<minigun::Minigun>,
+    pub accelerators: Vec<accelerator::Accelerator>,
+    pub accelerator_bolts: Vec<accelerator::AcceleratorBolt>,
     /// The translated classes' components (tools/translator).
     pub tr: translated::Translated,
     pub explosives: Vec<explosion::Explosive>,
@@ -1293,8 +1350,27 @@ pub struct Game {
     pub soaps: Vec<soap::Soap>,
     pub power_hammers: Vec<power_hammer::PowerHammer>,
     pub balloons: Vec<balloon::Balloon>,
+    pub metronomes: Vec<metronome::Metronome>,
+    pub thermometers: Vec<thermometer::Thermometer>,
+    pub infrared_thermometers: Vec<thermometer::InfraredThermometer>,
+    pub activation_toggles: Vec<activation_toggle::ActivationToggle>,
+    pub power_gauges: Vec<gauge::PowerGauge>,
+    pub torches: Vec<torch::Torch>,
+    pub flares: Vec<flare::Flare>,
+    pub buttons: Vec<button::Button>,
+    pub lasers: Vec<laser::Laser>,
+    pub firearm_attachments: Vec<attachment::FirearmAttachment>,
+    /// FirearmAttachmentPointBehaviour components.
+    pub attachment_points: Vec<attachment::AttachmentPoint>,
+    pub televisions: Vec<television::Television>,
+    pub displays: Vec<display::Display>,
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,
+    pub blasters: Vec<blaster::Blaster>,
+    pub blasterbolts: Vec<blaster::Blasterbolt>,
+    pub beamformers: Vec<scifi::Beamformer>,
+    pub scifi40s: Vec<scifi::Scifi40>,
+    pub act_on_shots: Vec<acts::ActOnShot>,
     pub signal_converters: Vec<signal_converter::SignalConverter>,
     pub syringe_explosions: Vec<syringe::SyringeExplosion>,
     /// `anchored_joints` slot -> `fixed_joints` entry, for the prefab joints adopted (a script that reads the component,
@@ -1333,6 +1409,9 @@ pub struct Game {
     pub first_activation: HashMap<i32, link::Linked>,
     /// The GameObjects (by the id of their Transform) that GetOrAddComponent<DebrisComponent> added one to.
     pub debris_added: std::collections::HashSet<i32>,
+    /// Clones Instantiate(.., parent) put under an existing GameObject, by the parent's Transform id. Destroying the
+    /// parent destroys them; `update_attached_clones` keeps their poses under the parent's.
+    pub attached_clones: HashMap<i32, Vec<destroyable::AttachedClone>>,
     pub dwacds: Vec<destroyable::DestroyWhenAllChildrenDestroyed>,
     /// level1's DistantSoundBehaviour clip counts, by SoundType - 1 (SmallExplosion .. LargeFirearm).
     pub distant_sounds: [usize; 6],
@@ -1402,6 +1481,8 @@ pub struct Game {
     pub node_bodies: std::collections::HashMap<usize, usize>,
     /// Colliders on GameObjects without a PhysicalBehaviour, by Collider2D id: their Transforms for the queries.
     pub bare_colliders: std::collections::HashMap<i32, BareCollider>,
+    /// Collider2D ids whose GameObject or an ancestor without a PhysicalBehaviour carries a DecalControllerBehaviour.
+    pub decal_chain_colliders: std::collections::HashSet<i32>,
     /// Rigidbody2Ds on GameObjects without a PhysicalBehaviour.
     pub node_rigidbodies: Vec<NodeBody>,
     /// SpriteRenderers on GameObjects without a PhysicalBehaviour (drawing only).
@@ -1449,6 +1530,8 @@ pub struct Game {
     /// A clone of Global.MetalScrapePrefab: the instance ids it takes (objects and components) and the
     /// Random.value draws its ActivateIfFancyEffects Awakes make; None when the scene was not loaded from data.
     pub metal_scrape: Option<(usize, usize)>,
+    /// The modelled managed heap's base for this session (PhysicalBehaviour hash codes); None: the fixed test base.
+    pub heap_base: Option<u64>,
     /// Physics2DSettings.m_DefaultMaterial's (friction, bounciness); None without one.
     pub default_material2d: Option<(f32, f32)>,
 }

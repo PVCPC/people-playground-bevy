@@ -33,11 +33,11 @@ script! {
 
 /// Utils.LaserHit
 #[derive(Clone, Copy, Debug)]
-struct LaserHit {
-    hit: Option<RayHit2D>,
-    physical: Option<usize>,
-    point: [f32; 2],
-    totalDistance: f32,
+pub(super) struct LaserHit {
+    pub(super) hit: Option<RayHit2D>,
+    pub(super) physical: Option<usize>,
+    pub(super) point: [f32; 2],
+    pub(super) totalDistance: f32,
 }
 
 const MAX_STEPS: i32 = 8;
@@ -86,7 +86,7 @@ impl Game {
         let sign = if self.physicals[p].transform.localScale[0] < 0.0 { -1.0 } else { 1.0 };
         let dir = [xf.q.c * sign, xf.q.s * sign];
         let mut hits = Vec::new();
-        self.get_laser_end_point([xf.p.x, xf.p.y], dir, &mut hits, layers, maximum_distance);
+        self.get_laser_end_point([xf.p.x, xf.p.y], dir, &mut hits, layers, maximum_distance, MAX_ITERATIONS);
         let fits = self.detector_fits_criteria(i, hits.last().copied());
         if !self.detectors[i].isDetecting || fits {
             return;
@@ -133,7 +133,7 @@ impl Game {
     }
 
     /// Utils.MaterialAwareRaycast
-    fn material_aware_raycast(&mut self, origin: [f32; 2], dir: [f32; 2], max_distance: f32, layers: u32, max_steps: i32, mut current_distance: f32) -> LaserHit {
+    pub(super) fn material_aware_raycast(&mut self, origin: [f32; 2], dir: [f32; 2], max_distance: f32, layers: u32, max_steps: i32, mut current_distance: f32) -> LaserHit {
         if max_steps <= 0 || max_distance <= 0.0 {
             return LaserHit { hit: None, physical: None, point: origin, totalDistance: 0.0 };
         }
@@ -155,8 +155,8 @@ impl Game {
     }
 
     /// Utils.GetLaserEndPoint
-    fn get_laser_end_point(&mut self, origin: [f32; 2], dir: [f32; 2], list: &mut Vec<LaserHit>, layers: u32, maximum_distance: f32) {
-        if list.len() >= MAX_ITERATIONS {
+    pub(super) fn get_laser_end_point(&mut self, origin: [f32; 2], dir: [f32; 2], list: &mut Vec<LaserHit>, layers: u32, maximum_distance: f32, max_iterations: usize) {
+        if list.len() >= max_iterations {
             return;
         }
         let laser = self.material_aware_raycast(origin, dir, maximum_distance, layers, MAX_STEPS, 0.0);
@@ -181,7 +181,8 @@ impl Game {
             let n = [value.normal.x, value.normal.y];
             let num = (d(-2.0) * (d(n[0]) * dir[0] + d(n[1]) * dir[1]).f()).f();
             let reflected = [(d(num) * n[0] + dir[0]).f(), (d(num) * n[1] + dir[1]).f()];
-            self.get_laser_end_point(point, reflected, list, layers, maximum_distance - laser.totalDistance);
+            // The recursive call takes maxIterations' default.
+            self.get_laser_end_point(point, reflected, list, layers, maximum_distance - laser.totalDistance, MAX_ITERATIONS);
         }
     }
 }

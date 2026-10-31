@@ -934,6 +934,7 @@ impl Game {
                 (Phase::Fixed, B::RayGun(i)) => self.ray_gun_fixed_update(i),
                 (Phase::Fixed, B::Bulb(i)) => self.bulb_fixed_update(i),
                 (Phase::Update, B::Bulb(i)) => self.bulb_update(i),
+                (Phase::Update, B::Television(t)) => self.television_update(t),
                 (Phase::Fixed, B::Thrusterbed(i)) => self.thrusterbed_fixed_update(i),
                 (Phase::Fixed, B::PointLiquid(i)) => self.point_liquid_fixed_update(i),
                 (Phase::Fixed, B::Piston(i)) => self.piston_fixed_update(i),
@@ -942,7 +943,19 @@ impl Game {
                 (Phase::Update, B::Rocket(i)) => self.rocket_update(i),
                 (Phase::Fixed, B::Airfoil(i)) => self.airfoil_fixed_update(i),
                 (Phase::Update, B::Stunner(i)) => self.stunner_update(i),
+                (Phase::Update, B::Blaster(i)) => self.blaster_update(i),
+                (Phase::Update, B::Blasterbolt(i)) => self.blasterbolt_update(i),
+                (Phase::Fixed, B::Torch(t)) => self.torch_fixed_update(t),
+                // ButtonBehaviour.Update drives the light (button.rs).
+                (Phase::Update, B::Button(_)) => {}
+                (Phase::Fixed, B::Button(b)) => self.button_fixed_update(b),
+                (Phase::Fixed, B::BatteryAttachment(a)) => self.battery_attachment_fixed_update(a),
+                (Phase::Update, B::Beamformer(i)) => self.beamformer_update(i),
                 (Phase::Update, B::Balloon(i)) => self.balloon_update(i),
+                (Phase::Update, B::Metronome(i)) => self.metronome_update(i),
+                // Thermometer's FixedUpdate writes readouts only (thermometer.rs).
+                (Phase::Fixed, B::Thermometer(_)) => {}
+                (Phase::Update, B::InfraredThermometer(i)) => self.infrared_update(i),
                 (Phase::Fixed, B::Syringe(i)) => self.syringe_fixed_update(i),
                 (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
                 (Phase::Update, B::Syringe(i)) => self.syringe_update(i),
@@ -958,6 +971,15 @@ impl Game {
                 (Phase::Fixed, B::Launcher(l)) => self.launcher_fixed_update(l),
                 (Phase::Update, B::Launcher(l)) => self.launcher_update(l),
                 (Phase::Update, B::MachineGun(m)) => self.machine_gun_update(m),
+                (Phase::Update, B::Minigun(m)) => self.minigun_update(m),
+                // FixedUpdate only decays the barrel's spin (presentation).
+                (Phase::Fixed, B::Minigun(_)) => {}
+                (Phase::Update, B::Accelerator(a)) => self.accelerator_update(a),
+                (Phase::Update, B::AcceleratorBolt(b)) => self.accelerator_bolt_update(b),
+                (Phase::Fixed, B::AcceleratorBolt(b)) => self.accelerator_bolt_fixed_update(b),
+                // FireSoundEmitter.FixedUpdate only sets the fire loop's volume at its position (sound only, as
+                // PhysicalBehaviour's FuzzySetVolumeAt call is); the translated runtime cannot read a bare Transform's position.
+                (Phase::Fixed, B::Translated(super::translated::TBehaviour::FireSoundEmitter(_))) => {}
                 (phase, B::Translated(t)) => self.tr_phase(phase, t),
                 (Phase::Fixed, B::Person(p)) => self.person_fixed_update(p),
                 (Phase::Fixed, B::Circulation(l)) => self.circulation_fixed_update(l),
@@ -979,6 +1001,7 @@ impl Game {
                     self.person_late_update(p);
                 }
                 (Phase::Late, B::Skin(l)) => self.skin_late_update(l),
+                (Phase::Late, B::Laser(l)) => self.laser_late_update(l),
                 (phase, b) => unreachable!("{b:?} in the {phase:?} manager"),
             }
         }

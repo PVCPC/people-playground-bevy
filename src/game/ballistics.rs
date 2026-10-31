@@ -424,7 +424,7 @@ impl Game {
                         self.bullet_exit_callback(f, at, b.direction);
                     }
                     self.send_shot(collider, Some(p), mul(b.direction, -1.0), b.origin, damage, false);
-                    self.bullet_entry_callback(f, b.origin, b.direction);
+                    self.bullet_entry_callback(f, b.origin, b.direction, collider);
                     let origin = b.origin;
                     self.bullet_explode(&mut b, origin);
                 }
@@ -487,7 +487,7 @@ impl Game {
             let charge = self.emitter(f).Charge;
             let ph = &mut self.physicals[p];
             ph.charge = mathf::max(charge * ph.EnergyWireResistance, ph.Charge());
-            self.bullet_entry_callback(f, point, b.direction);
+            self.bullet_entry_callback(f, point, b.direction, hit.collider);
             self.bullet_explode(&mut b, point);
             let h = BulletHit { physical: p, hardness, damage: damage2, collider: hit.collider, point, normal, distance: hit.distance };
             let slot = self.bullet_slot(b, Some(h));
@@ -497,10 +497,13 @@ impl Game {
         }
     }
 
-    /// BulletEntryCallback (BulletEntryEvent has no listeners).
-    fn bullet_entry_callback(&mut self, f: Shooter, position: [f32; 2], direction: [f32; 2]) {
+    /// BulletEntryCallback: BulletEntryEvent's listeners (a firearm's connected attachments).
+    fn bullet_entry_callback(&mut self, f: Shooter, position: [f32; 2], direction: [f32; 2], hit_collider: i32) {
         if let Shooter::MachineGun(m) = f {
             self.machine_gun_on_entry(m, position, direction);
+        }
+        if let Shooter::Firearm(x) = f {
+            self.bullet_entry_listeners(x, hit_collider, position);
         }
     }
 
@@ -669,7 +672,7 @@ impl Game {
     }
 
     /// The layer of a physical's GameObject (that of its own colliders).
-    fn physical_layer(&self, p: usize) -> i32 {
+    pub(super) fn physical_layer(&self, p: usize) -> i32 {
         let c = *self.physicals[p].all_colliders.first().unwrap_or_else(|| unimplemented!("the layer of a physical without its own collider"));
         let go = self.world.collider_game_object(c).expect("a collider's fixture");
         self.world.layers[&go]
@@ -738,6 +741,10 @@ impl Game {
                     let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
                     self.glowtube_shot(g, damage);
                 }
+                ("TelevisionBehaviour", _) => {
+                    let t = self.televisions.iter().position(|x| x.physical == p).expect("the object's TelevisionBehaviour");
+                    self.television_shot(t);
+                }
                 ("BulbBehaviour", _) => {
                     let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
                     self.bulb_shot(b);
@@ -745,6 +752,10 @@ impl Game {
                 (c, _) if super::syringe::is_syringe(c) => {
                     let s = self.syringes.iter().position(|s| s.Phys == p).expect("the object's SyringeBehaviour");
                     if exit { self.break_syringe(s) } else { self.syringe_shot(s) }
+                }
+                ("ActOnShot", false) => {
+                    let a = self.act_on_shots.iter().position(|a| a.id == id).expect("the object's ActOnShot");
+                    self.act_on_shot_shot(a, damage);
                 }
                 (c, false) => unimplemented!("{c}.Shot"),
                 (c, true) => unimplemented!("{c}.ExitShot"),
@@ -786,6 +797,10 @@ impl Game {
                     let b = self.balloons.iter().position(|x| x.physical == Some(p)).expect("the object's BalloonBehaviour");
                     self.balloon_pop(b);
                 }
+                "TelevisionBehaviour" => {
+                    let t = self.televisions.iter().position(|x| x.physical == p).expect("the object's TelevisionBehaviour");
+                    self.television_break(t);
+                }
                 "BulbBehaviour" => {
                     let b = self.bulbs.iter().position(|b| b.Phys == p).expect("the object's BulbBehaviour");
                     self.bulb_break(b);
@@ -797,6 +812,25 @@ impl Game {
                 c => unimplemented!("{c}.Break"),
             }
         }
+    }
+
+    /// BroadcastMessage("Break", velocity) to a collider's GameObject: it and its active descendants.
+    pub(super) fn broadcast_break(&mut self, collider: i32, velocity: [f32; 2]) {
+        let Some(p) = self.physical_of_collider(collider) else {
+            if self.bare_colliders[&collider].receives(BREAK_RECEIVERS) {
+                unimplemented!("BroadcastMessage Break to the scripts of a collider without a PhysicalBehaviour");
+            }
+            return;
+        };
+        let below = self.with_component_instance(self.physicals[p].id, |_, inst, o| {
+            inst.descendants(o).into_iter().filter(|&x| inst.objects[x].active).any(|x| {
+                inst.prefab.objects[x].components.iter().any(|(_, c)| matches!(c, crate::assets::db::Component::Script { class, .. } if BREAK_RECEIVERS.contains(&class.as_str())))
+            })
+        });
+        if below {
+            unimplemented!("BroadcastMessage Break to a descendant with a Break method");
+        }
+        self.send_break(collider, Some(p), velocity);
     }
 
     /// The physical of a RaycastHit2D.transform (the attached Rigidbody2D's GameObject, else the collider's); None for

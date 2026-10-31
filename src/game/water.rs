@@ -395,6 +395,17 @@ impl Game {
                         let p = self.physicals.iter().position(|p| p.id == id).expect("a PhysicalBehaviour in the arena");
                         self.physicals[p].active = true;
                     }
+                    // OnEnable shows the aim line (rendering).
+                    "BeamformerBehaviour" => {}
+                    // TorchBehaviour.OnEnable: a torch that is enabled registers the contacts its colliders have.
+                    "TorchBehaviour" => {
+                        if let Some(t) = self.torches.iter().position(|x| x.id == id) {
+                            if self.torches[t].enabled {
+                                let colliders = Game::torch_child_colliders(inst, d);
+                                self.torch_enable_contacts(t, colliders);
+                            }
+                        }
+                    }
                     "ColorWave" => {
                         if *enabled && !self.script_disabled(id) {
                             self.color_wave_on_enable();
@@ -480,6 +491,42 @@ impl Game {
                         self.thrusterbed_on_disable(i);
                     }
                 }
+                "BeamformerBehaviour" => {
+                    let i = self.beamformers.iter().position(|c| c.id == id).expect("a BeamformerBehaviour in the arena");
+                    if self.beamformers[i].enabled {
+                        self.beamformer_on_disable(i);
+                    }
+                }
+                "DisplayBehaviour" => {
+                    let i = self.displays.iter().position(|c| c.id == id).expect("a DisplayBehaviour in the arena");
+                    if self.displays[i].enabled {
+                        self.display_on_disable(i);
+                    }
+                }
+                // OnDisable only hides the light (button.rs).
+                "ButtonBehaviour" => {}
+                // OnDisable stops the particles and hides the line; its egg effect exists only in the refused branch (laser.rs).
+                "LaserBehaviour" => {}
+                "MetronomeBehaviour" => {
+                    let m = self.metronomes.iter().position(|c| c.id == id).expect("a MetronomeBehaviour in the arena");
+                    if self.metronomes[m].enabled {
+                        self.metronome_on_disable(m);
+                    }
+                }
+                "InfraredThermometer" => {
+                    let i = self.infrared_thermometers.iter().position(|c| c.id == id).expect("an InfraredThermometer in the arena");
+                    if self.infrared_thermometers[i].enabled {
+                        self.infrared_on_disable(i);
+                    }
+                }
+                "ActivationToggleBehaviour" => {
+                    let t = self.activation_toggles.iter().position(|c| c.id == id).expect("an ActivationToggleBehaviour in the arena");
+                    if self.activation_toggles[t].enabled {
+                        self.activation_toggle_on_disable_in(inst, t);
+                    }
+                }
+                // OnDisable only hides the readout (thermometer.rs).
+                "ThermometerBehaviour" => {}
                 name if super::translated::CLASSES.contains(&name) => {
                     if let Some(&(_, super::Behaviour::Translated(t))) = self.behaviour_of.get(&id) {
                         if self.tr_enabled(t) {
