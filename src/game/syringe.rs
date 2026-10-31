@@ -367,10 +367,9 @@ impl Game {
         let x = &self.syringe_explosions[e];
         let (radius, amount, position) = (x.Radius, x.Amount, x.Position);
         let syringe = x.Syringe.expect("SyringeExplosionBehaviour.Liquids is set by BreakSyringe");
-        let hits = self.overlap_circle(V::new(position[0], position[1]), radius, DEFAULT_RAYCAST_LAYERS);
-        if hits.len() > 64 {
-            unimplemented!("SyringeExplosionBehaviour.Start: more colliders than its buffer");
-        }
+        let mut hits = self.overlap_circle(V::new(position[0], position[1]), radius, DEFAULT_RAYCAST_LAYERS);
+        // Mathf.Min(results.Length, OverlapCircleNonAlloc(...)): the query's first 64 colliders (180bf4620).
+        hits.truncate(64);
         let num = hits.len();
         let amount = (d(amount) / num as f32 * 3.0f32).f();
         for (physical, collider) in hits {

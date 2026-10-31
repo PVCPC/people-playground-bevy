@@ -236,10 +236,9 @@ impl Game {
 
     /// Physics2D.LinecastNonAlloc(start, end, buffer[n], layerMask): the hits, nearest first.
     pub(super) fn linecast_hits(&mut self, start: V, end: V, mask: u32, buffer: usize) -> Vec<RayHit2D> {
-        let hits = self.ray_query(start, end, mask, f32::NEG_INFINITY, f32::INFINITY);
-        if hits.len() > buffer {
-            unimplemented!("Physics2D.LinecastNonAlloc with more hits than its buffer holds");
-        }
+        let mut hits = self.ray_query(start, end, mask, f32::NEG_INFINITY, f32::INFINITY);
+        // PhysicsQuery2D::Linecast (180bf2c50): every hit sorted, then the first min(count, buffer length) copied.
+        hits.truncate(buffer);
         hits
     }
 
@@ -694,10 +693,9 @@ impl Game {
             self.spawn_resource("Prefabs/Explosion", position);
         }
         // OverlapCircleNonAlloc into the 64-entry hitBuffer: Objects, Debris, CollidingDebris.
-        let hits = self.overlap_circle(V::new(position[0], position[1]), range, (1 << 9) | (1 << 10) | (1 << 13));
-        if hits.len() > 64 {
-            unimplemented!("ExplosionCreator.CreatePulseExplosion: more colliders than its buffer");
-        }
+        let mut hits = self.overlap_circle(V::new(position[0], position[1]), range, (1 << 9) | (1 << 10) | (1 << 13));
+        // OverlapCircleArray_Binding (180bf4620): the query's first min(count, buffer length) colliders.
+        hits.truncate(64);
         for (_, collider) in hits {
             let Some(body) = self.world.collider_body(collider) else { continue };
             let Some(rb) = self.rigidbody_of_body(body) else { continue };
@@ -735,10 +733,9 @@ impl Game {
         }
         // The loop condition runs OverlapCircleNonAlloc again before each message; nothing it reads changes.
         let centre = V::new(ex.Position[0], ex.Position[1]);
-        let hits = self.overlap_circle(centre, mathf::max(ex.Range / 10.0, 1.0), DEFAULT_RAYCAST_LAYERS);
-        if hits.len() > 64 {
-            unimplemented!("ExplosionCreator.CreateFragmentationExplosion: more colliders than its buffer");
-        }
+        let mut hits = self.overlap_circle(centre, mathf::max(ex.Range / 10.0, 1.0), DEFAULT_RAYCAST_LAYERS);
+        // OverlapCircleArray_Binding (180bf4620): the query's first min(count, buffer length) colliders.
+        hits.truncate(64);
         for (physical, collider) in hits {
             // SendMessage("Decal", DecalInstruction(BlastMarkDecal, ClosestPoint(Position), 2)) to the collider's GameObject.
             let point = self.world.collider_closest_point(collider, centre);
@@ -783,9 +780,12 @@ impl Game {
         self.limb_damage(l, force * 1.5);
         if self.limbs[l].SpeciesIdentity != "Android" && self.random.value() < ex.DismemberChance {
             if self.prefs.ProceduralFragments && hit.distance < 3.0 && (self.random.value() as f64) < 0.25 {
-                unimplemented!("ExplosionCreator.FragmentationRay: LimbBehaviour.Crush after Utils.DelayCoroutine");
+                // limb.StartCoroutine(Utils.DelayCoroutine(0.01f, limb.Crush)).
+                let owner = self.limbs[l].id;
+                self.start_wait(owner, 0.01, super::destroyable::Step::LimbDelayedCrush(l));
+            } else {
+                self.limb_slice(l);
             }
-            self.limb_slice(l);
         }
     }
 

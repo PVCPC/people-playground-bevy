@@ -234,7 +234,9 @@ impl Game {
 
     /// DestroyObjectHighLevel of the object holding component `id`: its hierarchy deactivates (OnDisable, the
     /// Physics2D cleanup), then each script gets OnDestroy, the object's components first, then its descendants.
-    // ponytail: OnDestroy order across a hierarchy is parent-first pre-order; no rewritten OnDestroy reads another's state.
+    // DestroyObjectHighLevel_Internal (180758b40): Deactivate, then the WillDestroy walk (18075a230) runs
+    // GameObject::WillDestroyGameObject (18058a140, each component in order) on the object before recursing into each
+    // child in order: parent-first pre-order, the prefab's depth-first order `descendants` keeps.
     pub fn run_object_destroy(&mut self, id: i32) {
         self.object_destroys.retain(|&(_, i)| i != id);
         if self.destroyed_components.contains(&id) {
@@ -644,6 +646,7 @@ impl Game {
             }
             Step::LimbCrush(l) => self.limb_crush(l),
             Step::LimbStunNumb(l) => self.limb_stun_numb(l),
+            Step::LimbDelayedCrush(l) => self.limb_crush(l),
             Step::ExoticFlash(p) => self.exotic_flash(p),
             Step::FirearmShoot(f) => self.firearm_shoot(f),
             Step::LaunchRoutine(l) => self.launcher_launch_routine(l),
@@ -733,6 +736,8 @@ pub enum Step {
     SyringeBreak(usize),
     /// LimbBehaviour.StunImpact's Utils.DelayCoroutine action after its WaitForSeconds: the `Game::limbs` index.
     LimbStunNumb(usize),
+    /// ExplosionCreator.FragmentationRay's Utils.DelayCoroutine(0.01f, limb.Crush): the `Game::limbs` index.
+    LimbDelayedCrush(usize),
     /// ExoticLiquid.OnUpdate's Utils.DelayCoroutine action: the container's physical.
     ExoticFlash(usize),
     /// A translated routine (`coroutine::Routine`) by id, and for a yield null / WaitForSeconds the frame count from

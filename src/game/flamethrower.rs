@@ -130,10 +130,9 @@ impl Game {
 
     /// FlamethrowerBehaviour.AffectPoint: Physics2D.OverlapCircleNonAlloc(worldPoint, 0.1f, buffer[32]).
     fn flamethrower_affect_point(&mut self, i: usize, world_point: [f32; 2], dir: [f32; 2]) {
-        let hits = self.overlap_circle(V::new(world_point[0], world_point[1]), 0.1, DEFAULT_RAYCAST_LAYERS);
-        if hits.len() > 32 {
-            unimplemented!("Physics2D.OverlapCircleNonAlloc with more hits than its buffer holds");
-        }
+        let mut hits = self.overlap_circle(V::new(world_point[0], world_point[1]), 0.1, DEFAULT_RAYCAST_LAYERS);
+        // OverlapCircleArray_Binding (180bf4620): the query's first min(count, buffer length) colliders.
+        hits.truncate(32);
         for (physical, collider) in hits {
             self.flamethrower_affect_collider(i, physical, collider, dir, world_point);
         }

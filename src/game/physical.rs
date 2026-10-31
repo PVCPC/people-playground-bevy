@@ -748,8 +748,22 @@ impl Game {
             ph.Temperature = mathf::clamp(-273.15, ph.Temperature, 5_000_000.0);
         }
         self.on_collision_stay_without_sleep(p);
-        if self.physicals[p].IsUnderWater && self.random.value() > 0.95 && !self.physicals[p].decal_controllers.is_empty() {
-            // ponytail: underwater decal fading is visual only; decals are not rewritten yet.
+        if self.physicals[p].IsUnderWater
+            && self.random.value() > 0.95
+            && !self.physicals[p].decal_controllers.is_empty()
+            && mathf::sqr_magnitude(self.physicals[p].rigidbody.velocity(&self.world)) > 2.0
+        {
+            // Each decal fainter than 0.2 leaves localDecalPositions (its GameObject is destroyed), the others fade
+            // by 0.2. Creation keeps decal positions apart, so the removed position is the decal's own.
+            for c in &mut self.physicals[p].decal_controllers {
+                c.decals.retain_mut(|decal| {
+                    if decal.colour[3] < 0.2 {
+                        return false;
+                    }
+                    decal.colour[3] = mathf::max(0.0, decal.colour[3] - 0.2);
+                    true
+                });
+            }
         }
         self.stab_fixed_update(p);
         if self.physicals[p].OnFire {
@@ -814,8 +828,17 @@ impl Game {
                     ph.outOfBoundsDuration = 0.0;
                 } else {
                     ph.outOfBoundsDuration += 1.0;
-                    // ponytail: Disintegrate / Destroy(root) are not rewritten yet.
-                    assert!(ph.outOfBoundsDuration < 5.0, "out-of-bounds removal is not rewritten yet");
+                    if ph.outOfBoundsDuration >= 5.0 {
+                        if ph.parent.is_some() {
+                            if !ph.isDisintegrated && ph.Disintegratable {
+                                self.physical_disintegrate(p);
+                            }
+                        } else {
+                            // Object.Destroy(transform.root.gameObject): a physical without a parent is its root.
+                            let id = ph.id;
+                            self.destroy_object(id);
+                        }
+                    }
                 }
             }
         }
@@ -1108,13 +1131,10 @@ impl Game {
         self.splash_request(pool);
     }
 
-    /// Transform.TransformPoint for a 2D point of a physical object's transform.
-    /// ponytail: managed-style TRS; the engine's native hierarchy math (parent scale) is not rewritten yet.
+    /// Transform.TransformPoint of a 2D point (z 0) on a physical object's transform.
     pub fn transform_point(&self, p: usize, local: [f32; 2]) -> [f32; 2] {
-        let t = &self.physicals[p].transform;
-        let s = [local[0] * t.localScale[0], local[1] * t.localScale[1], 0.0];
-        let r = mathf::rotate(t.rotation, s);
-        [r[0] + t.position[0], r[1] + t.position[1]]
+        let v = self.transform_point3(p, [local[0], local[1], 0.0]);
+        [v[0], v[1]]
     }
 }
 

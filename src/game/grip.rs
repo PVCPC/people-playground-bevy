@@ -96,10 +96,9 @@ impl Game {
         let point = self.transform_point3(me, grip);
         let world = [point[0], point[1]];
         // OverlapCircleNonAlloc into a 32-element buffer.
-        let hits = self.overlap_circle(V::new(world[0], world[1]), grip[2], DEFAULT_RAYCAST_LAYERS);
-        if hits.len() > 32 {
-            unimplemented!("GripBehaviour.PickUpNearestObject: more colliders than its buffer of 32");
-        }
+        let mut hits = self.overlap_circle(V::new(world[0], world[1]), grip[2], DEFAULT_RAYCAST_LAYERS);
+        // OverlapCircleArray_Binding (180bf4620): the query's first min(count, buffer length) colliders.
+        hits.truncate(32);
         let root = self.transform_root_id(me);
         let mut nearest = f32::MAX;
         let mut found = None;
