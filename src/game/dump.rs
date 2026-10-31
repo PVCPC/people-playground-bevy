@@ -1333,7 +1333,7 @@ pub fn compare(g: &mut Game, s: &Snapshot) -> Vec<String> {
     bleeding.sort_by_key(|&b| g.bleeding[b].CirculationBehaviour);
     let mut splats: Vec<usize> = bleeding.iter().filter_map(|&b| g.bleeding[b].BloodSplatController).collect();
     splats.extend((0..g.splats.len()).filter(|i| !splats.contains(i)).collect::<Vec<_>>());
-    splats.retain(|&i| !g.splats[i].destroyed);
+    splats.retain(|&i| !g.splats[i].destroyed || g.splats_destroying.contains(&i));
     let inactive: Vec<usize> = g.blood_puffs.iter().filter(|b| !(b.active && b.emitter_active)).map(|b| b.splat).collect();
     for (&i, r) in splats.iter().zip(s.of("FancyBloodSplatController")) {
         if let Some(a) = r.get("active") {
@@ -1746,8 +1746,10 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
             ("FM", "FE") => {
                 // The recorder's scripted LimbBehaviour.Crush (PPG_CRUSH) before the physics step.
                 if let Some((_, limb)) = prev.snap.iter().find(|(k, _)| k == "crush") {
-                    let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
-                    g.limb_crush(l);
+                    for limb in limb.split(',') {
+                        let l = g.limbs.iter().position(|l| &g.physicals[l.PhysicalBehaviour].name == limb).ok_or(format!("no limb {limb}"))?;
+                        g.limb_crush(l);
+                    }
                 }
                 // The recorder's scripted LimbBehaviour.Slice (PPG_SLICE).
                 if let Some((_, limbs)) = prev.snap.iter().find(|(k, _)| k == "slice") {
@@ -1763,7 +1765,7 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                     let rb = g.physicals[p].rigidbody.clone();
                     rb.set_velocity(&mut g.world, [vx, vy]);
                 }
-                g.simulate_physics();
+                g.simulate_to_fixed_waits();
                 diffs = compare_physics(&mut g, &prev, &cur)?;
             }
             ("US", "UE") => {
@@ -1789,6 +1791,9 @@ pub fn loop_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
                 eprintln!("  {d}");
             }
             return Err(format!("{} diffs", diffs.len()));
+        }
+        if cur.pt == "FE" {
+            g.fixed_delayed_calls();
         }
         prev = cur;
     }
@@ -1828,7 +1833,7 @@ pub fn script_test(dump: &Path, rig: &HumanRig) -> Result<(), String> {
             g.render_callbacks(&pair[1])?;
             g.end_of_frame_calls();
         } else if physics {
-            g.simulate_physics();
+            g.simulate_to_fixed_waits();
             diffs = compare_physics(&mut g, &pair[0], &pair[1])?;
         } else {
             g.fixed_update_scripts();

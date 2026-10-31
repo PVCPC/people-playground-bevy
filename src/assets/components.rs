@@ -333,6 +333,9 @@ pub struct SpriteRenderer {
     pub flip_x: bool,
     pub flip_y: bool,
     pub draw_mode: i32,
+    pub adaptive_mode_threshold: f32,
+    /// SpriteTileMode: Continuous 0, Adaptive 1.
+    pub sprite_tile_mode: i32,
     pub size: [f32; 2],
     pub mask_interaction: i32,
     pub sprite_sort_point: i32,
@@ -366,8 +369,8 @@ impl SpriteRenderer {
         r.align();
         let draw_mode = r.i32()?;
         let size = vec2(r)?;
-        let _adaptive_mode_threshold = r.f32()?;
-        let _sprite_tile_mode = r.i32()?;
+        let adaptive_mode_threshold = r.f32()?;
+        let sprite_tile_mode = r.i32()?;
         let _was_sprite_assigned = flag(r)?;
         let v = Self {
             game_object,
@@ -380,6 +383,8 @@ impl SpriteRenderer {
             flip_x,
             flip_y,
             draw_mode,
+            adaptive_mode_threshold,
+            sprite_tile_mode,
             size,
             mask_interaction: r.i32()?,
             sprite_sort_point: r.i32()?,

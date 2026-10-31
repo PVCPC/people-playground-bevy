@@ -291,7 +291,8 @@ pub(crate) struct ObjectSprite(usize, f32);
 #[derive(Component)]
 pub(crate) struct RendererSprite(usize, f32);
 
-type Textures = std::collections::HashMap<(usize, i64), Handle<Image>>;
+/// Each decoded texture with its width and height.
+type Textures = std::collections::HashMap<(usize, i64), (Handle<Image>, [f32; 2])>;
 
 /// TagManager.asset's m_SortingLayers uniqueIDs, in draw order (Bottom first). A SpriteRenderer's sortingLayerID is one of them.
 const SORTING_LAYERS: [u32; 8] = [334215217, 1370879715, 0, 182652991, 1377110059, 2185794113, 2257819283, 2607693843];
@@ -326,8 +327,8 @@ fn sprite_depths(keys: &[SortKey]) -> Vec<f32> {
 
 /// A sprite made this frame, with the key that ranks it.
 enum NewSprite {
-    Object(usize, f32, Sprite, Anchor),
-    Renderer(usize, f32, Sprite, Anchor),
+    Object(usize, f32, Drawn),
+    Renderer(usize, f32, Drawn),
 }
 
 /// A sprite from the game's data for each non-limb physical object and each other SpriteRenderer without one;
@@ -336,6 +337,8 @@ enum NewSprite {
 pub(crate) fn object_sprites(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
     mut play: ResMut<Play>,
     mut textures: Local<Textures>,
     mut placed: Query<(Entity, &SortKey, &mut Transform)>,
@@ -351,15 +354,15 @@ pub(crate) fn object_sprites(
         if limbs.contains(&p) {
             continue;
         }
-        let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
+        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
         let key = SortKey { layer: sorting_layer_index(g.physicals[p].sprite_layer), order, group: 0, index: p };
-        new.push((key, NewSprite::Object(p, scale, sprite, anchor)));
+        new.push((key, NewSprite::Object(p, scale, drawn)));
     }
     for i in done.1..g.renderers.len() {
         let (r, color, order) = g.renderers[i].sprite;
-        let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.renderers[i].draw) else { continue };
+        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut textures, r, color, g.renderers[i].draw) else { continue };
         let key = SortKey { layer: sorting_layer_index(g.renderers[i].layer), order, group: 1, index: i };
-        new.push((key, NewSprite::Renderer(i, scale, sprite, anchor)));
+        new.push((key, NewSprite::Renderer(i, scale, drawn)));
     }
     done = (g.physicals.len(), g.renderers.len());
     (play.done.1, play.done.2) = done;
@@ -380,19 +383,161 @@ pub(crate) fn object_sprites(
     }
     for ((key, sprite), &depth) in new.into_iter().zip(fresh) {
         match sprite {
-            NewSprite::Object(p, scale, sprite, anchor) => {
-                commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, depth), key));
-            }
-            NewSprite::Renderer(i, scale, sprite, anchor) => {
-                commands.spawn((RendererSprite(i, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, depth), key));
-            }
+            NewSprite::Object(p, scale, drawn) => drawn.insert(commands.spawn((ObjectSprite(p, scale), Transform::from_xyz(0.0, 0.0, depth), key))),
+            NewSprite::Renderer(i, scale, drawn) => drawn.insert(commands.spawn((RendererSprite(i, scale), Transform::from_xyz(0.0, 0.0, depth), key))),
         }
     }
 }
 
-/// The Bevy sprite for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
+/// How a SpriteRenderer reaches Bevy: a Simple one as a Sprite, a Sliced or Tiled one as the mesh Unity builds for it.
+enum Drawn {
+    Sprite(Sprite, Anchor),
+    Mesh(Handle<Mesh>, Handle<ColorMaterial>),
+}
+
+impl Drawn {
+    fn insert(self, mut entity: EntityCommands) {
+        match self {
+            Drawn::Sprite(sprite, anchor) => entity.insert((sprite, anchor)),
+            Drawn::Mesh(mesh, material) => entity.insert((Mesh2d(mesh), MeshMaterial2d(material))),
+        };
+    }
+}
+
+/// A sprite's input to Unity's PrepareSpriteTilingData.
+struct Tiling {
+    size: [f32; 2],
+    /// SpriteDrawMode: Sliced 1, Tiled 2.
+    draw_mode: i32,
+    adaptive: bool,
+    threshold: f32,
+    /// Sprite.rect's width and height in pixels.
+    rect: [f32; 2],
+    pivot: [f32; 2],
+    /// left, bottom, right, top in pixels.
+    border: [f32; 4],
+    pixels_to_units: f32,
+    /// uvMin.xy, uvMax.xy.
+    uv: [f32; 4],
+}
+
+/// GetSourceAndDestinationRect on one axis: the (source start, source length, destination start, destination length)
+/// of the near border, the middle and the far border, without those that are empty.
+fn nine_slice_spans(near: f32, far: f32, rect: f32, length: f32) -> Vec<[f32; 4]> {
+    let both = near + far;
+    let scale = if length < both { length / both } else { 1.0 };
+    let (mut source, mut destination, mut spans) = (0.0, 0.0, Vec::new());
+    for [s, d] in [[near, near * scale], [rect - both, length - both], [far, far * scale]] {
+        if !(s <= 0.0 || d <= 0.0) {
+            spans.push([source, s, destination, d]);
+        }
+        source += if s < 0.0 { 0.0 } else { s };
+        destination += if d < 0.0 { 0.0 } else { d };
+    }
+    spans
+}
+
+/// One axis of a section's whole tiles at Adaptive: below the threshold the last fraction stretches the others.
+fn adaptive_tiles(area: f32, tile: f32, threshold: f32) -> f32 {
+    let ratio = area / tile;
+    let nearest = ratio.round_ties_even();
+    let whole = nearest - if ratio < nearest { 1.0 } else { 0.0 };
+    let frac = ratio - whole;
+    f32::max(1.0, whole + if tile * threshold < frac { 1.0 } else { 0.0 })
+}
+
+/// The quads of PrepareSpriteTilingData + GenerateSpriteTileMesh, each four (position, uv) in Unity's sprite space.
+fn tile_quads(t: &Tiling) -> Vec<[([f32; 2], [f32; 2]); 4]> {
+    let units = 1.0 / t.pixels_to_units;
+    let rect = t.rect.map(|v| v * units);
+    let b = t.border.map(|v| v * units);
+    let origin = [0, 1].map(|i| -(t.rect[i] * t.pivot[i]) * t.size[i] / t.rect[i]);
+    let across = nine_slice_spans(b[0], b[2], rect[0], t.size[0].abs());
+    let up = nine_slice_spans(b[1], b[3], rect[1], t.size[1].abs());
+    let at = [0, 1].map(|i| origin[i] + if t.size[i] < 0.0 { t.size[i] } else { 0.0 });
+    // Rows from the bottom, each from the left: (uv offset, tile, position, area).
+    let sections: Vec<[[f32; 2]; 4]> = up
+        .iter()
+        .flat_map(|y| across.iter().map(move |x| (x, y)))
+        .map(|(x, y)| [[x[0], y[0]], [x[1], y[1]], [x[2] + at[0], y[2] + at[1]], [x[3], y[3]]])
+        .collect();
+    let (mut verts, mut indices) = (0i32, 0i32);
+    for [_, tile, _, area] in &sections {
+        if t.draw_mode != 2 {
+            verts += 4;
+            indices += 6;
+            continue;
+        }
+        let count = [0, 1].map(|i| if t.adaptive { adaptive_tiles(area[i], tile[i], t.threshold) } else { (area[i] / tile[i]).ceil() });
+        let product = count[0] * count[1];
+        verts = (product * 4.0 + verts as f32) as i32;
+        indices = (product * 6.0 + indices as f32) as i32;
+    }
+    let (uv_min, uv_max) = ([t.uv[0], t.uv[1]], [t.uv[2], t.uv[3]]);
+    // Too big for one mesh, or nothing at all: the plain quad.
+    if verts <= 0 || verts >= 0xffff || indices >= 0x2fffd {
+        let max = [origin[0] + t.size[0], origin[1] + t.size[1]];
+        return vec![[(origin, uv_min), ([max[0], origin[1]], [uv_max[0], uv_min[1]]), (max, uv_max), ([origin[0], max[1]], [uv_min[0], uv_max[1]])]];
+    }
+    let span = [uv_max[0] - uv_min[0], uv_max[1] - uv_min[1]];
+    let uv_of = |v: f32, i: usize| v * (1.0 / rect[i]) * span[i] + [uv_min[0], uv_min[1]][i];
+    let mut quads = Vec::new();
+    for [offset, tile, position, area] in &sections {
+        let (count, used) = if t.draw_mode != 2 {
+            ([1.0, 1.0], *area)
+        } else if t.adaptive {
+            let count = [0, 1].map(|i| adaptive_tiles(area[i], tile[i], t.threshold));
+            (count, [area[0] / count[0], area[1] / count[1]])
+        } else {
+            ([area[0] / tile[0], area[1] / tile[1]], *tile)
+        };
+        let (u0, v0) = (uv_of(offset[0], 0), uv_of(offset[1], 1));
+        let (u1, v1) = (uv_of(offset[0] + tile[0], 0), uv_of(offset[1] + tile[1], 1));
+        let mut y = 0;
+        while count[1] > y as f32 {
+            let yf = y as f32;
+            let h = if count[1] - yf > 1.0 || t.adaptive { 1.0 } else { count[1] - yf };
+            let top = (1.0 - h) * v0 + h * v1;
+            let mut x = 0;
+            while count[0] > x as f32 {
+                let xf = x as f32;
+                let w = if count[0] - xf > 1.0 || t.adaptive { 1.0 } else { count[0] - xf };
+                let right = (1.0 - w) * u0 + w * u1;
+                let (x2, y2) = (w + xf, h + yf);
+                let at = |x: f32, y: f32| [x * used[0] + position[0], y * used[1] + position[1]];
+                quads.push([(at(xf, yf), [u0, v0]), (at(x2, yf), [right, v0]), (at(x2, y2), [right, top]), (at(xf, y2), [u0, top])]);
+                x += 1;
+            }
+            y += 1;
+        }
+    }
+    quads
+}
+
+/// The Bevy mesh of [`tile_quads`], mirrored by the renderer's flips about the pivot as the sprite shader's _Flip does.
+fn tile_mesh(t: &Tiling, flip: [bool; 2]) -> Mesh {
+    let sign = flip.map(|f| if f { -1.0 } else { 1.0 });
+    let (mut positions, mut uvs, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+    for quad in tile_quads(t) {
+        let first = positions.len() as u32;
+        let p: Vec<[f32; 3]> = quad.iter().map(|(p, _)| [p[0] * sign[0], p[1] * sign[1], 0.0]).collect();
+        // Mesh2d culls back faces; Unity's sprites draw both.
+        let front = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]) >= 0.0;
+        indices.extend(if front { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] }.map(|i| first + i));
+        positions.extend(p);
+        // Unity's v runs up; an Image's down.
+        uvs.extend(quad.iter().map(|(_, uv)| [uv[0], 1.0 - uv[1]]));
+    }
+    let mut mesh = Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(bevy::mesh::Indices::U32(indices));
+    mesh
+}
+
+/// What Bevy draws for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
 /// the scale from its units to the world.
-fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, textures: &mut Textures, r: crate::assets::db::ObjRef, color: [f32; 4], draw: ([bool; 2], i32, [f32; 2])) -> Option<(Sprite, Anchor, f32)> {
+fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<ColorMaterial>, textures: &mut Textures, r: crate::assets::db::ObjRef, color: [f32; 4], draw: crate::game::SpriteDraw) -> Option<(Drawn, f32)> {
     {
         let s = match crate::assets::components::Sprite::read(db.data(r)) {
             Ok(s) => s,
@@ -402,7 +547,7 @@ fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, text
             }
         };
         let t = db.resolve(r.file, s.texture)?;
-        let handle = match textures.get(&(t.file, t.path_id)) {
+        let (handle, texture) = match textures.get(&(t.file, t.path_id)) {
             Some(h) => h.clone(),
             None => {
                 let tex = crate::assets::components::Texture2D::read(db.data(t));
@@ -417,35 +562,34 @@ fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, text
                     bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
                     bevy::asset::RenderAssetUsages::RENDER_WORLD,
                 );
-                let h = images.add(image);
-                textures.insert((t.file, t.path_id), h.clone());
-                h
+                let entry = (images.add(image), [tex.width as f32, tex.height as f32]);
+                textures.insert((t.file, t.path_id), entry.clone());
+                entry
             }
         };
-        let height = images.get(&handle).map_or(0.0, |i| i.height() as f32);
         // The packed region (texture_rect) sits at texture_rect_offset inside the sprite's rect.
         let [x, y, w, h] = s.texture_rect;
+        let linear = Color::srgba(color[0], color[1], color[2], color[3]);
+        let ([flip_x, flip_y], draw_mode, size, threshold, adaptive) = draw;
+        if draw_mode != 0 {
+            // The rect's corner in the texture: the packed region less its offset.
+            let [u, v] = [(x - s.texture_rect_offset[0]) / texture[0], (y - s.texture_rect_offset[1]) / texture[1]];
+            let uv = [u, v, u + s.rect[2] / texture[0], v + s.rect[3] / texture[1]];
+            let tiling = Tiling { size, draw_mode, adaptive, threshold, rect: [s.rect[2], s.rect[3]], pivot: s.pivot, border: s.border, pixels_to_units: s.pixels_to_units, uv };
+            let mesh = meshes.add(tile_mesh(&tiling, [flip_x, flip_y]));
+            let material = materials.add(ColorMaterial { color: linear, texture: Some(handle), ..default() });
+            return Some((Drawn::Mesh(mesh, material), 1.0));
+        }
         let mut sprite = Sprite::from_image(handle);
-        sprite.rect = Some(Rect::new(x, height - y - h, x + w, height - y));
+        sprite.rect = Some(Rect::new(x, texture[1] - y - h, x + w, texture[1] - y));
         sprite.custom_size = Some(Vec2::new(w, h) / s.pixels_to_units);
-        sprite.color = Color::srgba(color[0], color[1], color[2], color[3]);
-        let ([flip_x, flip_y], draw_mode, size) = draw;
+        sprite.color = linear;
         (sprite.flip_x, sprite.flip_y) = (flip_x, flip_y);
         let pivot = Vec2::from_array(s.pivot) * Vec2::new(s.rect[2], s.rect[3]) - Vec2::from_array(s.texture_rect_offset);
-        let mut anchor = Anchor(pivot / Vec2::new(w, h) - Vec2::splat(0.5));
-        let mut scale = 1.0;
-        if draw_mode != 0 {
-            // Unity's border is left, bottom, right, top in pixels; Bevy's insets run from the top left.
-            let [l, b, r, t] = s.border;
-            let border = bevy::sprite::BorderRect { min_inset: Vec2::new(l, t), max_inset: Vec2::new(r, b) };
-            // ponytail: Tiled draws as Continuous tiling; Adaptive (SpriteTileMode) would stretch below its threshold.
-            let mode = if draw_mode == 1 { bevy::sprite::SliceScaleMode::Stretch } else { bevy::sprite::SliceScaleMode::Tile { stretch_value: 1.0 } };
-            sprite.image_mode = bevy::sprite::SpriteImageMode::Sliced(bevy::sprite::TextureSlicer { border, center_scale_mode: mode, sides_scale_mode: mode, max_corner_scale: 1.0 });
-            sprite.custom_size = Some(Vec2::from_array(size) * s.pixels_to_units);
-            anchor = Anchor(Vec2::from_array(s.pivot) - Vec2::splat(0.5));
-            scale = 1.0 / s.pixels_to_units;
-        }
-        Some((sprite, anchor, scale))
+        // _Flip mirrors about the pivot; Bevy's flips only swap the uvs, so the anchor mirrors with them.
+        let mut anchor = pivot / Vec2::new(w, h) - Vec2::splat(0.5);
+        anchor *= Vec2::new(if flip_x { -1.0 } else { 1.0 }, if flip_y { -1.0 } else { 1.0 });
+        Some((Drawn::Sprite(sprite, Anchor(anchor)), 1.0))
     }
 }
 
@@ -589,5 +733,64 @@ mod tests {
         assert_eq!((g.time.timeAsDouble, g.time.fixedTimeAsDouble), (before.0, before.1));
         assert_eq!((g.time.deltaTime, g.time.frameCount), (0.0, before.2 + 1));
         assert!(g.time.realtimeSinceStartup > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tiling_tests {
+    use super::*;
+
+    // A 4 by 4 unit sprite at 1 pixel per unit, centre pivot, no border, whole texture.
+    fn tiled(size: [f32; 2], adaptive: bool, threshold: f32) -> Tiling {
+        Tiling { size, draw_mode: 2, adaptive, threshold, rect: [4.0, 4.0], pivot: [0.5, 0.5], border: [0.0; 4], pixels_to_units: 1.0, uv: [0.0, 0.0, 1.0, 1.0] }
+    }
+
+    #[test]
+    fn adaptive_stretches_below_the_threshold_and_adds_a_tile_above_it() {
+        // ratio 1.25: the fraction .25 under threshold*tile 2.0 stretches one tile.
+        assert_eq!(adaptive_tiles(5.0, 4.0, 0.5), 1.0);
+        // The same fraction over threshold*tile 0.04 adds a second.
+        assert_eq!(adaptive_tiles(5.0, 4.0, 0.01), 2.0);
+        let stretched = tile_quads(&tiled([5.0, 4.0], true, 0.5));
+        assert_eq!(stretched.len(), 1);
+        assert_eq!(stretched[0][1], ([2.5, -2.0], [1.0, 0.0]));
+    }
+
+    #[test]
+    fn continuous_clips_the_last_tile() {
+        let q = tile_quads(&tiled([6.0, 4.0], false, 0.0));
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[1][0].0, [1.0, -2.0]);
+        assert_eq!(q[1][1], ([3.0, -2.0], [0.5, 0.0]));
+    }
+
+    #[test]
+    fn nine_slice_keeps_borders_and_scales_them_when_too_small() {
+        let mut t = tiled([10.0, 4.0], false, 0.0);
+        t.draw_mode = 1;
+        t.border = [1.0, 0.0, 2.0, 0.0];
+        let q = tile_quads(&t);
+        assert_eq!(q.len(), 3);
+        assert_eq!((q[0][0].0[0], q[0][1].0[0]), (-5.0, -4.0));
+        assert_eq!((q[1][0].0[0], q[1][1].0[0]), (-4.0, 3.0));
+        assert_eq!((q[2][0].0[0], q[2][1].0[0]), (3.0, 5.0));
+        assert_eq!((q[1][0].1[0], q[1][1].1[0]), (0.25, 0.5));
+        // Drawn 1.5 wide: borders 1 and 2 scale by 1.5 / 3, the middle goes.
+        assert_eq!(nine_slice_spans(1.0, 2.0, 4.0, 1.5), vec![[0.0, 1.0, 0.0, 0.5], [2.0, 2.0, 0.5, 1.0]]);
+    }
+
+    #[test]
+    fn too_many_tiles_fall_back_to_one_quad() {
+        let t = Tiling { rect: [1.0, 1.0], ..tiled([1000.0, 1000.0], false, 0.0) };
+        assert_eq!(tile_quads(&t).len(), 1);
+    }
+
+    #[test]
+    fn flips_mirror_about_the_pivot_and_stay_front_facing() {
+        let mesh = tile_mesh(&tiled([4.0, 4.0], false, 0.0), [true, false]);
+        let bevy::mesh::VertexAttributeValues::Float32x3(p) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() else { panic!() };
+        assert_eq!(p[0], [2.0, -2.0, 0.0]);
+        let Some(bevy::mesh::Indices::U32(i)) = mesh.indices() else { panic!() };
+        assert_eq!(i[..3], [0, 2, 1]);
     }
 }

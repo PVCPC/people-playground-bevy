@@ -561,6 +561,8 @@ fn shard_prefab(name: &str, layer: i32, sprite: ObjRef) -> Prefab {
             flip_x: false,
             flip_y: false,
             draw_mode: 0,
+            adaptive_mode_threshold: 0.0,
+            sprite_tile_mode: 0,
             size: [1.0, 1.0],
             mask_interaction: 0,
             sprite_sort_point: 0,
@@ -703,7 +705,7 @@ impl super::Game {
         ph.audio_time_scale = true;
         ph.sprite_bounds = Some(sprite_bounds);
         ph.sprite = Some((sprite, spec.color, 0));
-        ph.sprite_draw = ([false, false], 0, [1.0, 1.0]);
+        ph.sprite_draw = ([false, false], 0, [1.0, 1.0], 0.0, false);
         let address = self.heap_base.unwrap_or(super::link::MODELLED_HEAP_BASE) + ((p as u64) << 11);
         ph.hash_code = ((address >> 3) as u32).wrapping_mul(0x9e37_79b1) as i32;
         self.physicals.push(ph);

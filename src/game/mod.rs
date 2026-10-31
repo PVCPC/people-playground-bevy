@@ -1103,6 +1103,9 @@ pub struct NodeBody {
     pub driven_by: Option<usize>,
 }
 
+/// What a SpriteRenderer draws its sprite with: flips, drawMode, size, adaptiveModeThreshold, tileMode == Adaptive.
+pub type SpriteDraw = ([bool; 2], i32, [f32; 2], f32, bool);
+
 /// A SpriteRenderer on a GameObject without a PhysicalBehaviour: where its Transform hangs, and what it draws.
 #[derive(Clone, Debug)]
 pub struct Renderer {
@@ -1114,7 +1117,7 @@ pub struct Renderer {
     /// The SpriteRenderer component's instance id.
     pub id: i32,
     /// flipX/flipY, drawMode, size.
-    pub draw: ([bool; 2], i32, [f32; 2]),
+    pub draw: SpriteDraw,
     /// GameObject.activeInHierarchy and Renderer.enabled (SetActive keeps it current).
     pub visible: bool,
     /// SpriteRenderer::GetSpriteBounds: the local bounds (center, extents).
@@ -1644,6 +1647,8 @@ pub struct Game {
     pub end_of_frame: Vec<destroyable::Coroutine>,
     /// GlobalShrapnelEmitter.Instance
     pub shrapnel: Option<ballistics::ShrapnelEmitter>,
+    /// Splats that destroyed themselves this fixed step: their Object.Destroy runs after the WaitForFixedUpdate coroutines.
+    pub splats_destroying: Vec<usize>,
     /// Coroutines in WaitForFixedUpdate, in the order they got there.
     pub fixed_update_waits: Vec<destroyable::Coroutine>,
     /// BallisticsEmitter.BallisticIteration coroutines in a wait (`Step::Bullet`); None once resumed or stopped.

@@ -1285,6 +1285,7 @@ impl Game {
             }
         } else if self.splats[s].particles.is_empty() && self.splats[s].DestroyWhenNoParticles {
             self.splats[s].destroyed = true;
+            self.splats_destroying.push(s);
             if id != 0 {
                 self.destroy_object(id);
             }

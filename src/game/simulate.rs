@@ -72,10 +72,16 @@ fn written_pose(b: &crate::b2::world::Body, z: f32, rotation: [f32; 4]) -> ([f32
 }
 
 impl Game {
-    /// PhysicsManager2D::Simulate after the FixedUpdate scripts.
+    /// PhysicsManager2D::Simulate after the FixedUpdate scripts, then the rest of the fixed step's delayed calls.
+    pub fn simulate_physics(&mut self) {
+        self.simulate_to_fixed_waits();
+        self.fixed_delayed_calls();
+    }
+
+    /// PhysicsManager2D::Simulate up to the WaitForFixedUpdate coroutines, where the recorder takes its FE snapshot.
     // The MovePosition/MoveRotation half of SetupMovementStates never acts: its only callers,
     // CustomFixedConstrainedBehaviour and FunLittleGames.Linkage, are on no prefab or scene of the game.
-    pub fn simulate_physics(&mut self) {
+    pub fn simulate_to_fixed_waits(&mut self) {
         self.sync_pending();
         let dt = self.time.fixedDeltaTime;
         self.last_simulation = (self.time.fixedTimeAsDouble, dt);
@@ -106,16 +112,20 @@ impl Game {
         self.update_joints(dt);
         let reports = self.world.process_contacts(true);
         self.send_callback_reports(&reports);
-        // FixedUpdate.ScriptRunDelayedFixedFrameRate, which also resumes the recorder's FE snapshot.
-        // ponytail: the destroys run before that snapshot; order them by time when a recording has gore strings.
-        self.gore_string_delayed_calls(false);
-        // The delayed Start of behaviours instantiated during this FixedUpdate (registered after those calls).
+        // FixedUpdate.ScriptRunDelayedFixedFrameRate runs its queue by time: what earlier steps queued, the delayed
+        // Start of behaviours instantiated during this one, then the coroutines that reached WaitForFixedUpdate; one
+        // that waits for it again here waits for the next step.
+        self.delayed_calls_before(false, self.time.timeAsDouble);
         self.run_pending_starts();
-        // WaitForFixedUpdate (the fixed step's last stage): the coroutines that reached it run on; one that waits for
-        // it again here waits for the next step.
         for c in std::mem::take(&mut self.fixed_update_waits) {
             self.resume_coroutine(c);
         }
+    }
+
+    /// The end of ScriptRunDelayedFixedFrameRate: the calls this step queued, after the WaitForFixedUpdate coroutines.
+    pub fn fixed_delayed_calls(&mut self) {
+        self.gore_string_delayed_calls(false);
+        self.splats_destroying.clear();
     }
 
     /// PhysicsManager2D::Simulate's write-back over the rigidbody update lists: each awake Rigidbody2D's body pose

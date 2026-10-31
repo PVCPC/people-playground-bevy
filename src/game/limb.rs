@@ -1515,6 +1515,11 @@ impl Game {
     /// and component destroys, the attachment and joint destroys and the coroutine resumes (their owners' cancellation
     /// within one pass is not modelled here).
     pub fn gore_string_delayed_calls(&mut self, dynamic: bool) {
+        self.delayed_calls_before(dynamic, f64::INFINITY);
+    }
+
+    /// The due calls queued for before `before`.
+    pub fn delayed_calls_before(&mut self, dynamic: bool, before: f64) {
         let now = self.time.timeAsDouble;
         // (time, kind: 0 break force, 1 gore string destroy, 2 drag joint destroy, 3 person destroy, limb/person)
         let mut due: Vec<(f64, u8, usize)> = Vec::new();
@@ -1544,6 +1549,7 @@ impl Game {
             let frame = self.time.frameCount as i64;
             due.extend(self.coroutines.iter().filter(|c| c.at <= now && super::coroutine::frame_reached(c, frame)).map(|c| (c.at, 6, c.seq as usize)));
         }
+        due.retain(|d| d.0 < before);
         due.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         for (t, kind, l) in due {
             // Still pending: the field that armed it still holds this due time.
