@@ -39,7 +39,6 @@ pub struct Part {
     pub rect: [f32; 4],
     pub size: [f32; 2],
     pub pivot: [f32; 2],
-    pub layer: i32,
     #[serde(default)]
     pub muscle: Option<MuscleSpec>,
     #[serde(default)]
@@ -59,13 +58,8 @@ pub struct MuscleSpec {
     #[serde(default)]
     pub multipliers: Vec<f32>,
     pub upright_force: f32,
-    pub has_brain: bool,
-    #[serde(default)]
-    pub do_balance_jerk: bool,
     #[serde(default)]
     pub balance_muscle_movement: f32,
-    #[serde(default)]
-    pub do_stumble: bool,
     #[serde(default = "one")]
     pub blood_strength_ratio: f32,
 }
@@ -291,17 +285,6 @@ impl Curve {
 }
 
 impl PoseAngle {
-    /// LimbPose.EvaluateAngleAt: the pose angle in degrees at an explicit animation time.
-    pub fn degrees_at(&self, cache: &mut CurveCache, time: f32) -> f32 {
-        match &self.animation {
-            None => self.degrees(),
-            Some(a) => {
-                let t = a.time_offset + time / a.duration;
-                a.start + (a.end - a.start) * a.curve.evaluate(cache, t).clamp(0.0, 1.0)
-            }
-        }
-    }
-
     pub fn degrees(&self) -> f32 {
         self.angle_degrees
             .unwrap_or_else(|| self.angle.to_degrees())
@@ -329,9 +312,6 @@ pub struct HumanPose {
     pub animation_speed: f32,
     pub angles: Vec<PoseAngle>,
 }
-
-/// PoseState.Stumbling
-pub const STUMBLING: i32 = 3;
 
 #[derive(Deserialize)]
 pub struct Joint {
@@ -810,10 +790,7 @@ mod tests {
             strength: f32::INFINITY,
             multipliers: vec![],
             upright_force: 0.0,
-            has_brain: true,
-            do_balance_jerk: false,
             balance_muscle_movement: 0.0,
-            do_stumble: false,
             blood_strength_ratio: 1.0,
         });
         assert!(rig.validate().is_err());

@@ -6,13 +6,9 @@ Requires your own installed copy of People Playground. Original assets, extracte
 
 ## Current behavior
 
-- A human ragdoll imported from the installed game's prefab: 14 bodies and 13 joints.
-- Original skin texture, sprite rectangles, pivots, masses, damping, collider boxes, contact materials, anchors, and joint limits loaded from a private local cache.
-- Mouse dragging and throwing, manual joint detachment, human/crate spawning, pause, and reset.
-- Healthy-muscle control with imported Rest, Sitting, and Flat pose targets and strength settings; upright support while grounded.
-- A limp toggle and joint-connectivity checks that disable muscles on disconnected limbs or after brain disconnection.
+- The game itself rewritten from the installed copy: humans and androids, limbs, circulation, items, maps and the menus.
 - Installation and cache-fingerprint checks at startup.
-- Headless engine tests with no window or desktop control.
+- Map tests with no window or desktop control.
 
 Bevy 0.20 handles rendering. Physics is a Rust rewrite of the Box2D build inside the game's UnityPlayer.dll (src/b2): broad phase, contacts, island solve, continuous (TOI) solve and hinge joints, each compared bit for bit against the DLL by a private probe. Muscles set HingeJoint2D motor fields and Rigidbody2D forces the way the native setters do. Fresh caches import the fixed timestep, gravity, velocity/position iteration counts and correction limits from the exported project settings (this installation: 50 Hz, 16/16 iterations, no substeps). Full trajectories have not yet been compared against the running game.
 
@@ -20,7 +16,7 @@ Fresh caches resolve each human body's runtime physics material through its phys
 
 Joint signs follow the recovered native body convention: body A is the attached body, body B is the connected body, and the joint angle is B minus A minus the reference angle. Fresh caches preserve original pose and limit degrees and convert them using single-precision arithmetic at the physics boundary. Imported pose angles and limits retain their original signs. This corrects the prototype's mirrored nonzero poses.
 
-Living physiology, injury-dependent strength, wounds and blood, heat and electricity, the original item catalog, contraptions, saves, and mods are not implemented. The hinge uses the older coupled-limit layout also found in [Box2D 2.3.1](https://github.com/erincatto/box2d/blob/v2.3.1/Box2D/Box2D/Dynamics/Joints/b2RevoluteJoint.h), recovered with symbols matching the installed Unity DLL; that does not establish the exact Unity fork version or equivalent full-frame trajectories. A full step with joints, Unity's layer contact filter, and PPG's sleep and collision-quality settings are not yet compared against the game. The imported human starts with zero joint reference angles; nonzero-reference rigs have not been validated. Human bodies currently stay awake so small muscle commands continue to run. Pose tracking can be obstructed by floor contact. The crate and toolbar are prototype elements. Experimental desktop-toggle code exists, but overlay testing and further work are deferred.
+Anything not rewritten yet stops at `unimplemented!()`; nothing silently stands in for it.
 
 ## Requirements
 
@@ -75,29 +71,15 @@ cargo run -- --game-dir "F:\SteamLibrary\steamapps\common\People Playground"
 
 `PPG_GAME_DIR` can also specify the installation. `--cache "<directory>"` selects another prepared cache. The app requires the installed executable, gameplay assembly, and asset packages, and compares their sizes and modification times against the cache at startup. This is a dependency check, not Steam ownership verification.
 
-| Control | Action |
-| --- | --- |
-| Left mouse | Drag and throw |
-| Right mouse | Detach the selected limb's joint |
-| N | Spawn a human at the cursor |
-| B | Spawn a prototype crate |
-| M, while hovering a human | Toggle that human's muscles / limp state |
-| P, while hovering a human | Cycle Rest, Sitting, and Flat poses |
-| Space | Pause or resume |
-| R | Reset the sandbox |
-| Escape | Exit |
-
-F10 is an experimental desktop toggle; use the normal window for now.
-
 ## Verify without opening a window
 
 ```powershell
 python scripts/test_prepare_assets.py
 cargo test
-cargo run -- --headless-test
+cargo run -- --play-map-test Default --item "Brick Cube" --target Human
 ```
 
-The headless test requires a local game installation and prepared cache. It simulates passive settling, dragging, and release under gravity, checking body/joint counts, finite physics, floor containment, joint anchor gaps, and render-transform synchronization. With a muscle-enabled cache it also checks upright rest at five and ten seconds, limp collapse, all sitting-pose motors in free space, limb/brain disconnection, and independence between two humans. Unit tests check isolated hinge tracking, angular momentum conservation, the total torque budget across all velocity iterations, disabled-joint behavior, and position/angle correction with an offset center of mass without adding velocity. These tests create no window or renderer.
+The map test requires a local game installation and prepared cache. It spawns the item and the target on the map and runs the rewritten game without a window; it exits non-zero on any `unimplemented!` path. Unit tests create no window or renderer.
 
 `src/motor.rs` implements the healthy, static-pose motor-command calculations used by the live simulation, retaining the original degree units until conversion at the physics boundary. A local comparison against extracted C# methods passed 2,052 deterministic cases with identical float bits for speed and torque, including the exact half-turn boundary. The check verifies command math; it does not establish native physics, animated-pose, or injury parity.
 
@@ -112,5 +94,3 @@ cargo run -- --reference-test ".\reference-probe\bin\Debug\net9.0\ReferenceProbe
 ```powershell
 cargo run -- --native-reference-test ".\reference-probe\native\bin\Debug\net9.0\NativeProbe.exe"
 ```
-
-An optional `--smoke-test` opens a rendered window and checks the original texture, floor collisions, and joints over at least four seconds of simulation. Run that only when explicitly desired.

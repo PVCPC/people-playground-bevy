@@ -26,6 +26,7 @@ pub struct MotorOutput {
 }
 
 impl MotorOutput {
+    #[cfg(test)]
     pub fn clamp_native_properties(mut self) -> Self {
         // Unity's native HingeJoint2D setter maps NaN to each property's lower bound.
         self.speed = if self.speed.is_nan() {
