@@ -292,10 +292,18 @@ impl Game {
                         }
                         // Destroys its trail mesh (rendering).
                         "EnergySwordMotionBlur" => {}
+                        "ImmobilityFieldBehaviour" => {
+                            let i = g.immobility_fields.iter().position(|s| s.id == cid).expect("the ImmobilityFieldBehaviour");
+                            g.immobility_field_destroy_all_joints(i);
+                        }
                         "EnergySwordBehaviour" => {
                             let i = g.energy_swords.iter().position(|s| s.id == cid).expect("the EnergySwordBehaviour");
                             let blur = inst.objects[g.energy_swords[i].MotionBlur].components[0];
                             g.energy_sword_destroy(i, blur);
+                        }
+                        "FreezeBehaviour" => {
+                            let i = g.freezes.iter().position(|s| s.id == cid).expect("the FreezeBehaviour");
+                            g.freeze_destroy(i);
                         }
                         "ChainsawBehaviour" => {
                             let i = g.chainsaws.iter().position(|s| s.id == cid).expect("the ChainsawBehaviour");
@@ -372,6 +380,8 @@ impl Game {
                     }
                     g.behaviour_of.remove(&cid);
                 }
+                // The BloodWireBehaviours the BloodWireTool added come after the prefab's components.
+                g.blood_wire_object_destroy(&inst.objects[x].components);
                 // The CheckOnDestroyAttachment that FirearmAttachmentBehaviour.Awake added.
                 g.check_on_destroy_attachment(key);
                 // An ActOnDestroy added at run time is the object's last component.

@@ -239,6 +239,8 @@ impl Game {
                 c => unimplemented!("{c}.Slice"),
             }
         }
+        // The BloodWireBehaviours the tool added come after the prefab's components.
+        self.blood_wire_slice(p);
     }
 
     /// SendMessage("Damage", float.MaxValue, DontRequireReceiver): LimbBehaviour is the only class with a Damage method.

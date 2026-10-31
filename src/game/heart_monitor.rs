@@ -9,12 +9,14 @@ script! {
     HeartMonitor {
         /// Activated: toggled by Use.
         Activated: bool = false,
-        /// IsConnected: set by a BloodWire (not rewritten), so false in every run here.
+        /// IsConnected: set by a BloodWireBehaviour (blood_wire.rs).
         IsConnected: bool = false,
     }
     links {
         /// The component's instance id.
         id: i32 = 0,
+        /// The PhysicalBehaviour on its GameObject (a BloodWireBehaviour finds the monitor through it).
+        physical: usize = 0,
         /// Behaviour.enabled
         enabled: bool = true,
         /// ConnectedLimb: the limb whose heartbeat is measured (set by the wire; a null one is an NRE in Measure).

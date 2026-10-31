@@ -117,6 +117,10 @@ pub struct Linked {
     pub syringes: HashMap<usize, usize>,
     pub jet_engines: HashMap<usize, usize>,
     pub chainsaws: HashMap<usize, usize>,
+    pub freezes: HashMap<usize, usize>,
+    pub emps: HashMap<usize, usize>,
+    pub decimators: HashMap<usize, usize>,
+    pub immobility_fields: HashMap<usize, usize>,
     pub energy_swords: HashMap<usize, usize>,
     pub blasters: HashMap<usize, usize>,
     pub blasterbolts: HashMap<usize, usize>,
@@ -560,6 +564,14 @@ pub(super) fn check_rewritten(class: &str) {
         // chainsaw.rs: Start draws the seed, FixedUpdate saws, Update adds speed, OnDestroy destroys the joints; the
         // audio, particles and the saw sprite are presentation.
         "ChainsawBehaviour" => {}
+        // freeze.rs: Start keeps the velocities and requests the freeze, OnDestroy releases it; the outline is rendering.
+        "FreezeBehaviour" => {}
+        // emp.rs: Use runs Activate; Awake's Killzone clone is presentation (no collider, sized for rendering).
+        "EMPBehaviour" => {}
+        // decimator.rs
+        "DecimatorBehaviour" => {}
+        // immobility_field.rs
+        "ImmobilityFieldBehaviour" => {}
         // energy_sword.rs: Awake hides the blade, Start, Use, FixedUpdate, Update, OnDisable and OnDestroy are
         // rewritten; the audio and particles are presentation.
         "EnergySwordBehaviour" => {}
@@ -2275,6 +2287,7 @@ impl Game {
                 load_values(x.fields(), v)?;
                 x.id = inst.objects[o].components[c];
                 x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("HeartMonitorBehaviour without a PhysicalBehaviour (a wire's GetComponent finds it through one)"));
                 heart_monitors.insert(o, self.heart_monitors.len());
                 self.heart_monitors.push(x);
             }
@@ -2344,6 +2357,7 @@ impl Game {
                 load_values(x.fields(), v)?;
                 x.id = inst.objects[o].components[c];
                 x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("CardiopulmonaryBypassMachineBehaviour without a PhysicalBehaviour (a wire's GetComponent finds it through one)"));
                 // UpdateActivation (Start, OnEnable) uses Cosmetics and StatusText, and OnDisable the LoopSource, without a null check.
                 let cosmetics = field(v, "Cosmetics")?.pptr().ok_or("Cosmetics")?;
                 if cosmetics.is_null() || cosmetics.file != 0 || field(v, "StatusText")?.pptr().ok_or("StatusText")?.is_null() || field(v, "LoopSource")?.pptr().ok_or("LoopSource")?.is_null() {
@@ -3132,6 +3146,10 @@ impl Game {
         // The classes that read the translated behaviours: JetEngineBehaviour toggles its GuideTemperatureBehaviour.
         let mut jet_engines = HashMap::new();
         let mut chainsaws = HashMap::new();
+        let mut freezes = HashMap::new();
+        let mut emps = HashMap::new();
+        let mut decimators = HashMap::new();
+        let mut immobility_fields = HashMap::new();
         let mut energy_swords = HashMap::new();
         let mut signal_converters = HashMap::new();
         for o in 0..n {
@@ -3162,6 +3180,63 @@ impl Game {
                 jet_engines.insert(o, self.jet_engines.len());
                 self.jet_engines.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "ImmobilityFieldBehaviour") {
+                let mut x = super::immobility_field::ImmobilityField::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.unwrap_or_else(|| unimplemented!("ImmobilityFieldBehaviour.PhysicalBehaviour null (NullReferenceException)"));
+                // AddComponent<FrictionJoint2D> and GetComponents<FrictionJoint2D> act on the script's GameObject.
+                if l.arenas.physical.get(&o) != Some(&x.physical) {
+                    unimplemented!("ImmobilityFieldBehaviour on another GameObject than its PhysicalBehaviour (its FrictionJoint2Ds)");
+                }
+                if prefab.objects[o].components.iter().any(|(_, k)| matches!(k, Component::Joint2D(_))) {
+                    unimplemented!("ImmobilityFieldBehaviour on a GameObject with a serialized Joint2D (GetComponents<FrictionJoint2D>)");
+                }
+                x.CaptureObject = l.object(field(v, "CaptureObject")?)?.unwrap_or_else(|| unimplemented!("ImmobilityFieldBehaviour.CaptureObject null (NullReferenceException in UpdateActivation)"));
+                let p = field(v, "Trigger")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("ImmobilityFieldBehaviour.Trigger null or outside its prefab (NullReferenceException)"));
+                let k = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).ok_or("ImmobilityFieldBehaviour.Trigger: dangling reference")?;
+                if !matches!(prefab.objects[k.0].components[k.1].1, Component::Collider2D(_)) {
+                    return Err("ImmobilityFieldBehaviour.Trigger is not a Collider2D".into());
+                }
+                x.Trigger = k;
+                x.colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, k))| matches!(k, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                x.rigidbody = prefab.objects[o].components.iter().position(|(_, k)| matches!(k, Component::Rigidbody2D(_))).map_or(0, |k| inst.objects[o].components[k]);
+                x.CaptureClips = array(v, "CaptureClips")?.len();
+                x.Layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("Layers.m_Bits")? as u32;
+                immobility_fields.insert(o, self.immobility_fields.len());
+                self.immobility_fields.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "DecimatorBehaviour") {
+                let mut x = super::decimator::Decimator::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.unwrap_or_else(|| unimplemented!("DecimatorBehaviour.PhysicalBehaviour null (NullReferenceException in FixedUpdate)"));
+                let p = field(v, "DecimateTrigger")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("DecimatorBehaviour.DecimateTrigger null or outside its prefab (NullReferenceException)"));
+                let k = *prefab.index.get(&ObjRef { file, path_id: p.path_id }).ok_or("DecimatorBehaviour.DecimateTrigger: dangling reference")?;
+                if !matches!(prefab.objects[k.0].components[k.1].1, Component::Collider2D(_)) {
+                    return Err("DecimatorBehaviour.DecimateTrigger is not a Collider2D".into());
+                }
+                x.DecimateTrigger = k;
+                x.colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, k))| matches!(k, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                x.rigidbody = prefab.objects[o].components.iter().position(|(_, k)| matches!(k, Component::Rigidbody2D(_))).map_or(0, |k| inst.objects[o].components[k]);
+                // UpdateActivation plays and stops these unconditionally.
+                for name in ["ParticleSystem", "AudioSource"] {
+                    if l.object(field(v, name)?)?.is_none() {
+                        unimplemented!("DecimatorBehaviour.{name} null (NullReferenceException in UpdateActivation)");
+                    }
+                }
+                for (name, slot) in [("DeleteEffect", &mut x.DeleteEffect), ("BlackHole", &mut x.BlackHole)] {
+                    let p = field(v, name)?.pptr().ok_or(name)?;
+                    if p.is_null() {
+                        unimplemented!("DecimatorBehaviour: Instantiate(null {name}) (ArgumentException)");
+                    }
+                    *slot = db.resolve(file, p).ok_or_else(|| format!("DecimatorBehaviour.{name} outside the data"))?;
+                }
+                decimators.insert(o, self.decimators.len());
+                self.decimators.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "ChainsawBehaviour") {
                 let mut x = super::chainsaw::Chainsaw::default();
                 load_values(x.fields(), v)?;
@@ -3184,6 +3259,27 @@ impl Game {
                 }
                 chainsaws.insert(o, self.chainsaws.len());
                 self.chainsaws.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "EMPBehaviour") {
+                let mut x = super::emp::Emp::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("EMPBehaviour on an object without a PhysicalBehaviour"));
+                // Activate's Instantiate(Effect, ...) throws on a null Effect (ArgumentException).
+                if field(v, "Effect")?.pptr().filter(|p| !p.is_null()).is_none() {
+                    unimplemented!("EMPBehaviour.Effect null (ArgumentException in Activate)");
+                }
+                emps.insert(o, self.emps.len());
+                self.emps.push(x);
+            }
+            if let Some((c, enabled, _)) = script(prefab, o, "FreezeBehaviour") {
+                let mut x = super::freeze::Freeze::default();
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("FreezeBehaviour without a Rigidbody2D (NullReferenceException in Start)"));
+                freezes.insert(o, self.freezes.len());
+                self.freezes.push(x);
             }
             if let Some((c, enabled, v)) = script(prefab, o, "EnergySwordBehaviour") {
                 let mut x = super::energy_sword::EnergySword::default();
@@ -3251,7 +3347,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps,decimators, immobility_fields, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3594,6 +3690,7 @@ impl Game {
                 // OnDisable only stops the loop sound.
                 "CardiopulmonaryBypassMachineBehaviour" => {}
                 "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
+                "ImmobilityFieldBehaviour" => self.immobility_field_on_disable(linked.immobility_fields[&d], inst),
                 // OnDisable -> OnDestroy: clears softConnections, empty before the first FixedUpdate.
                 "SharpOnAllSidesBehaviour" => {}
                 "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
@@ -3672,6 +3769,19 @@ impl Game {
                     let (blade, blur) = (x.BladeObject, x.MotionBlur);
                     self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, blade);
                     self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, blur);
+                }
+                "ImmobilityFieldBehaviour" if *enabled => {
+                    // OnEnable: UpdateActivation. Activated shows CaptureObject, which must be active already.
+                    let i = linked.immobility_fields[&o];
+                    let x = &self.immobility_fields[i];
+                    let (on, capture, trigger) = (x.Activated, x.CaptureObject, x.Trigger);
+                    match on {
+                        true if inst.objects[capture].active => {}
+                        true => unimplemented!("ImmobilityFieldBehaviour.OnEnable: CaptureObject.SetActive(true) of an inactive object while the clone is awoken"),
+                        false => self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, capture),
+                    }
+                    self.collider_set_enabled(inst, trigger, on);
+                    self.immobility_field_destroy_all_joints(i);
                 }
                 "CardiopulmonaryBypassMachineBehaviour" if *enabled => {
                     // OnEnable: UpdateActivation. Activated shows the Cosmetics object, which the prefab has active already.
@@ -3886,6 +3996,9 @@ impl Game {
                 "InfraredThermometer" => Some(Behaviour::InfraredThermometer(linked.infrared_thermometers[&o])),
                 "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
                 "ChainsawBehaviour" => Some(Behaviour::Chainsaw(linked.chainsaws[&o])),
+                "EMPBehaviour" => Some(Behaviour::Emp(linked.emps[&o])),
+                "DecimatorBehaviour" => Some(Behaviour::Decimator(linked.decimators[&o])),
+                "ImmobilityFieldBehaviour" => Some(Behaviour::ImmobilityField(linked.immobility_fields[&o])),
                 "EnergySwordBehaviour" => Some(Behaviour::EnergySword(linked.energy_swords[&o])),
                 "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
                 "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
@@ -4049,6 +4162,9 @@ impl Game {
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
                 "ChainsawBehaviour" => PendingStart::Chainsaw(linked.chainsaws[&o]),
+                "FreezeBehaviour" => PendingStart::Freeze(linked.freezes[&o]),
+                "DecimatorBehaviour" => PendingStart::Decimator(linked.decimators[&o]),
+                "ImmobilityFieldBehaviour" => PendingStart::ImmobilityField(linked.immobility_fields[&o]),
                 "EnergySwordBehaviour" => PendingStart::EnergySword(linked.energy_swords[&o]),
                 "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
                 // Start reads Slider.limits: the component's state, taken from the spawn when the Start runs.

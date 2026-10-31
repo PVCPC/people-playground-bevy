@@ -53,6 +53,8 @@ pub struct Instance {
     pub circles: HashMap<(usize, usize), (f32, [f32; 2])>,
     /// The Collider2Ds whose isTrigger a script set at run time, by (object, component).
     pub triggers: HashMap<(usize, usize), bool>,
+    /// The Collider2Ds whose enabled a script set at run time, by (object, component).
+    pub collider_enabled: HashMap<(usize, usize), bool>,
     /// Each object's TransformChangeDispatch interest in the Physics2D systems (the CHANGE_* bits).
     pub interest: Vec<u8>,
     /// Each object's changed bits for those systems, cleared by SyncTransforms.
@@ -989,7 +991,7 @@ impl Game {
             inst.changed[o] &= !CHANGE_COLLIDER;
             for (c, (_, comp)) in prefab.objects[o].components.iter().enumerate() {
                 let Component::Collider2D(col) = comp else { continue };
-                if !col.enabled {
+                if !inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled) {
                     continue;
                 }
                 let (body_object, m) = self.collider_transformation(inst, prefab, o);
@@ -1025,7 +1027,7 @@ impl Game {
         attached.sort_unstable();
         for &(o, c) in &attached {
             let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
-            if col.enabled && !col.used_by_effector {
+            if inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled) && !col.used_by_effector {
                 self.world.refilter_collider(inst.objects[o].components[c]);
                 if self.world.body(body).kind == BodyType::Static {
                     // Collider2D::WakeAllBodyContacts (180c17960).
@@ -1087,6 +1089,58 @@ impl Game {
         }
     }
 
+    /// Collider2D.enabled = v (Collider2D::SetEnabled 180c15670): unchanged is nothing; Behaviour::SetEnabled
+    /// (180634d50) stores it and an active object's collider joins the collider TRS system; disabling runs
+    /// Cleanup(2) (the shapes go last first, the body's mass is reset, the contacts drop without callbacks), enabling
+    /// an active object's collider runs CreateFixtures(null).
+    pub(super) fn collider_set_enabled(&mut self, inst: &mut Instance, (o, c): (usize, usize), v: bool) {
+        let Component::Collider2D(col) = &inst.prefab.objects[o].components[c].1 else { unreachable!("enabled of a non-collider") };
+        if inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled) == v {
+            return;
+        }
+        inst.collider_enabled.insert((o, c), v);
+        let id = inst.objects[o].components[c];
+        if !v {
+            // RemoveFromManager leaves the object's other colliders interested; a disabled one is skipped.
+            let fixtures: Vec<_> = inst.fixtures.remove(&(o, c)).unwrap_or_default().into_iter().filter(|&f| self.world.fixture_alive(f)).collect();
+            if let Some(&first) = fixtures.first() {
+                let body = self.world.fixture(first).body;
+                for &f in fixtures.iter().rev() {
+                    self.world.destroy_fixture(body, f);
+                }
+                self.world.reset_mass_data(body);
+            }
+            self.world.contacts2d.destroy_contacts(id);
+        } else if inst.objects[o].active {
+            inst.interest[o] |= CHANGE_COLLIDER;
+            let prefab = inst.prefab.clone();
+            self.collider2d_create_fixtures(inst, &prefab, o, c);
+        }
+    }
+
+    /// The clone and (object, component) of collider `id`.
+    fn collider_slot(&mut self, id: i32) -> Option<(&mut Instance, (usize, usize))> {
+        self.unsynced.iter_mut().chain(self.retained.iter_mut()).find_map(|inst| {
+            let k = inst.objects.iter().enumerate().find_map(|(o, x)| x.components.iter().position(|&k| k == id).map(|c| (o, c)))?;
+            Some((inst, k))
+        })
+    }
+
+    /// Collider2D.enabled of collider `id`: a script's run-time value, else the serialized one.
+    pub(super) fn collider_enabled(&mut self, id: i32) -> bool {
+        let (inst, (o, c)) = self.collider_slot(id).unwrap_or_else(|| unimplemented!("Collider2D.enabled of collider {id} without a clone"));
+        let Component::Collider2D(col) = &inst.prefab.objects[o].components[c].1 else { unreachable!() };
+        inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled)
+    }
+
+    /// Keeps Collider2D.enabled = false of a collider `collider_disable_one` cleaned up (a recording's physicals have
+    /// no clone).
+    pub(super) fn record_collider_disabled(&mut self, id: i32) {
+        if let Some((inst, k)) = self.collider_slot(id) {
+            inst.collider_enabled.insert(k, false);
+        }
+    }
+
     /// Collider2D::AwakeFromLoad (180c0c370) in instantiate mode: CreateFixtures on an active object, and
     /// Collider2D::AddToManager (180c0bcc0) on an enabled one, which registers the GameObject's interest in the
     /// collider TRS system.
@@ -1099,7 +1153,7 @@ impl Game {
                 self.world.effector_colliders.insert(inst.objects[o].components[c], effector);
             }
             self.collider2d_create_fixtures(inst, prefab, o, c);
-            if col.enabled {
+            if inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled) {
                 inst.interest[o] |= CHANGE_COLLIDER;
             }
         }
@@ -1146,7 +1200,7 @@ impl Game {
     /// Collider2D::CreateFixtures (180c0dba0) with no explicit body, for a collider outside any composite.
     fn collider2d_create_fixtures(&mut self, inst: &mut Instance, prefab: &Prefab, o: usize, c: usize) {
         let Component::Collider2D(col) = &prefab.objects[o].components[c].1 else { unreachable!() };
-        if !col.enabled {
+        if !inst.collider_enabled.get(&(o, c)).copied().unwrap_or(col.enabled) {
             return;
         }
         if col.used_by_composite {

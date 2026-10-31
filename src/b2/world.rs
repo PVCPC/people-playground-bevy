@@ -1007,6 +1007,11 @@ impl World {
         self.fixtures.iter().flatten().find(|f| f.collider.id == collider).map(|f| f.body)
     }
 
+    /// Collider2D.isTrigger of a collider with fixtures.
+    pub fn collider_is_trigger(&self, collider: i32) -> Option<bool> {
+        self.fixtures.iter().flatten().find(|f| f.collider.id == collider).map(|f| f.is_sensor)
+    }
+
     /// The GameObject of a collider with fixtures.
     pub fn collider_game_object(&self, collider: i32) -> Option<i32> {
         self.fixtures.iter().flatten().find(|f| f.collider.id == collider).map(|f| f.collider.game_object)

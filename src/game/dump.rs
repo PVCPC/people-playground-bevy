@@ -905,6 +905,9 @@ impl Game {
             match (phase, entry.1) {
                 (_, B::Circulation(l) | B::Skin(l) | B::GoreString(l) | B::GForce(l)) if !self.limb_active(l) => {}
                 (_, B::Grip(g)) if !self.physicals[self.grips[g].PhysicalBehaviour].active => {}
+                (_, B::BloodWire(w)) if { let p = &self.physicals[self.blood_wires[w].physical]; !p.active || p.destroyed } => {}
+                (Phase::Fixed, B::BloodWire(w)) => self.blood_wire_fixed_update(w),
+                (Phase::Update, B::BloodWire(w)) => self.blood_wire_update(w),
                 (_, B::Machinery(m)) if { let p = &self.physicals[self.machinery[m].PhysicalBehaviour]; !p.active || p.destroyed } => {}
                 (Phase::Fixed, B::Machinery(m)) => self.machinery_fixed_update(m),
                 (Phase::Fixed, B::Lava(l)) => self.lava_fixed_update(l),
@@ -966,6 +969,8 @@ impl Game {
                 (Phase::Fixed, B::Syringe(i)) => self.syringe_fixed_update(i),
                 (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
                 (Phase::Fixed, B::Chainsaw(i)) => self.chainsaw_fixed_update(i),
+                (Phase::Fixed, B::Decimator(i)) => self.decimator_fixed_update(i),
+                (Phase::Fixed, B::ImmobilityField(i)) => self.immobility_field_fixed_update(i),
                 (Phase::Update, B::Chainsaw(i)) => self.chainsaw_update(i),
                 (Phase::Fixed, B::EnergySword(i)) => self.energy_sword_fixed_update(i),
                 (Phase::Update, B::EnergySword(i)) => self.energy_sword_update(i),

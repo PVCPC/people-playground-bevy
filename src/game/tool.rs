@@ -433,7 +433,8 @@ impl Game {
 
     /// ToolControllerBehaviour.FixedUpdate
     pub fn tool_fixed_update(&mut self) {
-        if self.tool.is_some() && self.input.held("drag") {
+        // DistanceWireTool.OnFixedHold is empty.
+        if self.tool.is_some() && !self.wire_tool.chosen && self.input.held("drag") {
             self.drag_on_fixed_hold();
         }
     }
@@ -515,7 +516,7 @@ impl Game {
                     continue;
                 }
                 match self.behaviour_of.get(&inst.objects[x].components[k]) {
-                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
+                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::Emp(_) | Behaviour::Decimator(_) | Behaviour::ImmobilityField(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
                     Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                     _ => unimplemented!("{class}.Use"),
                 }
@@ -584,6 +585,9 @@ impl Game {
                 Behaviour::JetEngine(i) => self.jet_engine_use(i),
                 // ChainsawBehaviour.Use: PlayClipOnce(Rev) when not destroyed (audio).
                 Behaviour::Chainsaw(_) => {}
+                Behaviour::Emp(i) => self.emp_use(i),
+                Behaviour::Decimator(i) => self.decimator_use(i),
+                Behaviour::ImmobilityField(i) => self.immobility_field_use(i),
                 Behaviour::EnergySword(i) => self.energy_sword_use(i),
                 Behaviour::Metronome(m) => self.metronome_use(m),
                 Behaviour::Thermometer(t) => self.thermometer_use(t),
@@ -661,7 +665,7 @@ impl Game {
                     let t = self.tool.as_mut().unwrap();
                     t.rawSelection.retain(|&p| p != h);
                     if Some(h) == t.ActiveSingleSelected {
-                        self.drag_on_deselect();
+                        self.current_on_deselect();
                         let t = self.tool.as_mut().unwrap();
                         if !t.rawSelection.is_empty() {
                             t.ActiveSingleSelected = Some(t.rawSelection[0]);
@@ -672,15 +676,15 @@ impl Game {
                     let multiple = fast || t.rawSelection.contains(&h);
                     self.select(h, multiple);
                     if self.tool.as_ref().unwrap().ActiveSingleSelected.is_some() {
-                        self.drag_on_deselect();
+                        self.current_on_deselect();
                     }
                     self.tool.as_mut().unwrap().ActiveSingleSelected = Some(h);
                 }
                 None => {
                     self.escape_and_deselect();
-                    // DragTool.UsesEmptyDrag is false: StartSelectionDrag.
+                    // DragTool.UsesEmptyDrag is false: StartSelectionDrag (the wire tools' is true).
                     let t = self.tool.as_mut().unwrap();
-                    if !t.isSelecting {
+                    if !self.wire_tool.chosen && !t.isSelecting {
                         let Some(screen) = self.input.screen else { unimplemented!("StartSelectionDrag: Input.mousePosition in a recording") };
                         t.isSelecting = true;
                         t.selectionDragStart = screen.mouse;
@@ -688,7 +692,7 @@ impl Game {
                 }
             }
             self.tool.as_mut().unwrap().isCurrentlyHolding = true;
-            self.drag_on_select();
+            self.current_on_select();
         }
         if self.input.down("context") && self.tool.as_ref().unwrap().currentlyHovering.is_some() {
             let t = self.tool.as_ref().unwrap();
@@ -697,7 +701,7 @@ impl Game {
             self.select(h, multiple);
         }
         if self.input.held("drag") && self.tool.as_ref().unwrap().isCurrentlyHolding {
-            self.drag_on_hold();
+            self.current_on_hold();
         }
         // The EventSystem's selected object is never part of the context menu.
         if self.input.up("drag") {
@@ -741,7 +745,7 @@ impl Game {
 
     /// ToolControllerBehaviour.EscapeAndDeselect (the pointer is never over a NoDeselectUi).
     fn escape_and_deselect(&mut self) {
-        self.drag_on_deselect();
+        self.current_on_deselect();
         let fast = self.input.held("fast");
         let t = self.tool.as_mut().unwrap();
         t.ActiveSingleSelected = None;
@@ -749,6 +753,56 @@ impl Game {
         let kept = t.currentlyHovering.is_some_and(|h| t.rawSelection.contains(&h));
         if !kept && !fast {
             t.rawSelection.clear();
+        }
+    }
+
+    /// CurrentTool.OnSelect / OnHold / OnDeselect: the DragTool, or the BloodWireTool after SetToolByTypeName.
+    fn current_on_select(&mut self) {
+        if self.wire_tool.chosen {
+            self.wire_on_select();
+        } else {
+            self.drag_on_select();
+        }
+    }
+
+    fn current_on_hold(&mut self) {
+        if self.wire_tool.chosen {
+            self.wire_on_hold();
+        } else {
+            self.drag_on_hold();
+        }
+    }
+
+    fn current_on_deselect(&mut self) {
+        if self.wire_tool.chosen {
+            self.wire_on_deselect();
+        } else {
+            self.drag_on_deselect();
+        }
+    }
+
+    /// ToolControllerBehaviour.SetToolByTypeName (-> SetTool): the old tool is unchosen and deselected, then the new one is
+    /// found or added to the ToolController and chosen. The DragTool and the BloodWireTool are the tools rewritten.
+    pub fn set_tool_by_type_name(&mut self, name: &str) {
+        if !matches!(name, "DragTool" | "BloodWireTool") {
+            unimplemented!("ToolControllerBehaviour.SetToolByTypeName({name})");
+        }
+        if self.wire_tool.chosen {
+            // DistanceWireTool.OnToolUnchosen is empty.
+        } else {
+            // DragTool.OnToolUnchosen (objectsToMoveInPauseMode stays empty: nothing is dragged while paused).
+            let t = self.tool.as_mut().unwrap();
+            t.isActive = false;
+            t.shouldSendContinuousUseMessage = false;
+        }
+        self.tool.as_mut().unwrap().isCurrentlyHolding = false;
+        self.current_on_deselect();
+        self.tool.as_mut().unwrap().ActiveSingleSelected = None;
+        self.wire_tool.chosen = false;
+        if name == "BloodWireTool" {
+            self.wire_tool_choose();
+        } else {
+            self.tool.as_mut().unwrap().isActive = true;
         }
     }
 
@@ -1235,6 +1289,94 @@ mod tests {
         assert!(!g.cardiopulmonary_bypasses[0].Activated && !shown(&mut g));
     }
 
+    /// A point on a physical's collider that the selection mask overlaps.
+    fn point_on(g: &mut Game, p: usize) -> Vec<[f32; 3]> {
+        let mask = g.tool.as_ref().unwrap().SelectionLayer;
+        let body = g.physicals[p].rigidbody.body;
+        let mut points = vec![g.physicals[p].transform.position];
+        for f in g.world.body(body).fixtures.clone() {
+            let fx = g.world.fixture(f);
+            let b = fx.shape.compute_aabb(&g.world.body(fx.body).xf, 0);
+            points.push([(b.lower.x + b.upper.x) * 0.5, (b.lower.y + b.upper.y) * 0.5, 0.0]);
+        }
+        points.into_iter().filter(|&q| !g.overlap_point(q, mask, -0.9, 0.9).is_empty()).collect()
+    }
+
+    /// Drags a liquid conduit with the BloodWireTool from `from` to `to`.
+    fn lay_wire(g: &mut Game, from: usize, to: usize) {
+        g.set_tool_by_type_name("BloodWireTool");
+        let mut start = None;
+        for q in point_on(g, from) {
+            g.input.mouse = q;
+            frames(g, 1);
+            if g.tool.as_ref().unwrap().hover == Some(from) {
+                start = Some(q);
+                break;
+            }
+        }
+        assert!(start.is_some(), "no point where the mouse hovers the start object");
+        ctl(g, "drag", true, true, false);
+        frames(g, 2);
+        ctl(g, "drag", false, true, false);
+        let mut end = None;
+        for q in point_on(g, to) {
+            g.input.mouse = q;
+            frames(g, 2);
+            if g.tool.as_ref().unwrap().hover == Some(to) {
+                end = Some(q);
+                break;
+            }
+        }
+        assert!(end.is_some(), "no point where the mouse hovers the end object");
+        ctl(g, "drag", false, false, true);
+        frames(g, 2);
+    }
+
+    #[test]
+    fn bypass_wire_pumps_a_human_whose_heart_stopped() {
+        let Some((mut g, machine)) = spawned("Cardiopulmonary Bypass Machine") else { return };
+        let at = g.physicals[machine].transform.position;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0] + 3.0, at[1] + 0.5, 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        ctl(&mut g, "spawnRight", false, false, false);
+        frames(&mut g, 300);
+        // The heart stops: the pump limb no longer beats and nothing flows.
+        let heart = (first_limb..g.limbs.len()).find(|&l| g.circulations[l].WasInitiallyPumping).expect("a pumping limb");
+        for l in first_limb..g.limbs.len() {
+            g.circulations[l].IsPump = false;
+            g.circulations[l].BloodFlow = 0.0;
+        }
+        let heart_physical = g.limbs[heart].PhysicalBehaviour;
+        lay_wire(&mut g, machine, heart_physical);
+        assert_eq!(g.blood_wires.len(), 1);
+        assert_eq!(g.undo.history.last().map(|a| a.displayName.as_str()), Some("liquid conduit"));
+        let w = &g.blood_wires[0];
+        assert!(w.IsCardiopulmonaryBypassWire && !w.IsHeartRateWire && w.started, "{w:?}");
+        assert_eq!(g.cardiopulmonary_bypasses[0].ValidConnectionCount, 1);
+        // The machine is off: no pumping.
+        frames(&mut g, 60);
+        assert_eq!(g.circulations[heart].ArtificialHeartbeat, 0.0);
+        assert!(g.circulations[heart].BloodFlow < 0.5, "{}", g.circulations[heart].BloodFlow);
+        // On: the wire sets the heartbeat and keeps the blood flowing.
+        g.broadcast_use(machine);
+        assert!(g.cardiopulmonary_bypasses[0].Activated);
+        frames(&mut g, 120);
+        assert_eq!(g.circulations[heart].ArtificialHeartbeat, g.cardiopulmonary_bypasses[0].TargetHeartrate);
+        assert!(g.circulations[heart].BloodFlow > 0.5, "{}", g.circulations[heart].BloodFlow);
+        assert!(g.people[g.limbs[heart].Person].OxygenLevel >= 0.5);
+        // Undo destroys the wire: OnDestroy stops the heartbeat and drops the connection.
+        ctl(&mut g, "undo", false, false, true);
+        frames(&mut g, 3);
+        assert!(g.destroyed_components.contains(&g.blood_wires[0].id));
+        assert!(g.fixed_joints[g.blood_wires[0].joint].destroyed);
+        assert_eq!(g.circulations[heart].ArtificialHeartbeat, 0.0);
+        assert_eq!(g.cardiopulmonary_bypasses[0].ValidConnectionCount, 0);
+        assert!(g.undo.history.iter().all(|a| a.displayName != "liquid conduit" && a.displayName != "LIQUID CONDUIT" || a.RelevantObjects.is_empty()));
+    }
+
     #[test]
     fn defibrillator_restarts_the_circulation_under_its_pads() {
         let Some((mut g, _)) = spawned("Defibrillator") else { return };
@@ -1289,6 +1431,26 @@ mod tests {
     }
 
     #[test]
+    fn emp_generator_zeroes_an_android_limb() {
+        let Some((mut g, _)) = spawned("EMP Generator") else { return };
+        let emp = g.emps[0].physical;
+        let at = g.physicals[emp].transform.position;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Android".into());
+        g.input.mouse = [at[0] + 2.0, at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no android spawned");
+        frames(&mut g, 120);
+        let androids: Vec<usize> = (first_limb..g.limbs.len()).filter(|&l| g.limbs[l].IsAndroid).collect();
+        assert!(!androids.is_empty(), "the spawned Android has no android limbs");
+        assert!(androids.iter().all(|&l| g.limbs[l].Health > 0.0), "an android limb starts with no health");
+        g.activate_direct(emp);
+        frames(&mut g, 1);
+        assert!(androids.iter().any(|&l| g.limbs[l].Health == 0.0), "the EMP hit no android limb");
+    }
+
+    #[test]
     fn sword_side_blade_soft_connects_a_human() {
         let Some((mut g, _)) = spawned("Sword") else { return };
         let blade = g.sharp_on_all_sides[0].physical;
@@ -1307,6 +1469,55 @@ mod tests {
             assert_eq!(g.fixed_joints[f].friction, Some((10.0, 10.0)));
         }
         frames(&mut g, 5);
+    }
+
+    #[test]
+    fn decimator_deletes_a_human_in_its_trigger() {
+        let Some((mut g, _)) = spawned("Decimator") else { return };
+        let (id, key) = (g.decimators[0].id, g.decimators[0].DecimateTrigger);
+        let fixtures = |g: &mut Game| g.with_component_instance(id, |_, inst, _| inst.fixtures.get(&key).map_or(0, |f| f.len()));
+        assert_eq!(fixtures(&mut g), 0, "Start leaves the trigger disabled");
+        g.decimator_use(0);
+        assert!(fixtures(&mut g) > 0, "Use enables the trigger");
+        let at = g.with_component_instance(id, |_, inst, _| inst.position(key.0));
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        frames(&mut g, 10);
+        let head = g.limbs[first_limb].PhysicalBehaviour;
+        assert!(g.physicals[head].destroyed, "the human was not deleted");
+        g.decimator_use(0);
+        assert_eq!(fixtures(&mut g), 0, "Use again disables the trigger");
+        frames(&mut g, 5);
+    }
+
+    #[test]
+    fn immobility_field_holds_a_human_until_switched_off() {
+        let Some((mut g, _)) = spawned("Immobility Field") else { return };
+        let (id, key, p) = (g.immobility_fields[0].id, g.immobility_fields[0].Trigger, g.immobility_fields[0].physical);
+        g.immobility_field_use(0);
+        // The field lies beside the device: spawn between its near and far edges.
+        let tid = g.with_component_instance(id, |_, inst, _| inst.objects[key.0].components[key.1]);
+        let o = g.with_component_instance(id, |_, inst, _| inst.position(key.0));
+        let near = g.world.collider_closest_point(tid, V::new(o[0], o[1]));
+        let far = g.world.collider_closest_point(tid, V::new(2.0 * near.x - o[0] + 20.0 * (near.x - o[0]), near.y));
+        let at = [(near.x + far.x) / 2.0, near.y, 0.0];
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        frames(&mut g, 10);
+        let held = |g: &Game| g.fixed_joints.iter().filter(|f| f.friction.is_some() && !f.destroyed && matches!(f.attached, BodyOwner::Physical(a) if a == p)).count();
+        assert!(!g.immobility_fields[0].joints.keys().is_empty() && held(&g) > 0, "the field caught nothing");
+        g.immobility_field_use(0);
+        assert!(g.immobility_fields[0].joints.keys().is_empty(), "switching off keeps the captures");
+        frames(&mut g, 2);
+        assert_eq!(held(&g), 0, "switching off keeps the joints");
     }
 
     #[test]

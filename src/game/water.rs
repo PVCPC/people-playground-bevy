@@ -416,6 +416,13 @@ impl Game {
                     // OnEnable clears the trail mesh (rendering).
                     "EnergySwordMotionBlur" => {}
                     // OnEnable: UpdateActivation.
+                    "ImmobilityFieldBehaviour" => {
+                        if self.script_enabled(id, *enabled) {
+                            let i = self.immobility_fields.iter().position(|c| c.id == id).expect("an ImmobilityFieldBehaviour in the arena");
+                            self.immobility_field_update_activation_in(i, inst);
+                        }
+                    }
+                    // OnEnable: UpdateActivation.
                     "CardiopulmonaryBypassMachineBehaviour" => {
                         if self.script_enabled(id, *enabled) {
                             let i = self.cardiopulmonary_bypasses.iter().position(|c| c.id == id).expect("a CardiopulmonaryBypassMachineBehaviour in the arena");
@@ -459,6 +466,18 @@ impl Game {
                     self.physicals[p].active = false;
                     if *enabled {
                         self.physical_on_disable(p);
+                    }
+                }
+                "ImmobilityFieldBehaviour" => {
+                    let i = self.immobility_fields.iter().position(|c| c.id == id).expect("an ImmobilityFieldBehaviour in the arena");
+                    if self.immobility_fields[i].enabled {
+                        self.immobility_field_on_disable(i, inst);
+                    }
+                }
+                "DecimatorBehaviour" => {
+                    let i = self.decimators.iter().position(|c| c.id == id).expect("a DecimatorBehaviour in the arena");
+                    if self.decimators[i].enabled {
+                        self.decimator_on_disable(i, inst);
                     }
                 }
                 "EnergySwordBehaviour" => {
@@ -587,7 +606,7 @@ impl Game {
     }
 
     /// FreezeStackController.RequestFreeze(a): the first request makes the Rigidbody2D static.
-    fn freeze_request(&mut self, p: usize) {
+    pub(super) fn freeze_request(&mut self, p: usize) {
         if self.physicals[p].destroyed {
             return;
         }
@@ -600,7 +619,7 @@ impl Game {
     }
 
     /// FreezeStackController.RequestUnfreeze(a): the last release makes the Rigidbody2D dynamic again.
-    fn freeze_request_unfreeze(&mut self, p: usize) {
+    pub(super) fn freeze_request_unfreeze(&mut self, p: usize) {
         if self.physicals[p].destroyed {
             return;
         }

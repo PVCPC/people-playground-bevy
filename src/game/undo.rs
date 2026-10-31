@@ -54,7 +54,12 @@ impl Game {
         }
         let i = self.undo.currentHistoryPosition as usize;
         for o in self.undo.history[i].RelevantObjects.clone() {
-            self.destroy_object(o);
+            // A BloodWireBehaviour's component (Object.Destroy(component)), else a GameObject.
+            if self.blood_wires.iter().any(|w| w.id == o) {
+                self.tr_destroy_component(o, 0.0);
+            } else {
+                self.destroy_object(o);
+            }
         }
         let name = self.undo.history[i].displayName.to_uppercase();
         self.undo.history[i].displayName = name.clone();

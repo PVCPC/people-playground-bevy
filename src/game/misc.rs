@@ -485,6 +485,8 @@ pub enum PendingStart {
     /// OnlyExplosionBehaviour.Start with ExplodeOnStart: the component's instance id and its ExplosionParameters.
     OnlyExplosion(i32, super::explosion::ExplosionParameters),
     Explosive(usize),
+    /// DistanceJointWireBehaviour.Start of a BloodWireBehaviour (blood_wire.rs).
+    BloodWire(usize),
     /// NoCollide.Start: the component's instance id.
     NoCollide(i32),
     /// DisintegrationCounterBehaviour.Start: the component's instance id.
@@ -514,6 +516,12 @@ pub enum PendingStart {
     Bulb(usize),
     /// ChainsawBehaviour.Start: the `Game::chainsaws` index.
     Chainsaw(usize),
+    /// FreezeBehaviour.Start: the `Game::freezes` index.
+    Freeze(usize),
+    /// DecimatorBehaviour.Start: the `Game::decimators` index.
+    Decimator(usize),
+    /// ImmobilityFieldBehaviour.Start: the `Game::immobility_fields` index.
+    ImmobilityField(usize),
     /// EnergySwordBehaviour.Start: the `Game::energy_swords` index.
     EnergySword(usize),
     /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
@@ -860,6 +868,7 @@ impl Game {
             slider: a.slider.clone(),
             spring: None,
             friction: None,
+            distance: None,
             joint: a.joint,
             attached: a.attached,
             connected: a.connected,
@@ -959,6 +968,7 @@ impl Game {
                 PendingStart::UniversalBell(b) => self.universal_bell_start(b),
                 PendingStart::TimedGate(g) => self.timed_gate_start(g),
                 PendingStart::CardiopulmonaryBypass(c) => self.cardiopulmonary_bypass_start(c),
+                PendingStart::BloodWire(w) => self.blood_wire_start(w),
                 PendingStart::ArchelixCaster(c) => self.archelix_caster_start(c),
                 PendingStart::ArchelixBolt(b) => self.archelix_bolt_start(b),
                 PendingStart::FireMap(f) => self.fire_map_start(f),
@@ -1002,6 +1012,9 @@ impl Game {
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
                 PendingStart::Bulb(i) => self.bulb_start(i),
                 PendingStart::Chainsaw(i) => self.chainsaw_start(i),
+                PendingStart::Freeze(i) => self.freeze_start(i),
+                PendingStart::Decimator(i) => self.decimator_start(i),
+                PendingStart::ImmobilityField(i) => self.immobility_field_start(i),
                 PendingStart::EnergySword(i) => self.energy_sword_start(i),
                 PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
                 PendingStart::Piston(i, joints) => {

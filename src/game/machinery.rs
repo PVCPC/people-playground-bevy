@@ -125,6 +125,18 @@ impl Game {
         }
     }
 
+    /// DamagableMachineryBehaviour.OnEMPHit: when not Indestructible and not Destroyed, SetAsBroken() then the spark clone
+    /// (rendering). Instantiate(null) throws, so a machinery without its SparkPrefab stops the run.
+    pub(super) fn machinery_on_emp_hit(&mut self, m: usize) {
+        let mc = &self.machinery[m];
+        if !mc.Indestructible && !mc.Destroyed {
+            self.machinery_set_as_broken(m, true);
+            if !self.machinery[m].SparkPrefab {
+                unimplemented!("DamagableMachineryBehaviour.OnEMPHit: Instantiate(null SparkPrefab) (ArgumentException)");
+            }
+        }
+    }
+
     /// DamagableMachineryBehaviour.ForceBreak
     pub(super) fn machinery_force_break(&mut self, m: usize) {
         let mc = &mut self.machinery[m];
@@ -191,7 +203,7 @@ impl Game {
     }
 
     /// DamagableMachineryBehaviour.SetAsBroken: the broken material and its property block are rendering.
-    fn machinery_set_as_broken(&mut self, m: usize, run_events: bool) {
+    pub(super) fn machinery_set_as_broken(&mut self, m: usize, run_events: bool) {
         let mc = &mut self.machinery[m];
         mc.Destroyed = true;
         mc.Health = 0.0;
@@ -318,6 +330,11 @@ impl Game {
                 let i = self.scifi40s.iter().position(|x| x.id == id).expect("a GenericScifiWeapon40Behaviour in the arena");
                 // No OnDisable, and no manager message.
                 self.scifi40s[i].enabled = false;
+            }
+            "EMPBehaviour" => {
+                let i = self.emps.iter().position(|x| x.id == id).expect("an EMPBehaviour in the arena");
+                // No OnDisable.
+                self.emps[i].enabled = false;
             }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
         }

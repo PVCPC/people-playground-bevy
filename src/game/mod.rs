@@ -41,6 +41,7 @@ pub mod excalibur;
 pub mod blood_tank;
 pub mod timed_gate;
 pub mod resuscitation;
+pub mod blood_wire;
 pub mod display;
 pub mod activation_toggle;
 pub mod gauge;
@@ -50,6 +51,10 @@ pub mod thermometer;
 pub mod syringe;
 pub mod jet_engine;
 pub mod chainsaw;
+pub mod decimator;
+pub mod immobility_field;
+pub mod emp;
+pub mod freeze;
 pub mod energy_sword;
 pub mod soft_connect;
 pub mod signal_converter;
@@ -1221,6 +1226,10 @@ pub enum Behaviour {
     Syringe(usize),
     JetEngine(usize),
     Chainsaw(usize),
+    Decimator(usize),
+    ImmobilityField(usize),
+    /// EMPBehaviour.Use: the `Game::emps` index.
+    Emp(usize),
     EnergySword(usize),
     SignalConverter(usize),
     Blaster(usize),
@@ -1229,6 +1238,8 @@ pub enum Behaviour {
     Scifi40(usize),
     HealthGun(usize),
     FreezeGun(usize),
+    /// BloodWireBehaviour (a component added at run time by the BloodWireTool).
+    BloodWire(usize),
     Translated(translated::TBehaviour),
 }
 
@@ -1290,6 +1301,9 @@ impl Behaviour {
             Behaviour::Display(_) => "DisplayBehaviour",
             Behaviour::JetEngine(_) => "JetEngineBehaviour",
             Behaviour::Chainsaw(_) => "ChainsawBehaviour",
+            Behaviour::Decimator(_) => "DecimatorBehaviour",
+            Behaviour::ImmobilityField(_) => "ImmobilityFieldBehaviour",
+            Behaviour::Emp(_) => "EMPBehaviour",
             Behaviour::EnergySword(_) => "EnergySwordBehaviour",
             Behaviour::Blaster(_) => "BlasterBehaviour",
             Behaviour::Blasterbolt(_) => "BlasterboltBehaviour",
@@ -1297,6 +1311,7 @@ impl Behaviour {
             Behaviour::Scifi40(_) => "GenericScifiWeapon40Behaviour",
             Behaviour::HealthGun(_) => "HealthGunBehaviour",
             Behaviour::FreezeGun(_) => "FreezeGunBehaviour",
+            Behaviour::BloodWire(_) => "BloodWireBehaviour",
             Behaviour::SignalConverter(_) => "SignalConverterBehaviour",
             // Every subclass has the lifecycle of SyringeBehaviour.
             Behaviour::Syringe(_) => "SyringeBehaviour",
@@ -1489,6 +1504,9 @@ pub struct Game {
     pub defibrillators: Vec<resuscitation::Defibrillator>,
     pub cardiopulmonary_bypasses: Vec<resuscitation::CardiopulmonaryBypass>,
     pub heart_monitors: Vec<heart_monitor::HeartMonitor>,
+    /// The BloodWireBehaviours the BloodWireTool added, by creation order, and that tool's state.
+    pub blood_wires: Vec<blood_wire::BloodWire>,
+    pub wire_tool: blood_wire::WireTool,
     pub excaliburs: Vec<excalibur::Excalibur>,
     pub sharp_on_all_sides: Vec<sharp_on_all_sides::SharpOnAllSides>,
     pub blood_tanks: Vec<blood_tank::BloodTank>,
@@ -1496,6 +1514,12 @@ pub struct Game {
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,
     pub chainsaws: Vec<chainsaw::Chainsaw>,
+    pub decimators: Vec<decimator::Decimator>,
+    pub immobility_fields: Vec<immobility_field::ImmobilityField>,
+    /// DecimatorBehaviour.lastDestroyedRootId (static, -1 until set).
+    pub decimator_last_root: Option<i32>,
+    pub emps: Vec<emp::Emp>,
+    pub freezes: Vec<freeze::Freeze>,
     pub energy_swords: Vec<energy_sword::EnergySword>,
     /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
     pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,

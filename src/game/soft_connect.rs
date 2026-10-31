@@ -15,30 +15,43 @@ pub struct SoftConnection {
     pub should_be_deleted: bool,
 }
 
-/// Dictionary<PhysicalBehaviour, SoftConnection>: the entry array enumerates in slot order, Remove frees a slot and
-/// Add takes the most recently freed one before growing (the free list is LIFO).
-#[derive(Clone, Debug, Default)]
-pub struct SoftConnections {
-    entries: Vec<Option<(usize, SoftConnection)>>,
+/// Dictionary<PhysicalBehaviour, SoftConnection> (and other Dictionaries keyed by an object): the entry array
+/// enumerates in slot order, Remove frees a slot and Add takes the most recently freed one before growing (the free
+/// list is LIFO); Clear empties both.
+#[derive(Clone, Debug)]
+pub struct SoftConnections<K = usize, V = SoftConnection> {
+    entries: Vec<Option<(K, V)>>,
     free: Vec<usize>,
 }
 
-impl SoftConnections {
+impl<K, V> Default for SoftConnections<K, V> {
+    fn default() -> Self {
+        Self { entries: Vec::new(), free: Vec::new() }
+    }
+}
+
+impl<K: Copy + PartialEq, V> SoftConnections<K, V> {
     /// The keys in enumeration order.
-    pub fn keys(&self) -> Vec<usize> {
-        self.entries.iter().flatten().map(|&(k, _)| k).collect()
+    pub fn keys(&self) -> Vec<K> {
+        self.entries.iter().flatten().map(|(k, _)| *k).collect()
     }
 
-    pub fn get(&self, key: usize) -> Option<&SoftConnection> {
+    pub fn get(&self, key: K) -> Option<&V> {
         self.entries.iter().flatten().find(|(k, _)| *k == key).map(|(_, v)| v)
     }
 
-    pub fn get_mut(&mut self, key: usize) -> Option<&mut SoftConnection> {
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
         self.entries.iter_mut().flatten().find(|(k, _)| *k == key).map(|(_, v)| v)
     }
 
+    /// Dictionary.Clear
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.free.clear();
+    }
+
     /// Dictionary.Add (the callers have checked the key is absent).
-    pub fn add(&mut self, key: usize, v: SoftConnection) {
+    pub fn add(&mut self, key: K, v: V) {
         assert!(self.get(key).is_none(), "Dictionary.Add: the key is present (ArgumentException)");
         match self.free.pop() {
             Some(i) => self.entries[i] = Some((key, v)),
@@ -46,7 +59,7 @@ impl SoftConnections {
         }
     }
 
-    pub fn remove(&mut self, key: usize) {
+    pub fn remove(&mut self, key: K) {
         if let Some(i) = self.entries.iter().position(|e| matches!(e, Some((k, _)) if *k == key)) {
             self.entries[i] = None;
             self.free.push(i);

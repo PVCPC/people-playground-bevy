@@ -6,8 +6,8 @@
 //! presentation, apart from the clip's length.
 //!
 //! The bypass machine's Use toggles Activated; UpdateActivation shows or hides its Cosmetics object (and so wakes or
-//! stops what hangs under it). Its pumping is BloodWireBehaviour.ProcessCardiopulmonaryBypassWire (not rewritten: the
-//! blood wire tool is not), which is the only caller of GetFinalIntensity, PlayValidSound and PlayInvalidSound.
+//! stops what hangs under it). Its pumping is BloodWireBehaviour.ProcessCardiopulmonaryBypassWire (blood_wire.rs), the
+//! only caller of GetFinalIntensity, PlayValidSound and PlayInvalidSound (audio, which draws no Random).
 #![allow(non_snake_case)]
 
 use super::coroutine::{Routine, Yield};
@@ -47,6 +47,8 @@ script! {
     links {
         /// The component's instance id.
         id: i32 = 0,
+        /// The PhysicalBehaviour on its GameObject (a BloodWireBehaviour finds the machine through it).
+        physical: usize = 0,
         /// Behaviour.enabled
         enabled: bool = true,
         /// Cosmetics: the index of its object in the prefab.
@@ -124,6 +126,15 @@ impl Game {
         }
         let id = self.cardiopulmonary_bypasses[c].id;
         self.with_component_instance(id, |g, inst, _| g.cardiopulmonary_bypass_update_activation(c, inst));
+    }
+
+    /// CardiopulmonaryBypassMachineBehaviour.GetFinalIntensity: nothing while disabled or not activated.
+    pub fn cardiopulmonary_bypass_final_intensity(&self, c: usize) -> f32 {
+        let x = &self.cardiopulmonary_bypasses[c];
+        if !x.enabled || !x.Activated {
+            return 0.0;
+        }
+        x.PressureIntensity
     }
 
     /// CardiopulmonaryBypassMachineBehaviour.Start

@@ -1560,6 +1560,7 @@ impl Game {
             self.world.reset_mass_data(body);
         }
         self.world.contacts2d.destroy_contacts(collider);
+        self.record_collider_disabled(collider);
     }
 
     /// GameObject.SetActive(false) on a physical object, component by component.
