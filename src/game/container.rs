@@ -90,7 +90,7 @@ impl Game {
     }
 
     /// AllowPressureTransfer: a ValveBehaviour's is ValvePosition > 0.5; every other subclass rewritten is true.
-    fn container_allows_pressure(&self, o: Owner) -> bool {
+    pub(super) fn container_allows_pressure(&self, o: Owner) -> bool {
         match o {
             Owner::Valve(v) => self.valves[v].ValvePosition > 0.5,
             _ => true,

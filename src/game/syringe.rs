@@ -146,6 +146,10 @@ impl Game {
         if let Some(t) = self.blood_tanks.iter().position(|x| x.physical == q) {
             return Some(Owner::BloodTank(t));
         }
+        // ValveBehaviour (valve.rs).
+        if let Some(v) = self.valves.iter().position(|x| x.physical == q) {
+            return Some(Owner::Valve(v));
+        }
         let class = self.with_component_instance(self.physicals[q].id, |_, inst, o| {
             inst.prefab.objects[o].components.iter().find_map(|(_, c)| match c {
                 crate::assets::db::Component::Script { class, .. } if BLOOD_CONTAINERS.contains(&class.as_str()) => Some(class.clone()),
@@ -292,8 +296,11 @@ impl Game {
         }
     }
 
-    /// BloodWireBehaviour.AveragePressure (both containers allow pressure transfer).
+    /// BloodWireBehaviour.AveragePressure (a closed ValveBehaviour does not allow pressure transfer).
     fn average_pressure(&mut self, rate: f32, from: Owner, to: Owner) {
+        if !(self.container_allows_pressure(from) && self.container_allows_pressure(to)) {
+            return;
+        }
         let (a, b) = (self.bc(from).MeasuredPressure, self.bc(to).MeasuredPressure);
         let mean = ((d(a) + b) * 0.5f32).f();
         self.bc_mut(from).MeasuredPressure = mathf::lerp(a, mean, rate);

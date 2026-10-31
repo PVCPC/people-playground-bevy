@@ -1509,7 +1509,7 @@ impl Game {
 
     /// FixedJoint2D::Cleanup(false) (180c03480) / SliderJoint2D::Cleanup (180c03550): the live joint's reference
     /// angle is kept for the next Create, then Joint2D::Cleanup destroys the b2 joint.
-    fn anchored_joint2d_cleanup(&mut self, inst: &mut Instance, o: usize, c: usize) {
+    pub(super) fn anchored_joint2d_cleanup(&mut self, inst: &mut Instance, o: usize, c: usize) {
         let Some(id) = inst.joints.remove(&(o, c)) else { return };
         let st = inst.anchored.get_mut(&(o, c)).unwrap();
         if st.spring.is_some() || st.distance.is_some() || st.wheel.is_some() {

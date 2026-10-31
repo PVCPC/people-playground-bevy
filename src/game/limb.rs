@@ -1567,7 +1567,7 @@ impl Game {
             } else if kind == 9 {
                 self.attachment_run_joint_destroy(l);
             } else if kind == 8 {
-                if !self.blood_wire_run_destroy(l as i32) {
+                if !self.blood_wire_run_destroy(l as i32) && !self.freeze_run_destroy(l as i32) {
                     self.tr_run_component_destroy(l as i32);
                 }
             } else if kind == 7 {

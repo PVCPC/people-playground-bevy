@@ -103,6 +103,8 @@ pub struct Linked {
     pub power_hammers: HashMap<usize, usize>,
     pub balloons: HashMap<usize, usize>,
     pub metronomes: HashMap<usize, usize>,
+    pub physics_guns: HashMap<usize, usize>,
+    pub activator_electrodes: HashMap<usize, usize>,
     pub thermometers: HashMap<usize, usize>,
     pub infrared_thermometers: HashMap<usize, usize>,
     pub activation_toggles: HashMap<usize, usize>,
@@ -118,9 +120,15 @@ pub struct Linked {
     pub jet_engines: HashMap<usize, usize>,
     pub chainsaws: HashMap<usize, usize>,
     pub freezes: HashMap<usize, usize>,
+    pub freeze_serialisations: HashMap<usize, usize>,
+    pub ceiling_turrets: HashMap<usize, usize>,
+    pub temperature_transfers: HashMap<usize, usize>,
     pub emps: HashMap<usize, usize>,
     pub decimators: HashMap<usize, usize>,
     pub immobility_fields: HashMap<usize, usize>,
+    pub tesla_coils: HashMap<usize, usize>,
+    /// What each coil's bolt prefab gives its clones, by the coil's object.
+    pub tesla_bolt_sources: HashMap<usize, super::tesla_coil::BoltSource>,
     pub energy_swords: HashMap<usize, usize>,
     pub blasters: HashMap<usize, usize>,
     pub blasterbolts: HashMap<usize, usize>,
@@ -470,6 +478,8 @@ fn animation_call(prefab: &Prefab, file: usize, inst: &Instance, call: &Value) -
 fn presentation_call(prefab: &Prefab, file: usize, call: &Value) -> bool {
     call_target(prefab, file, call).is_some_and(|(o, c)| match &prefab.objects[o].components[c].1 {
         Component::Other(82 | 164..=170 | 198) => true,
+        // Renderer.set_enabled on a sprite (the ceiling turret's sight and lose-target events): rendering only.
+        Component::SpriteRenderer(_) => true,
         // Its LateUpdate only drives an AudioSource (see check_rewritten).
         Component::Script { class, .. } => class == "RectangleAudioSourceBehaviour"
             || (class == "StickyGrenadeBehaviour" && string(call, "m_MethodName").is_ok_and(|m| m == "StartBlinking"))
@@ -566,12 +576,23 @@ pub(super) fn check_rewritten(class: &str) {
         "ChainsawBehaviour" => {}
         // freeze.rs: Start keeps the velocities and requests the freeze, OnDestroy releases it; the outline is rendering.
         "FreezeBehaviour" => {}
+        // freeze.rs: Start keeps the FreezeBehaviour when IsFrozen, else destroys it (queued).
+        "FreezeSerialisationHelper" => {}
+        // ceiling_turret.rs: Start, Update and FixedUpdate aim and fire (automatic_sentry.rs); OnEnable is at awake
+        // (awake_behaviours) and at SetActive (water.rs), OnDisable at SetActive (awake_set_inactive, water.rs, machinery.rs);
+        // OnSight and OnLoseTarget are presentation (checked in the link block).
+        "CeilingTurretBehaviour" => {}
+        // temperature_transfer.rs: Awake caches the PhysicalBehaviour (link block); FixedUpdate moves the temperatures.
+        "TemperatureTransferBehaviour" => {}
         // emp.rs: Use runs Activate; Awake's Killzone clone is presentation (no collider, sized for rendering).
         "EMPBehaviour" => {}
         // decimator.rs
         "DecimatorBehaviour" => {}
         // immobility_field.rs
         "ImmobilityFieldBehaviour" => {}
+        // tesla_coil.rs: Awake instantiates the bolts (their Update is rewritten there), Start, Use, FixedUpdate,
+        // OnDisable and OnDestroy; the audio is presentation.
+        "TeslaCoilBehaviour" => {}
         // energy_sword.rs: Awake hides the blade, Start, Use, FixedUpdate, Update, OnDisable and OnDestroy are
         // rewritten; the audio and particles are presentation.
         "EnergySwordBehaviour" => {}
@@ -653,6 +674,10 @@ pub(super) fn check_rewritten(class: &str) {
         "BloodTankBehaviour" => {}
         // Update and Use are rewritten (valve.rs); Awake, Start, the display and OnWillRenderObject are presentation.
         "ValveBehaviour" => {}
+        // Update, OnDisable and the SetTarget joint are rewritten (physics_gun.rs); Awake, Start (Target is null) and the line are presentation.
+        "PhysicsGunBehaviour" => {}
+        // Use and UseContinuous are rewritten (activator_electrode.rs); Awake and OnDestroy only (un)subscribe an empty listener, Start, Update and the lights are presentation.
+        "ActivatorElectrodeBehaviour" => {}
         // Awake sets the physical's delay, Start and OnEnable resume a busy DoLag, Use and OnDisable are rewritten (timed_gate.rs).
         "TimedGateBehaviour" => {}
         // Use, DefibRoutine and OnDisable are rewritten (resuscitation.rs); Start and OnEnable only set the text screen.
@@ -2482,6 +2507,7 @@ impl Game {
         let mut power_hammers = HashMap::new();
         let mut balloons = HashMap::new();
         let (mut metronomes, mut thermometers, mut infrared_thermometers) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let (mut physics_guns, mut activator_electrodes) = (HashMap::new(), HashMap::new());
         let (mut activation_toggles, mut power_gauges) = (HashMap::new(), HashMap::new());
         let (mut torches, mut flares) = (HashMap::new(), HashMap::new());
         let (mut bulbs, mut thrusterbeds, mut pistons, mut flamethrowers, mut rockets) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
@@ -2741,6 +2767,38 @@ impl Game {
                 x.PoppedEffect = inst.objects[effect].components[0];
                 balloons.insert(o, self.balloons.len());
                 self.balloons.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "PhysicsGunBehaviour") {
+                let mut x = super::physics_gun::PhysicsGun::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).ok_or("PhysicsGunBehaviour without a PhysicalBehaviour (GetComponent is null)")?;
+                let mut at = l.object(field(v, "LineStart")?)?.ok_or("PhysicsGunBehaviour.LineStart is null")?;
+                while at != o {
+                    x.LineStart.push(inst.objects[at].trs);
+                    at = inst.objects[at].parent.ok_or("PhysicsGunBehaviour.LineStart is outside the gun")?;
+                }
+                if x.LineStart.is_empty() {
+                    unimplemented!("PhysicsGunBehaviour.LineStart on the gun's own object");
+                }
+                x.LayersToHit = field(field(v, "LayersToHit")?, "m_Bits")?.i64().ok_or("PhysicsGunBehaviour.LayersToHit.m_Bits")? as u32;
+                x.LayersToGrab = field(field(v, "LayersToGrab")?, "m_Bits")?.i64().ok_or("PhysicsGunBehaviour.LayersToGrab.m_Bits")? as u32;
+                if l.in_arena(field(v, "Target")?, &l.arenas.physical, "PhysicalBehaviour")?.is_some() {
+                    unimplemented!("PhysicsGunBehaviour.Target set in its prefab (Start holds it)");
+                }
+                physics_guns.insert(o, self.physics_guns.len());
+                self.physics_guns.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "ActivatorElectrodeBehaviour") {
+                let mut x = super::activator_electrode::ActivatorElectrode::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).ok_or("ActivatorElectrodeBehaviour without a PhysicalBehaviour (GetComponent is null)")?;
+                x.LayersToConsider = field(field(v, "LayersToConsider")?, "m_Bits")?.i64().ok_or("ActivatorElectrodeBehaviour.LayersToConsider.m_Bits")? as u32;
+                activator_electrodes.insert(o, self.activator_electrodes.len());
+                self.activator_electrodes.push(x);
             }
             if let Some((c, enabled, v)) = script(prefab, o, "MetronomeBehaviour") {
                 let mut x = super::metronome::Metronome::default();
@@ -3147,9 +3205,14 @@ impl Game {
         let mut jet_engines = HashMap::new();
         let mut chainsaws = HashMap::new();
         let mut freezes = HashMap::new();
+        let mut freeze_serialisations = HashMap::new();
+        let mut ceiling_turrets = HashMap::new();
+        let mut temperature_transfers = HashMap::new();
         let mut emps = HashMap::new();
         let mut decimators = HashMap::new();
         let mut immobility_fields = HashMap::new();
+        let mut tesla_coils = HashMap::new();
+        let mut tesla_bolt_sources = HashMap::new();
         let mut energy_swords = HashMap::new();
         let mut signal_converters = HashMap::new();
         for o in 0..n {
@@ -3179,6 +3242,44 @@ impl Game {
                 x.guideTemperatureBehaviour = translated.iter().find(|((to, tc), _)| *to == o && matches!(&prefab.objects[*to].components[*tc].1, Component::Script { class, .. } if class == "GuideTemperatureBehaviour")).map(|(_, &b)| b);
                 jet_engines.insert(o, self.jet_engines.len());
                 self.jet_engines.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TeslaCoilBehaviour") {
+                let mut x = super::tesla_coil::TeslaCoil::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "physicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.unwrap_or_else(|| unimplemented!("TeslaCoilBehaviour.physicalBehaviour null (NullReferenceException in CalculateWhReady)"));
+                if l.object(field(v, "audioSource")?)?.is_none() {
+                    unimplemented!("TeslaCoilBehaviour.audioSource null (NullReferenceException in UpdateBolts)");
+                }
+                x.colliders = prefab.objects[o].components.iter().enumerate().filter(|(_, (_, k))| matches!(k, Component::Collider2D(_))).map(|(k, _)| inst.objects[o].components[k]).collect();
+                x.sparkClips = array(v, "sparkClips")?.len();
+                let p = field(v, "bolt")?.pptr().ok_or("bolt")?;
+                if p.is_null() && x.BoltCount > 0 {
+                    unimplemented!("TeslaCoilBehaviour.Awake: Instantiate(null bolt) (ArgumentException)");
+                }
+                let mut source = super::tesla_coil::BoltSource::default();
+                if let Some(r) = db.resolve(file, p) {
+                    let bolt = db.prefab(r)?;
+                    source.ids = bolt.objects.iter().map(|x| 1 + x.components.len()).sum();
+                    let k = bolt.objects[0].components.iter().position(|(_, k)| matches!(k, Component::Script { class, .. } if class == "TeslaCoilLightningBoltBehaviour")).ok_or("TeslaCoilBehaviour.bolt without a TeslaCoilLightningBoltBehaviour")?;
+                    source.script_at = 1 + k;
+                    let Component::Script { execution_order, fields: bv, .. } = &bolt.objects[0].components[k].1 else { unreachable!() };
+                    // Awake sets GetComponent<TeslaCoilLightningBoltBehaviour>().parent; nothing else on the clone runs.
+                    if bolt.objects.iter().any(|x| x.components.iter().any(|(_, k)| matches!(k, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("TeslaCoilBehaviour: a bolt prefab with physics");
+                    }
+                    let b = &mut source.bolt;
+                    b.order = *execution_order;
+                    b.seed = float(bv, "seed")?;
+                    b.life = float(bv, "life")?;
+                    b.Radius = float(bv, "Radius")?;
+                    b.layer = field(field(bv, "layer")?, "m_Bits")?.i64().ok_or("layer.m_Bits")? as u32;
+                    b.Spark = db.resolve(r.file, field(bv, "Spark")?.pptr().ok_or("Spark")?);
+                }
+                tesla_bolt_sources.insert(o, source);
+                tesla_coils.insert(o, self.tesla_coils.len());
+                self.tesla_coils.push(x);
             }
             if let Some((c, enabled, v)) = script(prefab, o, "ImmobilityFieldBehaviour") {
                 let mut x = super::immobility_field::ImmobilityField::default();
@@ -3281,6 +3382,46 @@ impl Game {
                 freezes.insert(o, self.freezes.len());
                 self.freezes.push(x);
             }
+            if let Some((c, _, v)) = script(prefab, o, "FreezeSerialisationHelper") {
+                let mut x = super::freeze::FreezeSerialisation::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                freeze_serialisations.insert(o, self.freeze_serialisations.len());
+                self.freeze_serialisations.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "CeilingTurretBehaviour") {
+                let mut x = super::ceiling_turret::CeilingTurret::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // FirearmBehaviour: the firearm on its object.
+                let fr = field(v, "FirearmBehaviour")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("CeilingTurretBehaviour.FirearmBehaviour null or outside its prefab (NullReferenceException in Update)"));
+                let (fo, _) = *prefab.index.get(&ObjRef { file, path_id: fr.path_id }).ok_or("CeilingTurretBehaviour.FirearmBehaviour: dangling reference")?;
+                x.firearm = *firearms.get(&fo).unwrap_or_else(|| unimplemented!("CeilingTurretBehaviour.FirearmBehaviour on an object without a FirearmBehaviour in this clone"));
+                // Joint: a HingeJoint2D of this prefab.
+                let jt = field(v, "Joint")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("CeilingTurretBehaviour.Joint null or outside its prefab (NullReferenceException in Update)"));
+                let at = *prefab.index.get(&ObjRef { file, path_id: jt.path_id }).ok_or("CeilingTurretBehaviour.Joint: dangling reference")?;
+                x.joint = *l.arenas.hinge.get(&at).ok_or("CeilingTurretBehaviour.Joint: not a HingeJoint2D")?;
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                // OnSight and OnLoseTarget: presentation only.
+                if !presentation_event(prefab, file, field(v, "OnSight")?) || !presentation_event(prefab, file, field(v, "OnLoseTarget")?) {
+                    unimplemented!("CeilingTurretBehaviour.OnSight / OnLoseTarget: a persistent call beyond audio and rendering");
+                }
+                ceiling_turrets.insert(o, self.ceiling_turrets.len());
+                self.ceiling_turrets.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "TemperatureTransferBehaviour") {
+                let mut x = super::temperature_transfer::TemperatureTransfer::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // Awake: GetComponent<PhysicalBehaviour>() on its object.
+                x.phys = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("TemperatureTransferBehaviour without a PhysicalBehaviour (NullReferenceException in FixedUpdate)"));
+                // Other: the serialized PhysicalBehaviour (null throws in FixedUpdate).
+                x.Other = l.physical(field(v, "Other")?)?.unwrap_or_else(|| unimplemented!("TemperatureTransferBehaviour.Other null (NullReferenceException in FixedUpdate)"));
+                temperature_transfers.insert(o, self.temperature_transfers.len());
+                self.temperature_transfers.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "EnergySwordBehaviour") {
                 let mut x = super::energy_sword::EnergySword::default();
                 load_values(x.fields(), v)?;
@@ -3347,7 +3488,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps,decimators, immobility_fields, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers,decimators, immobility_fields, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3685,12 +3826,15 @@ impl Game {
                 "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
                 "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
                 "MetronomeBehaviour" => self.metronome_on_disable(linked.metronomes[&d]),
+                "PhysicsGunBehaviour" => self.physics_gun_on_disable(linked.physics_guns[&d]),
                 "TimedGateBehaviour" => self.timed_gate_on_disable(linked.timed_gates[&d]),
                 "DefibrillatorBehaviour" => self.defibrillator_on_disable(linked.defibrillators[&d]),
                 // OnDisable only stops the loop sound.
                 "CardiopulmonaryBypassMachineBehaviour" => {}
                 "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
                 "ImmobilityFieldBehaviour" => self.immobility_field_on_disable(linked.immobility_fields[&d], inst),
+                "CeilingTurretBehaviour" => self.ceiling_turret_on_disable(linked.ceiling_turrets[&d]),
+                "TeslaCoilBehaviour" => self.tesla_coil_on_disable(linked.tesla_coils[&d]),
                 // OnDisable -> OnDestroy: clears softConnections, empty before the first FixedUpdate.
                 "SharpOnAllSidesBehaviour" => {}
                 "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
@@ -3756,6 +3900,8 @@ impl Game {
                 "LiquidContainerController" => self.liquid_container_awake(linked.liquid_containers[&o]),
                 // No Awake; its OnEnable follows here.
                 "ColorWave" if *enabled => self.color_wave_on_enable(),
+                // OnEnable: Joint.useMotor = true (ceiling_turret.rs).
+                "CeilingTurretBehaviour" if *enabled => self.ceiling_turret_on_enable(linked.ceiling_turrets[&o]),
                 // OnEnable while the instance is still being built: its colliders come from the instance in hand.
                 "TorchBehaviour" if *enabled => {
                     let colliders = Game::torch_child_colliders(inst, o);
@@ -3818,6 +3964,7 @@ impl Game {
                 "CirculationBehaviour" => self.circulation_awake(limb()),
                 "DamagableMachineryBehaviour" => self.machinery_awake(linked.machinery[&o]),
                 "FirearmBehaviour" => self.firearm_awake(linked.firearms[&o]),
+                "TeslaCoilBehaviour" => self.tesla_coil_awake(linked.tesla_coils[&o], &linked.tesla_bolt_sources[&o]),
                 // transform.localScale = Vector2.one * Random.Range(Range.x, Range.y) (a Vector2: z becomes 0).
                 "RandomSpawnedSize" => {
                     let range: [f32; 2] = floats(field(v, "Range").unwrap()).unwrap();
@@ -3992,13 +4139,18 @@ impl Game {
                 "ScopeAttachmentBehaviour" | "ExplosiveAttachmentBehaviour" | "FlashlightAttachmentBehaviour" | "IncendiaryAttachmentBehaviour" => Some(Behaviour::FirearmAttachment(linked.firearm_attachments[&o])),
                 "LaserBehaviour" => Some(Behaviour::Laser(linked.lasers[&o])),
                 "MetronomeBehaviour" => Some(Behaviour::Metronome(linked.metronomes[&o])),
+                "PhysicsGunBehaviour" => Some(Behaviour::PhysicsGun(linked.physics_guns[&o])),
+                "ActivatorElectrodeBehaviour" => Some(Behaviour::ActivatorElectrode(linked.activator_electrodes[&o])),
                 "ThermometerBehaviour" => Some(Behaviour::Thermometer(linked.thermometers[&o])),
                 "InfraredThermometer" => Some(Behaviour::InfraredThermometer(linked.infrared_thermometers[&o])),
                 "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
                 "ChainsawBehaviour" => Some(Behaviour::Chainsaw(linked.chainsaws[&o])),
+                "CeilingTurretBehaviour" => Some(Behaviour::CeilingTurret(linked.ceiling_turrets[&o])),
+                "TemperatureTransferBehaviour" => Some(Behaviour::TemperatureTransfer(linked.temperature_transfers[&o])),
                 "EMPBehaviour" => Some(Behaviour::Emp(linked.emps[&o])),
                 "DecimatorBehaviour" => Some(Behaviour::Decimator(linked.decimators[&o])),
                 "ImmobilityFieldBehaviour" => Some(Behaviour::ImmobilityField(linked.immobility_fields[&o])),
+                "TeslaCoilBehaviour" => Some(Behaviour::TeslaCoil(linked.tesla_coils[&o])),
                 "EnergySwordBehaviour" => Some(Behaviour::EnergySword(linked.energy_swords[&o])),
                 "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
                 "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
@@ -4163,8 +4315,11 @@ impl Game {
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
                 "ChainsawBehaviour" => PendingStart::Chainsaw(linked.chainsaws[&o]),
                 "FreezeBehaviour" => PendingStart::Freeze(linked.freezes[&o]),
+                "FreezeSerialisationHelper" => PendingStart::FreezeSerialisation(linked.freeze_serialisations[&o]),
+                "CeilingTurretBehaviour" => PendingStart::CeilingTurret(linked.ceiling_turrets[&o]),
                 "DecimatorBehaviour" => PendingStart::Decimator(linked.decimators[&o]),
                 "ImmobilityFieldBehaviour" => PendingStart::ImmobilityField(linked.immobility_fields[&o]),
+                "TeslaCoilBehaviour" => PendingStart::TeslaCoil(linked.tesla_coils[&o]),
                 "EnergySwordBehaviour" => PendingStart::EnergySword(linked.energy_swords[&o]),
                 "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
                 // Start reads Slider.limits: the component's state, taken from the spawn when the Start runs.

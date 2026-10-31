@@ -27,6 +27,8 @@ pub mod soap;
 pub mod power_hammer;
 pub mod balloon;
 pub mod metronome;
+pub mod physics_gun;
+pub mod activator_electrode;
 pub mod button;
 pub mod laser;
 pub mod attachment;
@@ -51,8 +53,12 @@ pub mod thermometer;
 pub mod syringe;
 pub mod jet_engine;
 pub mod chainsaw;
+pub mod automatic_sentry;
+pub mod ceiling_turret;
+pub mod temperature_transfer;
 pub mod decimator;
 pub mod immobility_field;
+pub mod tesla_coil;
 pub mod emp;
 pub mod freeze;
 pub mod energy_sword;
@@ -1212,6 +1218,8 @@ pub enum Behaviour {
     Stunner(usize),
     Balloon(usize),
     Metronome(usize),
+    PhysicsGun(usize),
+    ActivatorElectrode(usize),
     Thermometer(usize),
     Torch(usize),
     Flare(usize),
@@ -1226,8 +1234,14 @@ pub enum Behaviour {
     Syringe(usize),
     JetEngine(usize),
     Chainsaw(usize),
+    /// CeilingTurretBehaviour.Start: the `Game::ceiling_turrets` index.
+    CeilingTurret(usize),
+    /// TemperatureTransferBehaviour.FixedUpdate: the `Game::temperature_transfers` index.
+    TemperatureTransfer(usize),
     Decimator(usize),
     ImmobilityField(usize),
+    TeslaCoil(usize),
+    TeslaBolt(usize),
     /// EMPBehaviour.Use: the `Game::emps` index.
     Emp(usize),
     EnergySword(usize),
@@ -1289,6 +1303,8 @@ impl Behaviour {
             Behaviour::Stunner(_) => "StunnerBehaviour",
             Behaviour::Balloon(_) => "BalloonBehaviour",
             Behaviour::Metronome(_) => "MetronomeBehaviour",
+            Behaviour::PhysicsGun(_) => "PhysicsGunBehaviour",
+            Behaviour::ActivatorElectrode(_) => "ActivatorElectrodeBehaviour",
             Behaviour::Thermometer(_) => "ThermometerBehaviour",
             Behaviour::InfraredThermometer(_) => "InfraredThermometer",
             Behaviour::Torch(_) => "TorchBehaviour",
@@ -1301,8 +1317,12 @@ impl Behaviour {
             Behaviour::Display(_) => "DisplayBehaviour",
             Behaviour::JetEngine(_) => "JetEngineBehaviour",
             Behaviour::Chainsaw(_) => "ChainsawBehaviour",
+            Behaviour::CeilingTurret(_) => "CeilingTurretBehaviour",
+            Behaviour::TemperatureTransfer(_) => "TemperatureTransferBehaviour",
             Behaviour::Decimator(_) => "DecimatorBehaviour",
             Behaviour::ImmobilityField(_) => "ImmobilityFieldBehaviour",
+            Behaviour::TeslaCoil(_) => "TeslaCoilBehaviour",
+            Behaviour::TeslaBolt(_) => "TeslaCoilLightningBoltBehaviour",
             Behaviour::Emp(_) => "EMPBehaviour",
             Behaviour::EnergySword(_) => "EnergySwordBehaviour",
             Behaviour::Blaster(_) => "BlasterBehaviour",
@@ -1485,6 +1505,8 @@ pub struct Game {
     pub power_hammers: Vec<power_hammer::PowerHammer>,
     pub balloons: Vec<balloon::Balloon>,
     pub metronomes: Vec<metronome::Metronome>,
+    pub physics_guns: Vec<physics_gun::PhysicsGun>,
+    pub activator_electrodes: Vec<activator_electrode::ActivatorElectrode>,
     pub thermometers: Vec<thermometer::Thermometer>,
     pub infrared_thermometers: Vec<thermometer::InfraredThermometer>,
     pub activation_toggles: Vec<activation_toggle::ActivationToggle>,
@@ -1516,10 +1538,15 @@ pub struct Game {
     pub chainsaws: Vec<chainsaw::Chainsaw>,
     pub decimators: Vec<decimator::Decimator>,
     pub immobility_fields: Vec<immobility_field::ImmobilityField>,
+    pub tesla_coils: Vec<tesla_coil::TeslaCoil>,
+    pub tesla_bolts: Vec<tesla_coil::TeslaBolt>,
     /// DecimatorBehaviour.lastDestroyedRootId (static, -1 until set).
     pub decimator_last_root: Option<i32>,
     pub emps: Vec<emp::Emp>,
     pub freezes: Vec<freeze::Freeze>,
+    pub freeze_serialisations: Vec<freeze::FreezeSerialisation>,
+    pub ceiling_turrets: Vec<ceiling_turret::CeilingTurret>,
+    pub temperature_transfers: Vec<temperature_transfer::TemperatureTransfer>,
     pub energy_swords: Vec<energy_sword::EnergySword>,
     /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
     pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,

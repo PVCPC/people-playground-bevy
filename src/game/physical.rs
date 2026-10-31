@@ -1616,8 +1616,16 @@ impl Game {
             } else if let Some(f) = self.fixed_joints.iter().position(|f| f.joint == Some(j)) {
                 // FixedJoint2D / SliderJoint2D
                 self.fixed_joints[f].joint = None;
+            } else if let Some(slot) = self.anchored_joints.iter().position(|a| a.joint == Some(j)) {
+                // A prefab-cloned Fixed/Slider/Spring/Distance/WheelJoint2D: its own Cleanup destroys the b2 joint.
+                let id = self.anchored_joints[slot].component;
+                self.with_component_instance(id, |g, inst, _| {
+                    let (o, c) = *inst.joints.iter().find(|(_, v)| **v == j).expect("the clone's joint").0;
+                    g.anchored_joint2d_cleanup(inst, o, c);
+                });
+                continue;
             } else {
-                unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge, gore string, drag joint or fixed/slider joint");
+                unimplemented!("Rigidbody2D::Cleanup: a joint other than a hinge, gore string, drag joint, fixed/slider joint or prefab joint");
             }
             self.world.destroy_joint(j);
         }

@@ -1,8 +1,7 @@
 //! ImmobilityFieldBehaviour. Use switches the field: CaptureObject and Trigger follow Activated. A physical object
 //! whose collider enters the trigger (on one of Layers) is held by a FrictionJoint2D on the field's GameObject, its
 //! strength 2 * (Strength + 8 * Charge), until it leaves, its collider is disabled or the field switches. The clips
-//! are audio (the CaptureClips draw stays); OnImmobilityCapture/OnImmobilityRelease reach only TeslaCoilBehaviour,
-//! which is refused at link.
+//! are audio (the CaptureClips draw stays); OnImmobilityCapture/OnImmobilityRelease reach only TeslaCoilBehaviour.
 #![allow(non_snake_case)]
 
 use super::soft_connect::SoftConnections;
@@ -91,6 +90,10 @@ impl Game {
     /// ImmobilityFieldBehaviour.DestroyAllJoints (OnDestroy runs it too): every FrictionJoint2D on the GameObject is
     /// destroyed and the dictionary is cleared.
     pub fn immobility_field_destroy_all_joints(&mut self, i: usize) {
+        for key in self.immobility_fields[i].joints.keys() {
+            let coll = self.immobility_fields[i].joints.get(key).unwrap().coll;
+            self.tesla_coil_on_immobility_release(coll, i);
+        }
         let p = self.immobility_fields[i].physical;
         for f in 0..self.fixed_joints.len() {
             let j = &self.fixed_joints[f];
@@ -109,6 +112,7 @@ impl Game {
         for key in self.immobility_fields[i].joints.keys() {
             let c = *self.immobility_fields[i].joints.get(key).unwrap();
             if !self.soft_joint_alive(c.joint) || !self.collider_exists(c.coll) || !self.collider_enabled(c.coll) {
+                self.tesla_coil_on_immobility_release(c.coll, i);
                 if self.soft_joint_alive(c.joint) {
                     self.destroy_joint_delayed(c.joint);
                 }
@@ -161,12 +165,14 @@ impl Game {
         self.immobility_fields[i].joints.add(go, Capture { joint: f, coll: collision, phys: v });
         // PhysicalBehaviour.PlayClipOnce(CaptureClips.PickRandom())
         self.pick_random(self.immobility_fields[i].CaptureClips).unwrap_or_else(|| unimplemented!("ImmobilityFieldBehaviour: CaptureClips.PickRandom() of an empty array (IndexOutOfRangeException)"));
+        self.tesla_coil_on_immobility_capture(collision, i);
     }
 
     /// ImmobilityFieldBehaviour.OnTriggerExit2D(collision)
     pub fn immobility_field_trigger_exit(&mut self, i: usize, collision: i32) {
         let Some(go) = self.world.collider_game_object(collision) else { return };
         if let Some(c) = self.immobility_fields[i].joints.get(go).copied() {
+            self.tesla_coil_on_immobility_release(c.coll, i);
             if self.soft_joint_alive(c.joint) {
                 self.destroy_joint_delayed(c.joint);
             }

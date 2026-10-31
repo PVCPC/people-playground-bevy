@@ -1,5 +1,6 @@
 //! ToolControllerBehaviour with its SelectionController and DragTool (the tool the game starts with), fed by
 //! InputSystem's controls and Global.MousePosition.
+use super::activator_electrode::Act;
 use super::*;
 use crate::b2::math::Vec2 as V;
 use crate::b2::revolute::RevoluteDef;
@@ -137,7 +138,7 @@ const USE_RECEIVERS: &[&str] = &[
     "RailgunBehaviour", "RayCannonBehaviour", "RaygunBehaviour", "RocketLauncherBehaviour", "RotorBehaviour",
     "ScherbewerferBehaviour", "ScopeAttachmentBehaviour", "SeismicChargeBehaviour", "SignalConverterBehaviour",
     "SingleFloodlightBehaviour", "SirenBehaviour", "SpikeGrenadeBehaviour", "SyringeBehaviour", "TankBarrelBehaviour",
-    "TelevisionBehaviour", "ThermometerBehaviour", "ThrusterbedBehaviour", "TimedGateBehaviour",
+    "TelevisionBehaviour", "TeslaCoilBehaviour", "ThermometerBehaviour", "ThrusterbedBehaviour", "TimedGateBehaviour",
     "TransmitterBehaviour", "TruckDoorBehaviour", "UltraStrengthSyringe", "UniversalBellBehaviour", "UseBubbler",
     "UseEventTrigger", "UseWireBehaviour", "ValveBehaviour", "WaterBreathingSyringe", "WinchBehaviour",
     "ZombieSyringe",
@@ -462,7 +463,7 @@ impl Game {
     pub(super) fn activate_direct(&mut self, p: usize) {
         // SendOnce: OnSingleUse.Invoke: the ActivationToggleBehaviour listeners.
         self.activation_toggle_use_direct(p);
-        self.broadcast_use(p);
+        self.broadcast_use(p, &Act::direct(0));
     }
 
     /// BroadcastMessage("Use") on a physical object's GameObject: it and its active descendants, each object's
@@ -516,7 +517,7 @@ impl Game {
                     continue;
                 }
                 match self.behaviour_of.get(&inst.objects[x].components[k]) {
-                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::Emp(_) | Behaviour::Decimator(_) | Behaviour::ImmobilityField(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
+                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::Emp(_) | Behaviour::Decimator(_) | Behaviour::ImmobilityField(_) | Behaviour::EnergySword(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::ActivatorElectrode(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_) | Behaviour::TeslaCoil(_))))=> out.push(UseReceiver::Behaviour(b)),
                     Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                     _ => unimplemented!("{class}.Use"),
                 }
@@ -538,7 +539,7 @@ impl Game {
         }
     }
 
-    fn broadcast_use(&mut self, p: usize) {
+    pub(super) fn broadcast_use(&mut self, p: usize, act: &Act) {
         let id = self.physicals[p].id;
         let receivers: Vec<UseReceiver> = self.with_component_instance(id, |g, inst, start| g.use_receivers_below(inst, start));
         for b in receivers {
@@ -556,19 +557,18 @@ impl Game {
                 Behaviour::Launcher(l) => self.launcher_use(l),
                 Behaviour::Bell(b) => self.bell_use(b),
                 Behaviour::UniversalBell(b) => self.universal_bell_use(b),
-                // A direct activation: channel 0.
-                Behaviour::Valve(v) => self.valve_use(v, 0),
+                // The activation's channel.
+                Behaviour::Valve(v) => self.valve_use(v, act.channel as i32),
                 Behaviour::TimedGate(g) => self.timed_gate_use(g),
                 Behaviour::Defibrillator(d) => self.defibrillator_use(d),
                 Behaviour::CardiopulmonaryBypass(c) => self.cardiopulmonary_bypass_use(c),
                 Behaviour::HeartMonitor(h) => self.heart_monitor_use(h),
                 Behaviour::Excalibur(e) => self.excalibur_use(e),
-                Behaviour::BloodTank(t) => self.blood_tank_use(t, 0),
+                Behaviour::BloodTank(t) => self.blood_tank_use(t, act.channel as i32),
                 Behaviour::ArchelixCaster(c) => self.archelix_caster_use(c),
                 Behaviour::MachineGun(m) => self.machine_gun_use(m),
                 Behaviour::Minigun(m) => self.minigun_use(m),
-                // A direct activation: new ActivationPropagation(direct: true, 0, ..).
-                Behaviour::Translated(t) => self.tr_use(t, super::translated::rt::Activation { Channel: 0 }),
+                Behaviour::Translated(t) => self.tr_use(t, super::translated::rt::Activation { Channel: act.channel as i32 }),
                 Behaviour::Glowtube(g) => self.glowtube_use(g),
                 Behaviour::Led(i) => self.led_use(i),
                 Behaviour::Detector(i) => self.detector_use(i),
@@ -579,17 +579,24 @@ impl Game {
                 Behaviour::Bulb(i) => self.bulb_use(i),
                 Behaviour::Thrusterbed(i) => self.thrusterbed_use(i),
                 Behaviour::Piston(i) => self.piston_use(i),
-                // A direct activation: Channel 0.
-                Behaviour::Car(i) => self.car_use(i, 0),
-                Behaviour::Syringe(i) => self.syringe_use(i, 0),
+                Behaviour::Car(i) => self.car_use(i, act.channel as i32),
+                Behaviour::Syringe(i) => self.syringe_use(i, act.channel as i32),
                 Behaviour::JetEngine(i) => self.jet_engine_use(i),
                 // ChainsawBehaviour.Use: PlayClipOnce(Rev) when not destroyed (audio).
                 Behaviour::Chainsaw(_) => {}
                 Behaviour::Emp(i) => self.emp_use(i),
                 Behaviour::Decimator(i) => self.decimator_use(i),
                 Behaviour::ImmobilityField(i) => self.immobility_field_use(i),
+                // TeslaCoilBehaviour.Use() takes no parameter; SendMessage calls it all the same.
+                Behaviour::TeslaCoil(i) => self.tesla_coil_use(i),
                 Behaviour::EnergySword(i) => self.energy_sword_use(i),
-                Behaviour::Metronome(m) => self.metronome_use(m),
+                // MetronomeBehaviour.Use: `base.enabled && !activation.Contains(base.transform.root)`.
+                Behaviour::Metronome(m) => {
+                    if !act.contains(self.root_id(self.metronomes[m].phys)) {
+                        self.metronome_use(m)
+                    }
+                }
+                Behaviour::ActivatorElectrode(e) => self.activator_electrode_use(e, act),
                 Behaviour::Thermometer(t) => self.thermometer_use(t),
                 Behaviour::Flare(f) => self.flare_use(f),
                 Behaviour::Display(d) => self.display_use(d),
@@ -601,8 +608,8 @@ impl Game {
                 Behaviour::Beamformer(i) => self.beamformer_use(i),
                 Behaviour::Scifi40(i) => self.scifi40_use(i),
                 Behaviour::HealthGun(i) | Behaviour::FreezeGun(i) => self.effect_gun_use(i),
-                // A direct activation: ActivationPropagation.Direct.
-                Behaviour::SignalConverter(i) => self.signal_converter_use(i, true, 0),
+                // The activation's Direct flag and channel.
+                Behaviour::SignalConverter(i) => self.signal_converter_use(i, act.direct, act.channel),
                 _ => unreachable!(),
             }
         }
@@ -1176,6 +1183,22 @@ mod tests {
         g.input.controls.insert(key.into(), Control { down, held, up });
     }
 
+    #[test]
+    fn disintegrating_a_body_cleans_up_its_prefab_joints() {
+        let Some((mut g, first)) = spawned("Car") else { return };
+        // A part of the car whose body holds a prefab-cloned joint (its WheelJoint2Ds).
+        let (p, slot) = (first..g.physicals.len())
+            .find_map(|p| {
+                let body = g.physicals[p].rigidbody.body;
+                let joints = g.world.body(body).joints.clone();
+                joints.iter().find_map(|&(_, j)| g.anchored_joints.iter().position(|a| a.joint == Some(j))).map(|s| (p, s))
+            })
+            .expect("a car body with a prefab joint");
+        g.physical_disintegrate(p);
+        assert!(g.anchored_joints[slot].joint.is_none());
+        frames(&mut g, 60);
+    }
+
     fn frames(g: &mut Game, n: usize) {
         for _ in 0..n {
             step(g, 1.0 / 60.0).unwrap();
@@ -1283,9 +1306,9 @@ mod tests {
         let shown = |g: &mut Game| g.with_component_instance(id, |_, inst, _| inst.objects[cosmetics].active);
         // Start: Activated is false, so Cosmetics is hidden.
         assert!(!g.cardiopulmonary_bypasses[0].Activated && !shown(&mut g));
-        g.broadcast_use(first);
+        g.broadcast_use(first, &Act::direct(0));
         assert!(g.cardiopulmonary_bypasses[0].Activated && shown(&mut g));
-        g.broadcast_use(first);
+        g.broadcast_use(first, &Act::direct(0));
         assert!(!g.cardiopulmonary_bypasses[0].Activated && !shown(&mut g));
     }
 
@@ -1361,7 +1384,7 @@ mod tests {
         assert_eq!(g.circulations[heart].ArtificialHeartbeat, 0.0);
         assert!(g.circulations[heart].BloodFlow < 0.5, "{}", g.circulations[heart].BloodFlow);
         // On: the wire sets the heartbeat and keeps the blood flowing.
-        g.broadcast_use(machine);
+        g.broadcast_use(machine, &Act::direct(0));
         assert!(g.cardiopulmonary_bypasses[0].Activated);
         frames(&mut g, 120);
         assert_eq!(g.circulations[heart].ArtificialHeartbeat, g.cardiopulmonary_bypasses[0].TargetHeartrate);
@@ -1448,6 +1471,62 @@ mod tests {
         g.activate_direct(emp);
         frames(&mut g, 1);
         assert!(androids.iter().any(|&l| g.limbs[l].Health == 0.0), "the EMP hit no android limb");
+    }
+
+    #[test]
+    fn tesla_coil_bolts_charge_a_human() {
+        let Some((mut g, _)) = spawned("Tesla Coil") else { return };
+        let coil = g.tesla_coils[0].physical;
+        let at = g.physicals[coil].transform.position;
+        let first_limb = g.limbs.len();
+        spawn_at(&mut g, "Human", [at[0] + 2.0, at[1] + 1.0, 0.0]);
+        frames(&mut g, 120);
+        let limbs: Vec<usize> = (first_limb..g.limbs.len()).map(|l| g.limbs[l].PhysicalBehaviour).collect();
+        assert!(g.tesla_bolts.iter().all(|b| !b.active), "the bolts are on before Use");
+        g.tesla_coil_use(0);
+        let mut charged = false;
+        for _ in 0..60 {
+            frames(&mut g, 1);
+            charged |= g.tesla_bolts.iter().any(|b| b.target.is_some_and(|q| limbs.contains(&q) && g.physicals[q].charge > 0.0));
+        }
+        assert!(charged, "no bolt charged a limb of the human");
+        g.tesla_coil_use(0);
+        assert!(g.tesla_bolts.iter().all(|b| !b.active), "the bolts stay on after the second Use");
+    }
+
+    #[test]
+    fn ceiling_turret_stays_frozen_in_place() {
+        let Some((mut g, _)) = spawned("Ceiling Turret") else { return };
+        // The turret's FreezeBehaviour is the last one added, after the Default map's.
+        let turret = g.freezes.last().expect("a FreezeBehaviour").physical;
+        assert_eq!(g.physicals[turret].rigidbody.bodyType, 2, "the frozen turret's body is not static");
+        let at = g.physicals[turret].transform.position;
+        frames(&mut g, 120);
+        assert_eq!(g.physicals[turret].transform.position, at, "the frozen turret moved");
+    }
+
+    #[test]
+    fn ceiling_turret_shoots_a_human_below_it() {
+        let Some((mut g, _)) = spawned("Ceiling Turret") else { return };
+        let firearm = g.firearms[g.ceiling_turrets.last().expect("a CeilingTurretBehaviour").firearm].physical.expect("a firearm physical");
+        let at = g.physicals[firearm].transform.position;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1] - 4.0, 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        let health = |g: &Game| -> f32 { (first_limb..g.limbs.len()).map(|l| g.limbs[l].Health).sum() };
+        let before = health(&g);
+        let mut hit = false;
+        for _ in 0..400 {
+            frames(&mut g, 1);
+            if health(&g) < before {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "the turret never hit the human ({before} health)");
     }
 
     #[test]
@@ -1551,5 +1630,126 @@ mod tests {
         let id = g.energy_swords[0].id;
         g.destroy_object(id);
         frames(&mut g, 2);
+    }
+
+    /// Spawns `item` at `at` and returns its first physical.
+    fn spawn_at(g: &mut Game, item: &str, at: [f32; 3]) -> usize {
+        let first = g.physicals.len();
+        g.catalog_selected = Some(item.into());
+        g.input.mouse = at;
+        ctl(g, "spawnRight", false, false, true);
+        frames(g, 1);
+        ctl(g, "spawnRight", false, false, false);
+        assert!(g.physicals.len() > first, "{item}: nothing spawned");
+        first
+    }
+
+    #[test]
+    fn syringe_pushes_into_and_pulls_from_a_flask() {
+        use crate::game::container::Owner;
+        let Some((mut g, flask_p)) = spawned("Flask") else { return };
+        let f = g.flasks.iter().position(|x| x.Phys == Some(flask_p)).expect("the flask");
+        let at = g.physicals[flask_p].transform.position;
+        let life = crate::game::circulation::liquid("LIFE SERUM");
+        // A finite Life Syringe lodged in the flask pushes its serum in (SyringeBehaviour.push, PressureMode Push).
+        let s = g.syringes.len();
+        spawn_at(&mut g, "Life Syringe", [at[0] + 1.0, at[1] + 1.0, 0.0]);
+        let life_syringe = g.syringes.len() - 1;
+        assert_eq!(life_syringe, s);
+        g.syringes[s].Finite = true;
+        g.syringe_lodged(s, flask_p);
+        assert_eq!(g.syringes[s].pushTargets, [Some(Owner::Flask(f))]);
+        let before = g.bc(Owner::Syringe(s)).TotalLiquidAmount;
+        frames(&mut g, 120);
+        let in_flask = g.get_amount(Owner::Flask(f), life);
+        assert!(in_flask > 0.1, "nothing reached the flask ({in_flask})");
+        assert!(g.bc(Owner::Syringe(s)).TotalLiquidAmount < before, "the syringe kept its liquid");
+        // An empty finite syringe on Pull draws it back out (pull: other.TransferTo(TransferRate, this)).
+        let e = g.syringes.len();
+        spawn_at(&mut g, "Empty Syringe", [at[0] - 1.0, at[1] + 1.0, 0.0]);
+        g.syringes[e].Finite = true;
+        g.syringe_use(e, 2);
+        g.syringe_lodged(e, flask_p);
+        assert_eq!(g.bc(Owner::Syringe(e)).TotalLiquidAmount, 0.0);
+        frames(&mut g, 120);
+        assert!(g.get_amount(Owner::Syringe(e), life) > 0.01, "the empty syringe drew nothing");
+    }
+
+    #[test]
+    fn physics_gun_holds_a_human_limb_and_lets_go() {
+        let Some((mut g, _)) = spawned("Human") else { return };
+        // The leftmost limb: the gun's ray, aimed right at its height, meets the human there.
+        let centre = |g: &Game, p: usize| g.world.body(g.physicals[p].rigidbody.body).sweep.c;
+        let human: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+        let left = human.iter().copied().min_by(|&a, &b| centre(&g, a).x.partial_cmp(&centre(&g, b).x).unwrap()).unwrap();
+        let c = centre(&g, left);
+        spawn_at(&mut g, "Physics Gun", [c.x - 1.2, c.y - 0.04, 0.0]);
+        let gun = g.physics_guns.len() - 1;
+        let gun_p = g.physics_guns[gun].physical;
+        // Held down (Value > 0 each frame) it grabs the first physical its ray meets.
+        for _ in 0..30 {
+            g.physicals[gun_p].ContinuousActivationTracker[0].Value = 1;
+            frames(&mut g, 1);
+            if g.physics_guns[gun].Target.is_some() {
+                break;
+            }
+        }
+        let target = g.physics_guns[gun].Target.expect("the gun grabbed nothing");
+        assert!(human.contains(&target), "the gun grabbed something else than the human");
+        let f = g.physics_guns[gun].joint.expect("no RelativeJoint2D");
+        let j = &g.fixed_joints[f];
+        let r = j.relative.expect("not a RelativeJoint2D");
+        assert!(j.joint.is_some() && !j.destroyed && j.state.enable_collision, "the joint is not live");
+        assert!(matches!(j.connected, Some(BodyOwner::Physical(t)) if t == target) && matches!(j.attached, BodyOwner::Physical(a) if a == gun_p));
+        assert_eq!((r.max_force, r.max_torque), (1200.0, 300.0));
+        // It carries the limb along when the gun rises: the limb follows (the gun swings on it) at the same distance.
+        let before = centre(&g, target).y;
+        let held_distance = |g: &Game| {
+            let (a, b) = (centre(g, gun_p), centre(g, target));
+            ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+        };
+        let start = held_distance(&g);
+        for _ in 0..60 {
+            g.physicals[gun_p].ContinuousActivationTracker[0].Value = 1;
+            g.physicals[gun_p].rigidbody.set_velocity(&mut g.world, [0.0, 3.0]);
+            frames(&mut g, 1);
+        }
+        let after = centre(&g, target).y;
+        assert!(after > before + 0.1, "the held limb did not follow the gun ({before} -> {after})");
+        assert!((held_distance(&g) - start).abs() < 0.05, "the joint let the limb drift from the gun ({start} -> {})", held_distance(&g));
+        // Letting go destroys the joint.
+        g.physicals[gun_p].ContinuousActivationTracker[0].Value = 0;
+        frames(&mut g, 4);
+        assert!(g.physics_guns[gun].Target.is_none(), "the gun still has a target");
+        assert!(g.fixed_joints[f].destroyed && g.fixed_joints[f].joint.is_none(), "the joint stayed");
+    }
+
+    #[test]
+    fn activator_electrode_activates_the_hand_it_touches() {
+        let Some((mut g, _)) = spawned("Human") else { return };
+        let grip = 1;
+        let hand = g.grips[grip].PhysicalBehaviour;
+        // The hand's grip point: the electrode's emission point goes there, so the hand is touched and can reach the electrode.
+        let c = g.transform_point3(hand, g.grips[grip].GripPosition);
+        // Something the grip can hold, within its reach but out of the electrode's emission circle.
+        let pistol = spawn_at(&mut g, "Pistol", [c[0], c[1] - 0.35, 0.0]);
+        assert!(!g.physicals[pistol].HoldingPositions.is_empty());
+        spawn_at(&mut g, "Activator Electrode", [c[0] - 0.39, c[1], 0.0]);
+        let e = g.activator_electrodes.len() - 1;
+        let ep = g.activator_electrodes[e].physical;
+        assert!(!g.grips[grip].isHolding);
+        // Using the electrode passes the Use on to the object at its emission point: the hand's GripBehaviour picks up.
+        g.activate_direct(ep);
+        assert!(g.grips[grip].isHolding && g.grips[grip].CurrentlyHolding == Some(pistol), "the touched hand did not take the pistol");
+        // A continuous use reaches the first physical at the emission point on the same channel.
+        let before: i32 = (0..g.physicals.len()).filter(|&p| p != ep).map(|p| g.physicals[p].ContinuousActivationTracker[0].Value).sum();
+        g.broadcast_use_continuous(ep, &Act::direct(0));
+        let after: i32 = (0..g.physicals.len()).filter(|&p| p != ep).map(|p| g.physicals[p].ContinuousActivationTracker[0].Value).sum();
+        assert!(after > before, "the continuous use reached nothing");
+        // A disabled electrode passes nothing on.
+        g.activator_electrodes[e].enabled = false;
+        g.broadcast_use_continuous(ep, &Act::direct(0));
+        let again: i32 = (0..g.physicals.len()).filter(|&p| p != ep).map(|p| g.physicals[p].ContinuousActivationTracker[0].Value).sum();
+        assert_eq!(again, after);
     }
 }

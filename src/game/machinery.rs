@@ -331,6 +331,17 @@ impl Game {
                 // No OnDisable, and no manager message.
                 self.scifi40s[i].enabled = false;
             }
+            // enabled = false: OnDisable (Joint.useMotor = false) when it was enabled and its object is active.
+            "CeilingTurretBehaviour" => {
+                let i = self.ceiling_turrets.iter().position(|x| x.id == id).expect("a CeilingTurretBehaviour in the arena");
+                if !std::mem::replace(&mut self.ceiling_turrets[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::CeilingTurret(i));
+                if active {
+                    self.ceiling_turret_on_disable(i);
+                }
+            }
             "EMPBehaviour" => {
                 let i = self.emps.iter().position(|x| x.id == id).expect("an EMPBehaviour in the arena");
                 // No OnDisable.

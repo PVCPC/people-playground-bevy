@@ -128,7 +128,7 @@ impl Game {
     }
 
     /// BarrelPosition: rb.GetRelativePoint(barrelPosition * lossyScale).
-    fn barrel_position(&mut self, f: usize) -> [f32; 2] {
+    pub(super) fn barrel_position(&mut self, f: usize) -> [f32; 2] {
         let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
         self.rigidbody_relative_point(p, self.firearms[f].barrelPosition)
     }
@@ -143,7 +143,7 @@ impl Game {
     }
 
     /// BarrelDirection: transform.TransformVector(barrelDirection) (each node's scale and rotation, no translation).
-    fn barrel_direction(&self, f: usize) -> [f32; 2] {
+    pub(super) fn barrel_direction(&self, f: usize) -> [f32; 2] {
         let p = self.firearms[f].physical.expect("a FirearmBehaviour without a Rigidbody2D");
         self.transform_vector_chain(p, self.firearms[f].barrelDirection)
     }

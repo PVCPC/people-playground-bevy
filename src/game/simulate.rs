@@ -470,6 +470,10 @@ impl Game {
                     let force = f.reaction_force(inv_dt);
                     ([force.x, force.y], f.reaction_torque(inv_dt))
                 }
+                Some(JointKind::Motor(m)) => {
+                    let force = m.reaction_force(inv_dt);
+                    ([force.x, force.y], m.reaction_torque(inv_dt))
+                }
             };
             let broken = (force != f32::INFINITY && (fx * fx + fy * fy).sqrt() > force) || (torque != f32::INFINITY && t > torque);
             if broken {
@@ -723,6 +727,8 @@ pub struct FixedJoint {
     pub friction: Option<(f32, f32)>,
     /// A DistanceJoint2D's own fields: distance (+0x98), maxDistanceOnly (+0x9c) and autoConfigureDistance (+0x9d).
     pub distance: Option<super::spawn::DistanceState>,
+    /// A RelativeJoint2D's own fields.
+    pub relative: Option<RelativeState>,
     /// m_Joint (+0x58)
     pub joint: Option<JointId>,
     /// The owner of the Rigidbody2D that is body A, and the connectedBody's (None: the scene's ground body).
@@ -733,6 +739,17 @@ pub struct FixedJoint {
     pub enabled: bool,
     /// The component has been destroyed.
     pub destroyed: bool,
+}
+
+/// RelativeJoint2D +0x80..+0x98: maxForce, maxTorque, correctionScale, linearOffset, angularOffset and autoConfigureOffset.
+#[derive(Clone, Copy, Debug)]
+pub struct RelativeState {
+    pub max_force: f32,
+    pub max_torque: f32,
+    pub correction_scale: f32,
+    pub linear_offset: Vec2,
+    pub angular_offset: f32,
+    pub auto_configure_offset: bool,
 }
 
 /// What FixedJoint2D::Create reads from its two ends.
@@ -768,7 +785,7 @@ impl Game {
     /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
     pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: None, distance: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: None, distance: None, relative: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -779,7 +796,7 @@ impl Game {
         let f = self.fixed_joints.len();
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
-        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), spring: None, friction: None, distance: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), spring: None, friction: None, distance: None, relative: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -792,7 +809,7 @@ impl Game {
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
         let spring = super::spawn::SpringState { auto_configure_distance: true, distance: 1.0, damping_ratio: 0.0, frequency: 1.0 };
-        self.fixed_joints.push(FixedJoint { state, slider: None, spring: Some(spring), friction: None, distance: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: None, spring: Some(spring), friction: None, distance: None, relative: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -802,9 +819,38 @@ impl Game {
     /// when the GameObject is active and the component enabled.
     pub fn add_friction_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: Some((1.0, 1.0)), distance: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: Some((1.0, 1.0)), distance: None, relative: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
+    }
+
+    /// AddComponent<RelativeJoint2D>(): RelativeJoint2D::Reset (180c056f0) over Joint2D::Reset: maxForce and maxTorque
+    /// 10000, correctionScale 0.3, zero offsets, autoConfigureOffset on; AddToManager creates the joint (to the ground
+    /// body) when the GameObject is active and the component enabled.
+    pub fn add_relative_joint_component(&mut self, attached: usize) -> usize {
+        let f = self.fixed_joints.len();
+        let relative = RelativeState { max_force: 10000.0, max_torque: 10000.0, correction_scale: 0.3, linear_offset: Vec2::new(0.0, 0.0), angular_offset: 0.0, auto_configure_offset: true };
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: None, distance: None, relative: Some(relative), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joint_create_if_active(f);
+        f
+    }
+
+    /// RelativeJoint2D::SetMaxForce (180c06100) / SetMaxTorque (180c06160): clamped to [0, 1e6] (a NaN is kept), written
+    /// through to the live b2 motor joint.
+    pub fn relative_joint_set_max_force(&mut self, f: usize, v: f32) {
+        let v = if 0.0 > v { 0.0 } else { f32::min(1_000_000.0, v) };
+        self.fixed_joints[f].relative.as_mut().expect("a RelativeJoint2D").max_force = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            self.world.joints[id].as_mut().unwrap().motor_mut().def.max_force = v;
+        }
+    }
+
+    pub fn relative_joint_set_max_torque(&mut self, f: usize, v: f32) {
+        let v = if 0.0 > v { 0.0 } else { f32::min(1_000_000.0, v) };
+        self.fixed_joints[f].relative.as_mut().expect("a RelativeJoint2D").max_torque = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            self.world.joints[id].as_mut().unwrap().motor_mut().def.max_torque = v;
+        }
     }
 
     /// AddComponent<DistanceJoint2D>(): DistanceJoint2D::Reset (180bf7930) over Joint2D::Reset: zero anchors, distance 1,
@@ -815,7 +861,7 @@ impl Game {
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
         let distance = super::spawn::DistanceState { auto_configure_distance: true, distance: 1.0, max_distance_only: false };
-        self.fixed_joints.push(FixedJoint { state, slider: None, spring: None, friction: None, distance: Some(distance), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: None, spring: None, friction: None, distance: Some(distance), relative: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -853,6 +899,10 @@ impl Game {
         if !self.fixed_joints[f].active {
             return;
         }
+        // RelativeJoint2D::Create also returns when the connected body's GameObject is inactive.
+        if self.fixed_joints[f].relative.is_some() && matches!(self.fixed_joints[f].connected, Some(BodyOwner::Physical(q)) if !self.physicals[q].active) {
+            return;
+        }
         let frame_a = self.body_frame(ends.body_a);
         let connected = match ends.body_b {
             None => Connected::World,
@@ -865,6 +915,22 @@ impl Game {
                 let (anchor_a, anchor_b) = j.state.configure_anchors(ends.scale_a, &frame_a, &connected);
                 let (max_force, max_torque) = j.friction.unwrap();
                 crate::b2::friction_joint::FrictionDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, max_force, max_torque }.into()
+            }
+            // RelativeJoint2D::Create (180c04290): with autoConfigureOffset, and before the joint was first created, the
+            // offsets become body B's position in body A's frame and the angle between them (b2MotorJointDef::Initialize).
+            (None, None) if j.relative.is_some() => {
+                let r = j.relative.as_mut().unwrap();
+                if r.auto_configure_offset && !j.state.anchor_configured {
+                    let frame_b = match connected {
+                        Connected::World => BodyFrame::default(),
+                        Connected::Body { frame, .. } => frame,
+                    };
+                    let (dx, dy) = (frame_b.position.x - frame_a.position.x, frame_b.position.y - frame_a.position.y);
+                    let (s, c) = (frame_a.q.s, frame_a.q.c);
+                    r.linear_offset = Vec2::new(c * dx + s * dy, c * dy - s * dx);
+                    r.angular_offset = frame_b.angle - frame_a.angle;
+                }
+                crate::b2::motor_joint::MotorDef { linear_offset: r.linear_offset, angular_offset: r.angular_offset, max_force: r.max_force, max_torque: r.max_torque, correction_factor: r.correction_scale }.into()
             }
             // DistanceJoint2D::Create (180bebd50): the anchors, then the distance between them when it autoconfigures;
             // maxDistanceOnly makes a b2RopeJoint of that maximum length, otherwise a rigid b2DistanceJoint.
@@ -927,8 +993,8 @@ impl Game {
     /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
     /// FlushSimulationChanges after it does nothing while playing).
     pub(super) fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
-        if self.fixed_joints[f].spring.is_some() || self.fixed_joints[f].friction.is_some() || self.fixed_joints[f].distance.is_some() {
-            // SpringJoint2D, FrictionJoint2D and DistanceJoint2D: Joint2D::Cleanup alone; the next Create redoes the auto-configuration.
+        if self.fixed_joints[f].spring.is_some() || self.fixed_joints[f].friction.is_some() || self.fixed_joints[f].distance.is_some() || self.fixed_joints[f].relative.is_some() {
+            // SpringJoint2D, FrictionJoint2D, DistanceJoint2D and RelativeJoint2D: Joint2D::Cleanup alone; the next Create redoes the auto-configuration.
             if let Some(id) = self.fixed_joints[f].joint.take() {
                 self.fixed_joints[f].state.anchor_configured = false;
                 self.world.destroy_joint(id);

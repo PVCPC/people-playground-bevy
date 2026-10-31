@@ -963,15 +963,23 @@ impl Game {
                 (Phase::Update, B::Beamformer(i)) => self.beamformer_update(i),
                 (Phase::Update, B::Balloon(i)) => self.balloon_update(i),
                 (Phase::Update, B::Metronome(i)) => self.metronome_update(i),
+                (Phase::Update, B::PhysicsGun(i)) => self.physics_gun_update(i),
+                // Update only fades the glow (presentation).
+                (Phase::Update, B::ActivatorElectrode(_)) => {}
                 // Thermometer's FixedUpdate writes readouts only (thermometer.rs).
                 (Phase::Fixed, B::Thermometer(_)) => {}
                 (Phase::Update, B::InfraredThermometer(i)) => self.infrared_update(i),
                 (Phase::Fixed, B::Syringe(i)) => self.syringe_fixed_update(i),
                 (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
                 (Phase::Fixed, B::Chainsaw(i)) => self.chainsaw_fixed_update(i),
+                (Phase::Fixed, B::CeilingTurret(i)) => self.ceiling_turret_fixed_update(i),
+                (Phase::Fixed, B::TemperatureTransfer(i)) => self.temperature_transfer_fixed_update(i),
                 (Phase::Fixed, B::Decimator(i)) => self.decimator_fixed_update(i),
                 (Phase::Fixed, B::ImmobilityField(i)) => self.immobility_field_fixed_update(i),
+                (Phase::Fixed, B::TeslaCoil(i)) => self.tesla_coil_fixed_update(i),
+                (Phase::Update, B::TeslaBolt(k)) => self.tesla_bolt_update(k),
                 (Phase::Update, B::Chainsaw(i)) => self.chainsaw_update(i),
+                (Phase::Update, B::CeilingTurret(i)) => self.ceiling_turret_update(i),
                 (Phase::Fixed, B::EnergySword(i)) => self.energy_sword_fixed_update(i),
                 (Phase::Update, B::EnergySword(i)) => self.energy_sword_update(i),
                 (Phase::Update, B::Syringe(i)) => self.syringe_update(i),

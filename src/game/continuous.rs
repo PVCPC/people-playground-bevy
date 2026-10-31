@@ -107,13 +107,14 @@ impl Game {
                 continue;
             }
             // SendContinuous: OnContinuousUse.Invoke. Its only listener is ActivationToggleBehaviour, which link rejects.
-            self.broadcast_use_continuous(p, 0);
+            self.broadcast_use_continuous(p, &super::activator_electrode::Act::direct(0));
         }
     }
 
     /// BroadcastMessage("UseContinuous", activation) on a physical object's GameObject: it and its active
     /// descendants, each object's components in order.
-    pub fn broadcast_use_continuous(&mut self, p: usize, channel: usize) {
+    pub fn broadcast_use_continuous(&mut self, p: usize, act: &super::activator_electrode::Act) {
+        let channel = act.channel as usize;
         let id = self.physicals[p].id;
         let receivers: Vec<Receiver> = self.with_component_instance(id, |g, inst, start| {
             let mut out = Vec::new();
@@ -133,7 +134,7 @@ impl Game {
                         continue;
                     }
                     match g.behaviour_of.get(&cid) {
-                        Some(&(_, b @ (Behaviour::RayGun(_) | Behaviour::SignalConverter(_) | Behaviour::Blaster(_)))) => out.push(Receiver::Behaviour(b)),
+                        Some(&(_, b @ (Behaviour::RayGun(_) | Behaviour::SignalConverter(_) | Behaviour::Blaster(_) | Behaviour::ActivatorElectrode(_)))) => out.push(Receiver::Behaviour(b)),
                         Some(&(_, b @ Behaviour::Translated(t))) if t.has_use_continuous() => out.push(Receiver::Behaviour(b)),
                         _ => unimplemented!("{class}.UseContinuous"),
                     }
@@ -148,7 +149,8 @@ impl Game {
                 Receiver::Behaviour(Behaviour::RayGun(i)) => self.ray_gun_use_continuous(i),
                 Receiver::Behaviour(Behaviour::Blaster(i)) => self.blaster_use_continuous(i),
                 // The drag tool's ActivationPropagation(direct: true, 0, ..).
-                Receiver::Behaviour(Behaviour::SignalConverter(i)) => self.signal_converter_use_continuous(i, true, channel as u16),
+                Receiver::Behaviour(Behaviour::SignalConverter(i)) => self.signal_converter_use_continuous(i, act.direct, channel as u16),
+                Receiver::Behaviour(Behaviour::ActivatorElectrode(i)) => self.activator_electrode_use_continuous(i, act),
                 Receiver::Behaviour(Behaviour::Translated(t)) => self.tr_use_continuous(t, super::translated::rt::Activation { Channel: channel as i32 }),
                 Receiver::Behaviour(_) => unreachable!(),
             }

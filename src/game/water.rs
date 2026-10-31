@@ -415,6 +415,13 @@ impl Game {
                     "DefibrillatorBehaviour" => {}
                     // OnEnable clears the trail mesh (rendering).
                     "EnergySwordMotionBlur" => {}
+                    // OnEnable: Joint.useMotor = true (ceiling_turret.rs).
+                    "CeilingTurretBehaviour" => {
+                        if self.script_enabled(id, *enabled) {
+                            let i = self.ceiling_turrets.iter().position(|c| c.id == id).expect("a CeilingTurretBehaviour in the arena");
+                            self.ceiling_turret_on_enable(i);
+                        }
+                    }
                     // OnEnable: UpdateActivation.
                     "ImmobilityFieldBehaviour" => {
                         if self.script_enabled(id, *enabled) {
@@ -472,6 +479,19 @@ impl Game {
                     let i = self.immobility_fields.iter().position(|c| c.id == id).expect("an ImmobilityFieldBehaviour in the arena");
                     if self.immobility_fields[i].enabled {
                         self.immobility_field_on_disable(i, inst);
+                    }
+                }
+                // OnDisable: Joint.useMotor = false (ceiling_turret.rs).
+                "CeilingTurretBehaviour" => {
+                    let i = self.ceiling_turrets.iter().position(|c| c.id == id).expect("a CeilingTurretBehaviour in the arena");
+                    if self.ceiling_turrets[i].enabled {
+                        self.ceiling_turret_on_disable(i);
+                    }
+                }
+                "TeslaCoilBehaviour" => {
+                    let i = self.tesla_coils.iter().position(|c| c.id == id).expect("a TeslaCoilBehaviour in the arena");
+                    if self.tesla_coils[i].enabled {
+                        self.tesla_coil_on_disable(i);
                     }
                 }
                 "DecimatorBehaviour" => {
@@ -563,6 +583,12 @@ impl Game {
                 "ButtonBehaviour" => {}
                 // OnDisable stops the particles and hides the line; its egg effect exists only in the refused branch (laser.rs).
                 "LaserBehaviour" => {}
+                "PhysicsGunBehaviour" => {
+                    let i = self.physics_guns.iter().position(|c| c.id == id).expect("a PhysicsGunBehaviour in the arena");
+                    if self.physics_guns[i].enabled {
+                        self.physics_gun_on_disable(i);
+                    }
+                }
                 "MetronomeBehaviour" => {
                     let m = self.metronomes.iter().position(|c| c.id == id).expect("a MetronomeBehaviour in the arena");
                     if self.metronomes[m].enabled {

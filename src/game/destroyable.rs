@@ -283,6 +283,8 @@ impl Game {
                         "ActOnDestroy" => g.act_on_destroy_run(key),
                         // Its OnSingleUse listener goes with it: activate_direct skips a destroyed toggle.
                         "ActivationToggleBehaviour" => {}
+                        // OnDestroy removes an empty ContinuousActivation listener.
+                        "ActivatorElectrodeBehaviour" => {}
                         "NoCollide" => g.no_collide_destroy(cid),
                         "NoCollideGm" => g.no_collide_gm_destroy(cid, inst),
                         "TyreDeflationBehaviour" => g.tyre_destroy(cid),
@@ -295,6 +297,11 @@ impl Game {
                         "ImmobilityFieldBehaviour" => {
                             let i = g.immobility_fields.iter().position(|s| s.id == cid).expect("the ImmobilityFieldBehaviour");
                             g.immobility_field_destroy_all_joints(i);
+                        }
+                        // OnDestroy: instantiatedWhO is never set; the bolt children go with the GameObject.
+                        "TeslaCoilBehaviour" => {
+                            let i = g.tesla_coils.iter().position(|s| s.id == cid).expect("the TeslaCoilBehaviour");
+                            g.tesla_coil_on_destroy(i);
                         }
                         "EnergySwordBehaviour" => {
                             let i = g.energy_swords.iter().position(|s| s.id == cid).expect("the EnergySwordBehaviour");
