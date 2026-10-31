@@ -32,6 +32,8 @@ pub enum Owner {
     Valve(usize),
     /// BloodTankBehaviour: the `Game::blood_tanks` index (blood_tank.rs).
     BloodTank(usize),
+    /// LiquidOutletBehaviour: the `Game::liquid_outlets` index (liquid_outlet.rs).
+    LiquidOutlet(usize),
 }
 
 impl Game {
@@ -43,6 +45,7 @@ impl Game {
             Owner::Syringe(s) => self.syringes[s].Phys,
             Owner::Valve(v) => self.valves[v].physical,
             Owner::BloodTank(t) => self.blood_tanks[t].physical,
+            Owner::LiquidOutlet(l) => self.liquid_outlets[l].physical,
         }
     }
 
@@ -53,6 +56,7 @@ impl Game {
             Owner::Syringe(s) => &self.syringes[s].base,
             Owner::Valve(v) => &self.valves[v].base,
             Owner::BloodTank(t) => &self.blood_tanks[t].base,
+            Owner::LiquidOutlet(l) => &self.liquid_outlets[l].base,
         }
     }
 
@@ -63,6 +67,7 @@ impl Game {
             Owner::Syringe(s) => &mut self.syringes[s].base,
             Owner::Valve(v) => &mut self.valves[v].base,
             Owner::BloodTank(t) => &mut self.blood_tanks[t].base,
+            Owner::LiquidOutlet(l) => &mut self.liquid_outlets[l].base,
         }
     }
 
@@ -72,6 +77,7 @@ impl Game {
             Owner::Circulation(l) => self.circulations[l].enabled,
             Owner::Valve(v) => self.valves[v].enabled,
             Owner::BloodTank(t) => self.blood_tanks[t].enabled,
+            Owner::LiquidOutlet(l) => self.liquid_outlets[l].enabled,
             Owner::Flask(_) | Owner::Syringe(_) => true,
         }
     }
@@ -86,6 +92,8 @@ impl Game {
             Owner::Valve(_) => [0.0, 0.5],
             // BloodTankBehaviour.Limits
             Owner::BloodTank(_) => [0.0, 14.0],
+            // LiquidOutletBehaviour.Limits
+            Owner::LiquidOutlet(_) => [0.0, 2.8],
         }
     }
 
@@ -253,6 +261,8 @@ impl Game {
     fn container_pressure(&self, o: Owner) -> i32 {
         match o {
             Owner::Syringe(s) => self.syringes[s].PressureMode,
+            // LiquidOutletBehaviour.Pressure: Pull.
+            Owner::LiquidOutlet(_) => 1,
             // BloodTankBehaviour.Pressure: Push for Push, Pull for Pull and Drain, None for Idle.
             Owner::BloodTank(t) => match self.blood_tanks[t].Mode {
                 0 => 0,

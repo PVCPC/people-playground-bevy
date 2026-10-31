@@ -64,7 +64,8 @@ impl Game {
             DRAIN => {
                 let amount = self.time.deltaTime * self.blood_tanks[t].DrainRate;
                 self.drain(o, amount);
-                let submerged = self.blood_tank_puff_submerged(t);
+                let puff = self.blood_tanks[t].water_puff;
+                let submerged = self.water_puff_submerged(puff);
                 if submerged {
                     self.splats[s].SpawningChance = 0.0;
                 } else {
@@ -85,9 +86,8 @@ impl Game {
         }
     }
 
-    /// IsParticleSubmerged: WaterBehaviour.IsPointUnderWater(WaterPuffParticles.transform.position).
-    fn blood_tank_puff_submerged(&mut self, t: usize) -> bool {
-        let id = self.blood_tanks[t].water_puff;
+    /// IsParticleSubmerged: WaterBehaviour.IsPointUnderWater(WaterPuffParticles.transform.position), the puff's Transform being `id`.
+    pub(super) fn water_puff_submerged(&mut self, id: i32) -> bool {
         let position = self.with_component_instance(id, |_, inst, o| inst.position(o));
         self.is_point_under_water([position[0], position[1]])
     }
@@ -99,18 +99,22 @@ impl Game {
         if self.destroyed_components.contains(&self.blood_tanks[t].id) {
             return;
         }
-        let target = match self.physical_of_collider(collider) {
+        if let Some(target) = self.particle_hit_container(collider) {
+            let amount = self.blood_tanks[t].DrainRate * self.time.deltaTime;
+            self.copy_to(Owner::BloodTank(t), amount, target, true);
+        }
+    }
+
+    /// TryGetComponent<BloodContainer> on a particle's hit collider's object: the container it holds, if any.
+    pub(super) fn particle_hit_container(&mut self, collider: i32) -> Option<Owner> {
+        match self.physical_of_collider(collider) {
             Some(p) => self.physical_container(p),
             None => {
                 if self.bare_colliders[&collider].scripts.iter().any(|s| BLOOD_CONTAINERS.contains(&s.as_str())) {
-                    unimplemented!("BloodTankBehaviour.OnParticleCollide: a BloodContainer on a collider without a PhysicalBehaviour");
+                    unimplemented!("a BloodContainer on a particle's hit collider without a PhysicalBehaviour");
                 }
                 None
             }
-        };
-        if let Some(target) = target {
-            let amount = self.blood_tanks[t].DrainRate * self.time.deltaTime;
-            self.copy_to(Owner::BloodTank(t), amount, target, true);
         }
     }
 }

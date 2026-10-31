@@ -887,12 +887,10 @@ impl Game {
         rb.movement.listed = false;
         let body = rb.body;
         self.rigidbody_hierarchy_changed = true;
-        // GetAttachedColliders sorts the Collider2D pointers; with one collider the order cannot differ.
+        // GetAttachedColliders sorts the Collider2D pointers, which differ from session to session in the game itself:
+        // creation order (prefab object, then component), as in Rigidbody2D::Cleanup.
         let mut colliders: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
         colliders.sort_unstable();
-        if colliders.len() > 1 {
-            unimplemented!("{}: Rigidbody2D.bodyType with several attached colliders (GetAttachedColliders pointer order)", prefab.objects[o].name);
-        }
         // FlagAllColliderContactsForRecreate.
         for &(co, cc) in &colliders {
             self.world.contacts2d.flag_for_recreate(inst.objects[co].components[cc]);

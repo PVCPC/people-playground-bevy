@@ -128,6 +128,7 @@ impl Game {
             Owner::Syringe(s) => self.syringes[s].id,
             Owner::Valve(v) => self.valves[v].id,
             Owner::BloodTank(t) => self.blood_tanks[t].id,
+            Owner::LiquidOutlet(l) => self.liquid_outlets[l].id,
         }
     }
 
@@ -145,6 +146,10 @@ impl Game {
         // BloodTankBehaviour (blood_tank.rs).
         if let Some(t) = self.blood_tanks.iter().position(|x| x.physical == q) {
             return Some(Owner::BloodTank(t));
+        }
+        // LiquidOutletBehaviour (liquid_outlet.rs).
+        if let Some(l) = self.liquid_outlets.iter().position(|x| x.physical == q) {
+            return Some(Owner::LiquidOutlet(l));
         }
         // ValveBehaviour (valve.rs).
         if let Some(v) = self.valves.iter().position(|x| x.physical == q) {

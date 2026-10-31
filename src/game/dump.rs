@@ -1062,6 +1062,8 @@ impl Game {
                 (Phase::Update, B::Excalibur(e)) => self.excalibur_update(e),
                 (Phase::Fixed, B::SharpOnAllSides(s)) => self.sharp_on_all_sides_fixed_update(s),
                 (Phase::Update, B::BloodTank(t)) => self.blood_tank_update(t),
+                (Phase::Fixed, B::LiquidOutlet(l)) => self.liquid_outlet_fixed_update(l),
+                (Phase::Update, B::LiquidOutlet(l)) => self.liquid_outlet_update(l),
                 // LagboxBehaviour.Update only turns the knob (presentation).
                 (Phase::Update, B::TimedGate(_)) => {}
                 (Phase::Fixed, B::UniversalBell(b)) => self.universal_bell_fixed_update(b),

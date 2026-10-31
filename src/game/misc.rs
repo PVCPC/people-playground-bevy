@@ -262,8 +262,8 @@ script! {
         parent_person: Option<usize> = None,
         /// The component's instance id when instantiated from a prefab (0: modelled by its spawner).
         id: i32 = 0,
-        /// The BloodTankBehaviour whose OnCollide listener this splat calls (blood_tank.rs); None without one.
-        on_collide_tank: Option<usize> = None,
+        /// The BloodTankBehaviour or LiquidOutletBehaviour whose OnCollide listener this splat calls; None without one.
+        on_collide: Option<super::container::Owner> = None,
     }
 }
 
@@ -1178,7 +1178,7 @@ impl Game {
             Size: 0.2,
             DestroyWhenNoParticles: false,
             TriggerOnCollide: false,
-            on_collide_tank: None,
+            on_collide: None,
             Decal: "Sparse_blood".into(),
             particles: Default::default(),
             parent_position: [position[0], position[1], 0.0],
@@ -1327,10 +1327,11 @@ impl Game {
                 }
                 self.splats[s].particles.slots[i].as_mut().unwrap().Life = -1.0;
                 if self.splats[s].TriggerOnCollide {
-                    // OnCollide?.Invoke(collider): its listener is a BloodTankBehaviour (blood_tank.rs).
-                    match self.splats[s].on_collide_tank {
-                        Some(t) => self.blood_tank_on_particle_collide(t, collider),
-                        None => unimplemented!("FancyBloodSplatController.OnCollide: a listener other than BloodTankBehaviour"),
+                    // OnCollide?.Invoke(collider): its listener is a BloodTankBehaviour (blood_tank.rs) or a LiquidOutletBehaviour.
+                    match self.splats[s].on_collide {
+                        Some(super::container::Owner::BloodTank(t)) => self.blood_tank_on_particle_collide(t, collider),
+                        Some(super::container::Owner::LiquidOutlet(l)) => self.liquid_outlet_on_particle_collide(l, collider),
+                        _ => unimplemented!("FancyBloodSplatController.OnCollide: a listener other than BloodTankBehaviour or LiquidOutletBehaviour"),
                     }
                 }
             }

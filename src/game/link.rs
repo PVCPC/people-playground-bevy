@@ -74,6 +74,7 @@ pub struct Linked {
     pub excaliburs: HashMap<usize, usize>,
     pub sharp_on_all_sides: HashMap<usize, usize>,
     pub blood_tanks: HashMap<usize, usize>,
+    pub liquid_outlets: HashMap<usize, usize>,
     pub explosives: HashMap<usize, usize>,
     pub delete_afters: HashMap<usize, usize>,
     pub point_to_velocities: HashMap<usize, usize>,
@@ -549,6 +550,19 @@ pub(super) fn check_rewritten_at(prefab: &Prefab, o: usize, class: &str) {
         }
         return;
     }
+    // PlayRandomClipBehaviour: Start plays only with PlayOnStart, and Play (audio, through PickRandom's Random.Range) comes from
+    // events. Without PlayOnStart its Start does nothing.
+    if class == "PlayRandomClipBehaviour" {
+        let fields = prefab.objects[o].components.iter().find_map(|(_, c)| match c {
+            Component::Script { class: k, fields, .. } if k == class => Some(fields),
+            _ => None,
+        });
+        let play_on_start = fields.and_then(|f| f.get("PlayOnStart")).and_then(Value::bool).unwrap_or(false);
+        if play_on_start {
+            unimplemented!("PlayRandomClipBehaviour.Start with PlayOnStart (Clips.PickRandom draws Random.Range)");
+        }
+        return;
+    }
     check_rewritten(class);
 }
 
@@ -730,6 +744,8 @@ pub(super) fn check_rewritten(class: &str) {
         "NoCollideWithBodyPart" => {}
         // Start and Update are rewritten (blood_tank.rs); its splat's OnCollide listener is set at link time.
         "BloodTankBehaviour" => {}
+        // Update is BloodContainer's (liquid_outlet.rs); FixedUpdate, OnCollide and the awake subscription are rewritten there.
+        "LiquidOutletBehaviour" => {}
         // Update and Use are rewritten (valve.rs); Awake, Start, the display and OnWillRenderObject are presentation.
         "ValveBehaviour" => {}
         // Update, OnDisable and the SetTarget joint are rewritten (physics_gun.rs); Awake, Start (Target is null) and the line are presentation.
@@ -1698,6 +1714,7 @@ impl Game {
         }
         // BloodTankBehaviour: its PhysicalParticles splat calls its OnCollide listener (blood_tank.rs).
         let mut blood_tanks = HashMap::new();
+        let mut liquid_outlets = HashMap::new();
         for o in 0..n {
             let Some((c, enabled, v)) = script(prefab, o, "BloodTankBehaviour") else { continue };
             let file = prefab.objects[o].game_object.file;
@@ -1714,9 +1731,27 @@ impl Game {
             let wp = field(v, "WaterPuffParticles")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("BloodTankBehaviour.WaterPuffParticles null or outside its prefab (NullReferenceException in UpdateActivation)"));
             let (wo, _) = *prefab.index.get(&ObjRef { file, path_id: wp.path_id }).ok_or("BloodTankBehaviour.WaterPuffParticles: dangling reference")?;
             x.water_puff = inst.objects[wo].components[0];
-            self.splats[x.splat].on_collide_tank = Some(self.blood_tanks.len());
+            self.splats[x.splat].on_collide = Some(super::container::Owner::BloodTank(self.blood_tanks.len()));
             blood_tanks.insert(o, self.blood_tanks.len());
             self.blood_tanks.push(x);
+        }
+        // LiquidOutletBehaviour: its PhysicalParticles splat calls its OnCollide listener (liquid_outlet.rs).
+        for o in 0..n {
+            let Some((c, enabled, v)) = script(prefab, o, "LiquidOutletBehaviour") else { continue };
+            let file = prefab.objects[o].game_object.file;
+            let mut x = super::liquid_outlet::LiquidOutlet::default();
+            x.id = inst.objects[o].components[c];
+            x.enabled = enabled;
+            x.physical = l.in_arena(field(v, "Phys")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("LiquidOutletBehaviour.Phys is null")?;
+            let pp = field(v, "PhysicalParticles")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("LiquidOutletBehaviour.PhysicalParticles null or outside its prefab (NullReferenceException in Awake)"));
+            let (po, _) = *prefab.index.get(&ObjRef { file, path_id: pp.path_id }).ok_or("LiquidOutletBehaviour.PhysicalParticles: dangling reference")?;
+            x.splat = *splat_by_object.get(&po).unwrap_or_else(|| unimplemented!("LiquidOutletBehaviour.PhysicalParticles is not a FancyBloodSplatController of this prefab"));
+            let wp = field(v, "WaterPuffParticles")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("LiquidOutletBehaviour.WaterPuffParticles null or outside its prefab"));
+            let (wo, _) = *prefab.index.get(&ObjRef { file, path_id: wp.path_id }).ok_or("LiquidOutletBehaviour.WaterPuffParticles: dangling reference")?;
+            x.water_puff = inst.objects[wo].components[0];
+            self.splats[x.splat].on_collide = Some(super::container::Owner::LiquidOutlet(self.liquid_outlets.len()));
+            liquid_outlets.insert(o, self.liquid_outlets.len());
+            self.liquid_outlets.push(x);
         }
         // GorseDroolingBehaviour: its LimbBehaviour, Projectile and where its Transform hangs.
         for o in 0..n {
@@ -3833,7 +3868,7 @@ impl Game {
             let go = self.sentry_guns[i].sentry_object;
             self.sentry_guns[i].sentry = *sentry_turrets.get(&go).ok_or("SentryTurretGunBehaviour.sentryBehaviour is not a SentryTurretBehaviour")?;
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, map_lifts, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts, random_events,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, liquid_outlets, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, map_lifts, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts, random_events,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -4460,6 +4495,7 @@ impl Game {
                 "ExcaliburBehaviour" => Some(Behaviour::Excalibur(linked.excaliburs[&o])),
                 "SharpOnAllSidesBehaviour" => Some(Behaviour::SharpOnAllSides(linked.sharp_on_all_sides[&o])),
                 "BloodTankBehaviour" => Some(Behaviour::BloodTank(linked.blood_tanks[&o])),
+                "LiquidOutletBehaviour" => Some(Behaviour::LiquidOutlet(linked.liquid_outlets[&o])),
                 "ExplosiveBehaviour" => Some(Behaviour::Explosive(linked.explosives[&o])),
                 "DeleteAfterTime" => Some(Behaviour::DeleteAfter(linked.delete_afters[&o])),
                 "PointToVelocityBehaviour" => Some(Behaviour::PointToVelocity(linked.point_to_velocities[&o])),

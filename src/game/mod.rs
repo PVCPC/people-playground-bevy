@@ -77,6 +77,7 @@ pub mod signal_converter;
 pub mod flamethrower;
 pub mod rocket;
 pub mod piston;
+pub mod liquid_outlet;
 pub mod map_lift;
 pub mod thruster;
 pub mod devices;
@@ -1211,6 +1212,7 @@ pub enum Behaviour {
     Excalibur(usize),
     SharpOnAllSides(usize),
     BloodTank(usize),
+    LiquidOutlet(usize),
     ToggleableMirror(usize),
     PointToVelocity(usize),
     AndroidSpark(usize),
@@ -1413,6 +1415,7 @@ impl Behaviour {
             Behaviour::Excalibur(_) => "ExcaliburBehaviour",
             Behaviour::SharpOnAllSides(_) => "SharpOnAllSidesBehaviour",
             Behaviour::BloodTank(_) => "BloodTankBehaviour",
+            Behaviour::LiquidOutlet(_) => "LiquidOutletBehaviour",
             Behaviour::ToggleableMirror(_) => "ToggleableMirrorBehaviour",
             Behaviour::Translated(t) => t.class(),
         }
@@ -1593,6 +1596,7 @@ pub struct Game {
     pub excaliburs: Vec<excalibur::Excalibur>,
     pub sharp_on_all_sides: Vec<sharp_on_all_sides::SharpOnAllSides>,
     pub blood_tanks: Vec<blood_tank::BloodTank>,
+    pub liquid_outlets: Vec<liquid_outlet::LiquidOutlet>,
     pub displays: Vec<display::Display>,
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,

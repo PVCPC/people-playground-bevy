@@ -1202,7 +1202,7 @@ impl Game {
                     Size: 0.3,
                     DestroyWhenNoParticles: true,
                     TriggerOnCollide: false,
-                    on_collide_tank: None,
+                    on_collide: None,
                     Decal: "Sparse_blood".into(),
                     particles: Default::default(),
                     parent_position: position,
