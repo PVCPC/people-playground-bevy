@@ -4,6 +4,7 @@ mod game;
 mod game_assets;
 mod hinge;
 mod integration;
+mod lights;
 mod motor;
 mod play;
 mod replay;

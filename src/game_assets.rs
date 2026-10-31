@@ -36,6 +36,9 @@ pub struct Part {
     pub angular_drag: f32,
     pub colliders: Vec<BoxShape>,
     pub texture: String,
+    /// The texture's width and height, from its PNG header.
+    #[serde(skip)]
+    pub atlas: [f32; 2],
     pub rect: [f32; 4],
     pub size: [f32; 2],
     pub pivot: [f32; 2],
@@ -422,10 +425,10 @@ impl HumanRig {
                 ));
             }
         }
-        for part in &rig.parts {
-            if !cache.join(&part.texture).is_file() {
-                return Err(format!("Missing cached texture: {}", part.texture));
-            }
+        for part in &mut rig.parts {
+            let png = std::fs::read(cache.join(&part.texture)).map_err(|_| format!("Missing cached texture: {}", part.texture))?;
+            let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as f32;
+            part.atlas = [size(16), size(20)];
         }
         Ok(rig)
     }

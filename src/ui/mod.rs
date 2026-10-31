@@ -81,6 +81,7 @@ pub fn add(app: &mut App) {
     app.init_resource::<Queue>()
         .init_resource::<Fps>()
         .add_systems(Startup, setup)
+        .add_systems(Update, start_at)
         .add_systems(
             Update,
             (
@@ -110,19 +111,19 @@ struct Fps {
     shown: u32,
 }
 
-fn setup(mut commands: Commands, play: Option<Res<Play>>) {
-    let center = play.map_or(Vec3::ZERO, |p| centre(&p.game));
-    commands.spawn((
-        Camera2d,
-        Projection::Orthographic(OrthographicProjection { scale: 0.006, ..OrthographicProjection::default_2d() }),
-        Transform::from_translation(center),
-    ));
+/// Where the camera lights::setup made starts.
+#[derive(Resource)]
+struct StartAt(Vec3);
+
+fn start_at(at: Option<Res<StartAt>>, mut camera: Single<(&mut Transform, &mut Projection), With<crate::lights::MainCamera>>, mut commands: Commands) {
+    if let Some(at) = at {
+        camera.0.translation = at.0;
+        commands.remove_resource::<StartAt>();
+    }
 }
 
-/// Where the camera starts: the first person, else the map's center.
-pub fn centre(g: &crate::game::Game) -> Vec3 {
-    let c = g.limbs.first().map_or([g.BoundingBox.center[0], g.BoundingBox.center[1], 0.0], |l| g.physicals[l.PhysicalBehaviour].transform.position);
-    Vec3::new(c[0], c[1], 0.0)
+fn setup(mut commands: Commands) {
+    commands.insert_resource(StartAt(Vec3::ZERO));
 }
 
 /// The pointer is over a UI node.
@@ -417,7 +418,7 @@ fn loading(
     mut commands: Commands,
     mut frames: Local<u8>,
     sprites: Query<Entity, Or<(With<play::LimbSprite>, With<play::ObjectSprite>, With<play::RendererSprite>)>>,
-    mut camera: Single<(&mut Transform, &mut Projection), With<Camera2d>>,
+    mut camera: Single<(&mut Transform, &mut Projection), With<crate::lights::MainCamera>>,
 ) {
     if ui.mode != Mode::Loading {
         *frames = 0;
@@ -444,8 +445,8 @@ fn loading(
             for e in &sprites {
                 commands.entity(e).despawn();
             }
-            camera.0.translation = centre(&game);
-            *camera.1 = Projection::Orthographic(OrthographicProjection { scale: 0.006, ..OrthographicProjection::default_2d() });
+            camera.0.translation = Vec3::ZERO;
+            *camera.1 = crate::lights::start_projection();
             ui.catalog = catalog;
             ui.category = 0;
             commands.insert_resource(Play::new(game));
@@ -608,7 +609,8 @@ fn camera(
     ui: Res<Ui>,
     hover: Res<HoverMap>,
     nodes: Query<(), With<Node>>,
-    mut camera: Single<(&mut Transform, &mut Projection), With<Camera2d>>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    mut camera: Single<(&mut Transform, &mut Projection), With<crate::lights::MainCamera>>,
     mut panning: Local<bool>,
 ) {
     if ui.mode != Mode::Game || ui.typing {
@@ -627,18 +629,19 @@ fn camera(
         *panning = false;
     }
     if *panning {
-        transform.translation += Vec3::new(-motion.delta.x, motion.delta.y, 0.0) * o.scale;
+        transform.translation += Vec3::new(-motion.delta.x, motion.delta.y, 0.0) * 2.0 * o.scale / window.height();
     }
     let dt = time.delta_secs();
     let held = |id: &str| eval(&controls, id, &inputs).held as i32 as f32;
     let dir = Vec2::new(held("panRight") - held("panLeft"), held("panUp") - held("panDown"));
-    transform.translation += (dir * 700.0 * o.scale * dt).extend(0.0);
+    transform.translation += (dir * 2.0 * o.scale * dt).extend(0.0);
     let mut zoom = (held("zoomOut") - held("zoomIn")) * dt;
     if !over && wheel.delta.y != 0.0 {
         let lines = if wheel.unit == MouseScrollUnit::Line { wheel.delta.y } else { wheel.delta.y / 40.0 };
         zoom -= lines * 0.12 * settings.get("ZoomSensitivity");
     }
-    o.scale = (o.scale * zoom.exp()).clamp(0.0008, 0.05);
+    // CameraControlBehaviour's MinZoom and MaxZoom.
+    o.scale = (o.scale * zoom.exp()).clamp(0.2, 1000.0);
 }
 
 /// One frame of the game, under Global's time scale: paused or slowed by the toolbar, 0 in the pause menu.
@@ -674,9 +677,11 @@ fn world_input(
     hover: Res<HoverMap>,
     nodes: Query<(), With<Node>>,
     window: Single<&Window, With<PrimaryWindow>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<crate::lights::MainCamera>>,
     mut play: ResMut<Play>,
     mut owned: Local<std::collections::HashMap<&'static str, bool>>,
+    time_real: Res<Time<Real>>,
+    mut shot_spawned: Local<bool>,
 ) {
     let (camera, at) = *camera;
     let size = window.size();
@@ -711,6 +716,12 @@ fn world_input(
     }
     if play.game.catalog_selected != ui.item {
         play.game.catalog_selected = ui.item.clone();
+    }
+    // The hidden capture (PPG_SHOT) places the selected item at the origin, as a click there would.
+    if std::env::var("PPG_SHOT").is_ok() && time_real.elapsed_secs() > 1.0 && !*shot_spawned {
+        *shot_spawned = true;
+        play.game.input.mouse = [0.0, 1.5, 0.0];
+        play.game.input.controls.insert("spawnRight".into(), crate::game::tool::Control { down: false, held: false, up: true });
     }
 }
 

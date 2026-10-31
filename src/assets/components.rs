@@ -320,6 +320,47 @@ impl PhysicsMaterial2D {
     }
 }
 
+/// Material (class 21): its shader and saved floats and colours.
+#[derive(Clone, Debug)]
+pub struct Material {
+    pub shader: PPtr,
+    pub textures: Vec<(String, PPtr)>,
+    pub floats: Vec<(String, f32)>,
+    pub colors: Vec<(String, [f32; 4])>,
+}
+
+impl Material {
+    pub fn read(data: &[u8]) -> Result<Self, String> {
+        let r = &mut Reader::new(data);
+        let _name = r.string()?;
+        let shader = PPtr::read(r)?;
+        let _keywords = r.string()?;
+        let _lightmap_flags = r.u32()?;
+        let _instancing_and_double_sided = (r.bool()?, r.bool()?);
+        r.align();
+        let _render_queue = r.i32()?;
+        let _string_tags = vec(r, |r| Ok((r.string()?, r.string()?)))?;
+        let _disabled_passes = vec(r, |r| r.string())?;
+        let textures = vec(r, |r| {
+            let name = r.string()?;
+            let texture = PPtr::read(r)?;
+            let _scale_offset: [f32; 4] = floats(r)?;
+            Ok((name, texture))
+        })?;
+        let saved_floats = vec(r, |r| Ok((r.string()?, r.f32()?)))?;
+        let colors = vec(r, |r| Ok((r.string()?, floats(r)?)))?;
+        Ok(Self { shader, textures, floats: saved_floats, colors })
+    }
+
+    pub fn float(&self, name: &str) -> Option<f32> {
+        self.floats.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+    }
+
+    pub fn color(&self, name: &str) -> Option<[f32; 4]> {
+        self.colors.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+    }
+}
+
 /// SpriteRenderer (class 212), with the Renderer fields scripts and drawing use.
 #[derive(Clone, Debug)]
 pub struct SpriteRenderer {

@@ -1115,6 +1115,9 @@ pub struct Renderer {
     pub sprite: (crate::assets::db::ObjRef, [f32; 4], i16),
     /// The SpriteRenderer's sortingLayerID.
     pub layer: i32,
+    /// Its GameObject's layer and its first material.
+    pub game_layer: i32,
+    pub material: Option<crate::assets::db::ObjRef>,
     /// The SpriteRenderer component's instance id.
     pub id: i32,
     /// flipX/flipY, drawMode, size.

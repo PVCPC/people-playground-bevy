@@ -210,11 +210,13 @@ pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
         _ => (None, None),
     };
     let mode = if game.is_some() { crate::ui::Mode::Game } else { crate::ui::Mode::Menu };
+    // PPG_SHOT=<png>: no visible window; saves the view after some frames and exits (the rendering check).
+    let shot = std::env::var("PPG_SHOT").ok();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window { title: "People Playground rewrite".into(), resolution: (1280, 800).into(), ..default() }),
+                primary_window: Some(Window { title: "People Playground rewrite".into(), resolution: (1280, 800).into(), visible: shot.is_none(), ..default() }),
                 ..default()
             })
             .set(AssetPlugin { file_path: cache.to_string_lossy().into_owned(), ..default() })
@@ -229,7 +231,21 @@ pub fn run(start: &Start, rig: HumanRig, cache: PathBuf) -> Result<(), String> {
     if let Some(game) = game {
         app.insert_resource(Play::new(game));
     }
+    crate::lights::add(&mut app);
     crate::ui::add(&mut app);
+    if let Some(path) = shot {
+        // The map's lights come on over the first seconds (MapLightBehaviour.DelayedActivation).
+        app.add_systems(Update, move |time: Res<Time>, mut taken: Local<bool>, mut commands: Commands, mut exit: MessageWriter<AppExit>| {
+            let t = time.elapsed_secs();
+            if t > std::env::var("PPG_AT").map_or(7.0, |v| v.parse().unwrap()) && !*taken {
+                *taken = true;
+                use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+                commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+            } else if *taken && t > std::env::var("PPG_AT").map_or(8.0, |v| v.parse::<f32>().unwrap() + 0.5) {
+                exit.write(AppExit::Success);
+            }
+        });
+    }
     app.run();
     Ok(())
 }
@@ -325,10 +341,15 @@ fn sprite_depths(keys: &[SortKey]) -> Vec<f32> {
     z
 }
 
+/// sharedassets0's Unlit/AdditiveGlowSprite.
+const ADDITIVE_GLOW_SHADER: i64 = 891;
+/// sharedassets0's Unlit/Jaap/PanelsShader.
+const PANELS_SHADER: i64 = 888;
+
 /// A sprite made this frame, with the key that ranks it.
 enum NewSprite {
-    Object(usize, f32, Drawn),
-    Renderer(usize, f32, Drawn),
+    Object(usize, f32, Drawn, i32),
+    Renderer(usize, f32, Drawn, i32),
 }
 
 /// A sprite from the game's data for each non-limb physical object and each other SpriteRenderer without one;
@@ -339,6 +360,8 @@ pub(crate) fn object_sprites(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut glows: ResMut<Assets<crate::lights::Glow>>,
+    mut panels: ResMut<Assets<crate::lights::Panels>>,
     mut play: ResMut<Play>,
     mut textures: Local<Textures>,
     mut placed: Query<(Entity, &SortKey, &mut Transform)>,
@@ -354,15 +377,15 @@ pub(crate) fn object_sprites(
         if limbs.contains(&p) {
             continue;
         }
-        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
+        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut glows, &mut panels, g.physicals[p].sprite_material, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
         let key = SortKey { layer: sorting_layer_index(g.physicals[p].sprite_layer), order, group: 0, index: p };
-        new.push((key, NewSprite::Object(p, scale, drawn)));
+        new.push((key, NewSprite::Object(p, scale, drawn, g.physicals[p].sprite_game_layer)));
     }
     for i in done.1..g.renderers.len() {
         let (r, color, order) = g.renderers[i].sprite;
-        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut textures, r, color, g.renderers[i].draw) else { continue };
+        let Some((drawn, scale)) = make_sprite(db, &mut images, &mut meshes, &mut materials, &mut glows, &mut panels, g.renderers[i].material, &mut textures, r, color, g.renderers[i].draw) else { continue };
         let key = SortKey { layer: sorting_layer_index(g.renderers[i].layer), order, group: 1, index: i };
-        new.push((key, NewSprite::Renderer(i, scale, drawn)));
+        new.push((key, NewSprite::Renderer(i, scale, drawn, g.renderers[i].game_layer)));
     }
     done = (g.physicals.len(), g.renderers.len());
     (play.done.1, play.done.2) = done;
@@ -383,8 +406,8 @@ pub(crate) fn object_sprites(
     }
     for ((key, sprite), &depth) in new.into_iter().zip(fresh) {
         match sprite {
-            NewSprite::Object(p, scale, drawn) => drawn.insert(commands.spawn((ObjectSprite(p, scale), Transform::from_xyz(0.0, 0.0, depth), key))),
-            NewSprite::Renderer(i, scale, drawn) => drawn.insert(commands.spawn((RendererSprite(i, scale), Transform::from_xyz(0.0, 0.0, depth), key))),
+            NewSprite::Object(p, scale, drawn, layer) => drawn.insert(commands.spawn((ObjectSprite(p, scale), Transform::from_xyz(0.0, 0.0, depth), key, crate::lights::camera_layers(layer)))),
+            NewSprite::Renderer(i, scale, drawn, layer) => drawn.insert(commands.spawn((RendererSprite(i, scale), Transform::from_xyz(0.0, 0.0, depth), key, crate::lights::camera_layers(layer)))),
         }
     }
 }
@@ -393,6 +416,8 @@ pub(crate) fn object_sprites(
 enum Drawn {
     Sprite(Sprite, Anchor),
     Mesh(Handle<Mesh>, Handle<ColorMaterial>),
+    Glow(Handle<Mesh>, Handle<crate::lights::Glow>),
+    Panels(Handle<Mesh>, Handle<crate::lights::Panels>),
 }
 
 impl Drawn {
@@ -400,6 +425,8 @@ impl Drawn {
         match self {
             Drawn::Sprite(sprite, anchor) => entity.insert((sprite, anchor)),
             Drawn::Mesh(mesh, material) => entity.insert((Mesh2d(mesh), MeshMaterial2d(material))),
+            Drawn::Glow(mesh, material) => entity.insert((Mesh2d(mesh), MeshMaterial2d(material))),
+            Drawn::Panels(mesh, material) => entity.insert((Mesh2d(mesh), MeshMaterial2d(material))),
         };
     }
 }
@@ -537,7 +564,39 @@ fn tile_mesh(t: &Tiling, flip: [bool; 2]) -> Mesh {
 
 /// What Bevy draws for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
 /// the scale from its units to the world.
-fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<ColorMaterial>, textures: &mut Textures, r: crate::assets::db::ObjRef, color: [f32; 4], draw: crate::game::SpriteDraw) -> Option<(Drawn, f32)> {
+/// A Texture2D as an Image, with its Unity filter and wrap modes.
+fn load_texture(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, textures: &mut Textures, t: crate::assets::db::ObjRef) -> Option<(Handle<Image>, [f32; 2])> {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    if let Some(found) = textures.get(&(t.file, t.path_id)) {
+        return Some(found.clone());
+    }
+    let tex = crate::assets::components::Texture2D::read(db.data(t));
+    let Ok((tex, rgba)) = tex.and_then(|tex| tex.rgba(&db.data_dir).map(|px| (tex, px))) else { return None };
+    // Unity's rows run bottom first; an Image's top first.
+    let row = tex.width as usize * 4;
+    let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
+    let mut image = Image::new(
+        bevy::render::render_resource::Extent3d { width: tex.width as u32, height: tex.height as u32, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        flipped,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    let filter = if tex.filter_mode == 0 { ImageFilterMode::Nearest } else { ImageFilterMode::Linear };
+    let wrap = |w: i32| if w == 0 { ImageAddressMode::Repeat } else { ImageAddressMode::ClampToEdge };
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: wrap(tex.wrap[0]),
+        address_mode_v: wrap(tex.wrap[1]),
+        mag_filter: filter,
+        min_filter: filter,
+        ..default()
+    });
+    let entry = (images.add(image), [tex.width as f32, tex.height as f32]);
+    textures.insert((t.file, t.path_id), entry.clone());
+    Some(entry)
+}
+
+fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, meshes: &mut Assets<Mesh>, materials: &mut Assets<ColorMaterial>, glows: &mut Assets<crate::lights::Glow>, panels: &mut Assets<crate::lights::Panels>, material: Option<crate::assets::db::ObjRef>, textures: &mut Textures, r: crate::assets::db::ObjRef, color: [f32; 4], draw: crate::game::SpriteDraw) -> Option<(Drawn, f32)> {
     {
         let s = match crate::assets::components::Sprite::read(db.data(r)) {
             Ok(s) => s,
@@ -547,30 +606,56 @@ fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, mesh
             }
         };
         let t = db.resolve(r.file, s.texture)?;
-        let (handle, texture) = match textures.get(&(t.file, t.path_id)) {
-            Some(h) => h.clone(),
-            None => {
-                let tex = crate::assets::components::Texture2D::read(db.data(t));
-                let Ok((tex, rgba)) = tex.and_then(|tex| tex.rgba(&db.data_dir).map(|px| (tex, px))) else { return None };
-                // Unity's rows run bottom first; an Image's top first.
-                let row = tex.width as usize * 4;
-                let flipped: Vec<u8> = rgba.chunks(row).rev().flatten().copied().collect();
-                let image = Image::new(
-                    bevy::render::render_resource::Extent3d { width: tex.width as u32, height: tex.height as u32, depth_or_array_layers: 1 },
-                    bevy::render::render_resource::TextureDimension::D2,
-                    flipped,
-                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
-                );
-                let entry = (images.add(image), [tex.width as f32, tex.height as f32]);
-                textures.insert((t.file, t.path_id), entry.clone());
-                entry
-            }
-        };
+        let (handle, texture) = load_texture(db, images, textures, t)?;
         // The packed region (texture_rect) sits at texture_rect_offset inside the sprite's rect.
         let [x, y, w, h] = s.texture_rect;
         let linear = Color::srgba(color[0], color[1], color[2], color[3]);
         let ([flip_x, flip_y], draw_mode, size, threshold, adaptive) = draw;
+        // Unlit/AdditiveGlowSprite: `color` of the Glow is everything but the texture.
+        let glow = material.and_then(|m| {
+            let file = m.file;
+            let m = crate::assets::components::Material::read(db.data(m)).ok()?;
+            let is_glow = db.resolve(file, m.shader).is_some_and(|s| s.path_id == ADDITIVE_GLOW_SHADER);
+            is_glow.then(|| {
+                let c = linear.to_linear();
+                let g = m.color("_GlowColour").unwrap_or([1.0; 4]);
+                let i = m.float("_GlowIntensity").unwrap_or(1.0) * c.alpha;
+                Vec4::new(c.red * g[0], c.green * g[1], c.blue * g[2], c.alpha * g[3]) * i
+            })
+        });
+        // Unlit/Jaap/PanelsShader, on a Simple sprite of the map.
+        if let Some(m) = material {
+            let file = m.file;
+            let m = crate::assets::components::Material::read(db.data(m)).ok()?;
+            if db.resolve(file, m.shader).is_some_and(|s| s.path_id == PANELS_SHADER) {
+                let (atlas, size) = load_texture(db, images, textures, db.resolve(file, m.textures.iter().find(|(n, _)| n == "_Panels")?.1)?)?;
+                let panel = m.float("_PanelSize")?;
+                let [a, b, ..] = m.color("_Offset")?;
+                let [c, d, ..] = m.color("_ScrollingSpeed")?;
+                let [fr, fg, fb, fa] = m.color("_FadeColour")?;
+                let settings = crate::lights::PanelSettings {
+                    offset: Vec2::new(a, b),
+                    scrolling_speed: Vec2::new(c, d),
+                    fade: Color::srgba(fr, fg, fb, fa).to_linear().to_vec4(),
+                    panels: Vec2::new(size[0] / panel, size[1] / panel),
+                    scale: m.float("_Scale")?,
+                    colour_variation: m.float("_ColourVariation")?,
+                    alpha: color[3],
+                };
+                let pivot = [(s.pivot[0] * s.rect[2] - s.texture_rect_offset[0]) / w, (s.pivot[1] * s.rect[3] - s.texture_rect_offset[1]) / h];
+                let uv = [x / texture[0], y / texture[1], (x + w) / texture[0], (y + h) / texture[1]];
+                let tiling = Tiling { size: [w / s.pixels_to_units, h / s.pixels_to_units], draw_mode: 1, adaptive, threshold, rect: [w, h], pivot, border: [0.0; 4], pixels_to_units: s.pixels_to_units, uv };
+                return Some((Drawn::Panels(meshes.add(tile_mesh(&tiling, [flip_x, flip_y])), panels.add(crate::lights::Panels { settings, main: handle, panels: atlas })), 1.0));
+            }
+        }
+        if let Some(color) = glow {
+            let [u, v] = [(x - s.texture_rect_offset[0]) / texture[0], (y - s.texture_rect_offset[1]) / texture[1]];
+            let uv = [u, v, u + s.rect[2] / texture[0], v + s.rect[3] / texture[1]];
+            // A Simple sprite is the quad of a Sliced one without borders.
+            let (draw_mode, size, border) = if draw_mode == 0 { (1, [s.rect[2] / s.pixels_to_units, s.rect[3] / s.pixels_to_units], [0.0; 4]) } else { (draw_mode, size, s.border) };
+            let tiling = Tiling { size, draw_mode, adaptive, threshold, rect: [s.rect[2], s.rect[3]], pivot: s.pivot, border, pixels_to_units: s.pixels_to_units, uv };
+            return Some((Drawn::Glow(meshes.add(tile_mesh(&tiling, [flip_x, flip_y])), glows.add(crate::lights::Glow { color, texture: handle })), 1.0));
+        }
         if draw_mode != 0 {
             // The rect's corner in the texture: the packed region less its offset.
             let [u, v] = [(x - s.texture_rect_offset[0]) / texture[0], (y - s.texture_rect_offset[1]) / texture[1]];
@@ -580,34 +665,34 @@ fn make_sprite(db: &crate::assets::db::AssetDb, images: &mut Assets<Image>, mesh
             let material = materials.add(ColorMaterial { color: linear, texture: Some(handle), ..default() });
             return Some((Drawn::Mesh(mesh, material), 1.0));
         }
-        let mut sprite = Sprite::from_image(handle);
-        sprite.rect = Some(Rect::new(x, texture[1] - y - h, x + w, texture[1] - y));
-        sprite.custom_size = Some(Vec2::new(w, h) / s.pixels_to_units);
-        sprite.color = linear;
-        (sprite.flip_x, sprite.flip_y) = (flip_x, flip_y);
-        let pivot = Vec2::from_array(s.pivot) * Vec2::new(s.rect[2], s.rect[3]) - Vec2::from_array(s.texture_rect_offset);
-        // _Flip mirrors about the pivot; Bevy's flips only swap the uvs, so the anchor mirrors with them.
-        let mut anchor = pivot / Vec2::new(w, h) - Vec2::splat(0.5);
-        anchor *= Vec2::new(if flip_x { -1.0 } else { 1.0 }, if flip_y { -1.0 } else { 1.0 });
-        Some((Drawn::Sprite(sprite, Anchor(anchor)), 1.0))
+        // A Simple sprite: the packed region's quad, about the sprite's pivot.
+        let rect = [w, h];
+        let pivot = [(s.pivot[0] * s.rect[2] - s.texture_rect_offset[0]) / w, (s.pivot[1] * s.rect[3] - s.texture_rect_offset[1]) / h];
+        let uv = [x / texture[0], y / texture[1], (x + w) / texture[0], (y + h) / texture[1]];
+        let tiling = Tiling { size: [w / s.pixels_to_units, h / s.pixels_to_units], draw_mode: 1, adaptive, threshold, rect, pivot, border: [0.0; 4], pixels_to_units: s.pixels_to_units, uv };
+        let material = materials.add(ColorMaterial { color: linear, texture: Some(handle), ..default() });
+        Some((Drawn::Mesh(meshes.add(tile_mesh(&tiling, [flip_x, flip_y])), material), 1.0))
     }
 }
 
 /// A sprite for each limb without one: the starting people's, then the ones spawned since.
-pub(crate) fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig: Res<HumanRig>, mut play: ResMut<Play>) {
+pub(crate) fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<ColorMaterial>>, rig: Res<HumanRig>, mut play: ResMut<Play>) {
     let g = &play.game;
     let done = play.done.0;
     for l in done..g.limbs.len() {
         let name = &g.physicals[g.limbs[l].PhysicalBehaviour].name;
         let Some(part) = rig.parts.iter().find(|p| &p.name == name) else { continue };
         let [x, y, w, h] = part.rect;
-        let mut sprite = Sprite::from_image(assets.load(part.texture.clone()));
-        sprite.rect = Some(Rect::new(x, y, x + w, y + h));
-        sprite.custom_size = Some(Vec2::from_array(part.size));
+        // Unity's v runs up.
+        let [tw, th] = part.atlas;
+        let uv = [x / tw, 1.0 - (y + h) / th, (x + w) / tw, 1.0 - y / th];
+        let tiling = Tiling { size: part.size, draw_mode: 1, adaptive: false, threshold: 0.0, rect: [w, h], pivot: part.pivot, border: [0.0; 4], pixels_to_units: w / part.size[0], uv };
+        let mesh = meshes.add(tile_mesh(&tiling, [false, false]));
+        let material = materials.add(ColorMaterial { texture: Some(assets.load(part.texture.clone())), ..default() });
         let p = g.limbs[l].PhysicalBehaviour;
         let Some((_, _, order)) = g.physicals[p].sprite else { unimplemented!("limb {name} without a SpriteRenderer") };
         let key = SortKey { layer: sorting_layer_index(g.physicals[p].sprite_layer), order, group: 0, index: p };
-        commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default(), key));
+        commands.spawn((LimbSprite(l), Mesh2d(mesh), MeshMaterial2d(material), Transform::default(), key));
     }
     play.done.0 = play.game.limbs.len();
 }

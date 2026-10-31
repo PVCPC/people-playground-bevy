@@ -973,7 +973,7 @@ impl Game {
                         let (anchor, chain) = anchor_of(o);
                         let visible = inst.objects[o].active && r.enabled;
                         let bounds = renderer_bounds(&Sprite::read(db.data(sprite))?, r);
-                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), layer: r.sorting_layer_id, id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size, r.adaptive_mode_threshold, r.sprite_tile_mode == 1), visible, bounds });
+                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), layer: r.sorting_layer_id, game_layer: prefab.objects[o].layer as i32, material: r.materials.first().and_then(|&m| db.resolve(file, m)), id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size, r.adaptive_mode_threshold, r.sprite_tile_mode == 1), visible, bounds });
                     }
                     _ => {}
                 }
@@ -1062,6 +1062,8 @@ impl Game {
                 p.sprite_bounds = Some(renderer_bounds(&Sprite::read(db.data(sprite))?, r));
                 p.sprite = Some((sprite, r.color, r.sorting_order));
                 p.sprite_layer = r.sorting_layer_id;
+                p.sprite_game_layer = prefab.objects[o].layer as i32;
+                p.sprite_material = r.materials.first().and_then(|&m| db.resolve(file, m));
                 p.sprite_draw = ([r.flip_x, r.flip_y], r.draw_mode, r.size, r.adaptive_mode_threshold, r.sprite_tile_mode == 1);
             }
             self.physicals.push(p);

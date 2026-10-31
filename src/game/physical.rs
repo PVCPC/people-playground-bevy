@@ -207,6 +207,9 @@ script! {
         sprite_draw: crate::game::SpriteDraw = ([false; 2], 0, [0.0; 2], 0.0, false),
         /// For drawing: the spriteRenderer's sortingLayerID (0, the Default layer, without a renderer).
         sprite_layer: i32 = 0,
+        /// The SpriteRenderer GameObject's layer and first material.
+        sprite_game_layer: i32 = 0,
+        sprite_material: Option<crate::assets::db::ObjRef> = None,
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).
