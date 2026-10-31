@@ -13,6 +13,7 @@ pub mod probe;
 pub mod raycast;
 pub mod revolute;
 pub mod rope_joint;
+pub mod friction_joint;
 pub mod settings;
 pub mod shape;
 pub mod solver;

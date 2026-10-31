@@ -51,6 +51,8 @@ pub struct Instance {
     pub colliders: HashMap<(usize, usize), ColliderState>,
     /// The CircleCollider2Ds whose radius or offset a script set at run time, by (object, component): (radius, offset).
     pub circles: HashMap<(usize, usize), (f32, [f32; 2])>,
+    /// The Collider2Ds whose isTrigger a script set at run time, by (object, component).
+    pub triggers: HashMap<(usize, usize), bool>,
     /// Each object's TransformChangeDispatch interest in the Physics2D systems (the CHANGE_* bits).
     pub interest: Vec<u8>,
     /// Each object's changed bits for those systems, cleared by SyncTransforms.
@@ -1065,6 +1067,26 @@ impl Game {
         }
     }
 
+    /// Collider2D.isTrigger = v (Collider2D::SetIsTrigger 180c15750): unchanged is nothing, else stored and
+    /// RecreateCollider(null); a collider of an inactive object has no fixtures to remake.
+    pub(super) fn collider_set_is_trigger(&mut self, inst: &mut Instance, (o, c): (usize, usize), v: bool) {
+        let Component::Collider2D(col) = &inst.prefab.objects[o].components[c].1 else { unreachable!("isTrigger of a non-collider") };
+        if inst.triggers.get(&(o, c)).copied().unwrap_or(col.is_trigger) == v {
+            return;
+        }
+        inst.triggers.insert((o, c), v);
+        let id = inst.objects[o].components[c];
+        for p in &mut self.physicals {
+            if let Some(k) = p.colliders.iter().position(|&x| x == id) {
+                p.collider_defs[k].is_trigger = v;
+            }
+        }
+        if inst.objects[o].active {
+            let prefab = inst.prefab.clone();
+            self.collider2d_recreate(inst, &prefab, o, c);
+        }
+    }
+
     /// Collider2D::AwakeFromLoad (180c0c370) in instantiate mode: CreateFixtures on an active object, and
     /// Collider2D::AddToManager (180c0bcc0) on an enabled one, which registers the GameObject's interest in the
     /// collider TRS system.
@@ -1189,7 +1211,7 @@ impl Game {
         let collider = ColliderRef { id: inst.objects[o].components[c], game_object: inst.objects[o].game_object };
         let mut ids = Vec::new();
         for shape in shapes {
-            let def = FixtureDef { shape, friction, restitution, density, is_sensor: col.is_trigger, filter: Default::default(), collider };
+            let def = FixtureDef { shape, friction, restitution, density, is_sensor: inst.triggers.get(&(o, c)).copied().unwrap_or(col.is_trigger), filter: Default::default(), collider };
             ids.push(self.world.create_fixture(body, &def, false));
         }
         self.world.reset_mass_data(body);

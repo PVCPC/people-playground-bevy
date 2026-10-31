@@ -11,7 +11,7 @@ use crate::b2::math::Vec2 as V;
 const BUFFER: usize = 1024;
 
 /// The classes with a Slice() method, and their subclasses.
-const SLICE_RECEIVERS: &[&str] = &[
+pub(super) const SLICE_RECEIVERS: &[&str] = &[
     "AppliedBandageBehaviour", "BloodWireBehaviour", "BreakJointOnShotBehaviour", "CathodeLightBehaviour", "CopperWireBehaviour",
     "DamagableMachineryBehaviour", "DistanceJointWireBehaviour", "EnergyWireBehaviour", "FixedCableBehaviour", "FixedJointWireBehaviour",
     "GlowtubeBehaviour", "HeatPipeBehaviour", "LimbBehaviour", "NewUseWireBehaviour", "PinBehaviour", "RigidWireBehaviour", "RopeBehaviour",

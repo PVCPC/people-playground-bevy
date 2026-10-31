@@ -515,7 +515,7 @@ impl Game {
                     continue;
                 }
                 match self.behaviour_of.get(&inst.objects[x].components[k]) {
-                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
+                    Some(&(_, b @ (Behaviour::Firearm(_) | Behaviour::Glowtube(_) | Behaviour::Led(_) | Behaviour::Detector(_) | Behaviour::Explosive(_) | Behaviour::Launcher(_) | Behaviour::Bell(_) | Behaviour::MachineGun(_) | Behaviour::Minigun(_) | Behaviour::Generator(_) | Behaviour::Floodlight(_) | Behaviour::SpikeGrenade(_) | Behaviour::HeatingElement(_) | Behaviour::Bulb(_) | Behaviour::Thrusterbed(_) | Behaviour::Piston(_) | Behaviour::Car(_) | Behaviour::Syringe(_) | Behaviour::JetEngine(_) | Behaviour::Chainsaw(_) | Behaviour::SignalConverter(_) | Behaviour::Metronome(_) | Behaviour::Thermometer(_) | Behaviour::InfraredThermometer(_) | Behaviour::Blaster(_) | Behaviour::Beamformer(_) | Behaviour::Scifi40(_) | Behaviour::HealthGun(_) | Behaviour::FreezeGun(_) | Behaviour::Flare(_) | Behaviour::Display(_) | Behaviour::Laser(_) | Behaviour::FirearmAttachment(_) | Behaviour::BatteryAttachment(_) | Behaviour::Television(_) | Behaviour::UniversalBell(_) | Behaviour::Valve(_) | Behaviour::TimedGate(_) | Behaviour::Defibrillator(_) | Behaviour::CardiopulmonaryBypass(_) | Behaviour::HeartMonitor(_) | Behaviour::Excalibur(_) | Behaviour::BloodTank(_) | Behaviour::ArchelixCaster(_) | Behaviour::Grip(_))))=> out.push(UseReceiver::Behaviour(b)),
                     Some(&(_, b @ Behaviour::Translated(t))) if t.has_use() => out.push(UseReceiver::Behaviour(b)),
                     _ => unimplemented!("{class}.Use"),
                 }
@@ -558,6 +558,8 @@ impl Game {
                 // A direct activation: channel 0.
                 Behaviour::Valve(v) => self.valve_use(v, 0),
                 Behaviour::TimedGate(g) => self.timed_gate_use(g),
+                Behaviour::Defibrillator(d) => self.defibrillator_use(d),
+                Behaviour::CardiopulmonaryBypass(c) => self.cardiopulmonary_bypass_use(c),
                 Behaviour::HeartMonitor(h) => self.heart_monitor_use(h),
                 Behaviour::Excalibur(e) => self.excalibur_use(e),
                 Behaviour::BloodTank(t) => self.blood_tank_use(t, 0),
@@ -580,6 +582,8 @@ impl Game {
                 Behaviour::Car(i) => self.car_use(i, 0),
                 Behaviour::Syringe(i) => self.syringe_use(i, 0),
                 Behaviour::JetEngine(i) => self.jet_engine_use(i),
+                // ChainsawBehaviour.Use: PlayClipOnce(Rev) when not destroyed (audio).
+                Behaviour::Chainsaw(_) => {}
                 Behaviour::Metronome(m) => self.metronome_use(m),
                 Behaviour::Thermometer(t) => self.thermometer_use(t),
                 Behaviour::Flare(f) => self.flare_use(f),
@@ -1215,5 +1219,92 @@ mod tests {
         assert!(g.physicals[first].destroyed);
         assert!(g.notifications.contains(&"<b>FLASK</b> removed".to_string()));
         assert!(g.undo.history.is_empty());
+    }
+
+    #[test]
+    fn bypass_machine_use_shows_and_hides_its_cosmetics() {
+        let Some((mut g, first)) = spawned("Cardiopulmonary Bypass Machine") else { return };
+        let (id, cosmetics) = (g.cardiopulmonary_bypasses[0].id, g.cardiopulmonary_bypasses[0].Cosmetics);
+        let shown = |g: &mut Game| g.with_component_instance(id, |_, inst, _| inst.objects[cosmetics].active);
+        // Start: Activated is false, so Cosmetics is hidden.
+        assert!(!g.cardiopulmonary_bypasses[0].Activated && !shown(&mut g));
+        g.broadcast_use(first);
+        assert!(g.cardiopulmonary_bypasses[0].Activated && shown(&mut g));
+        g.broadcast_use(first);
+        assert!(!g.cardiopulmonary_bypasses[0].Activated && !shown(&mut g));
+    }
+
+    #[test]
+    fn defibrillator_restarts_the_circulation_under_its_pads() {
+        let Some((mut g, _)) = spawned("Defibrillator") else { return };
+        let (pad, layer) = (g.defibrillators[0].Pad1, g.defibrillators[0].PadLayer);
+        let at = g.transform_point3(pad, [-0.1, 0.0, 0.0]);
+        // A human spawned on the pad.
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        let at = g.transform_point3(pad, [-0.1, 0.0, 0.0]);
+        for l in first_limb..g.limbs.len() {
+            g.circulations[l].IsPump = false;
+            g.circulations[l].BloodFlow = 0.0;
+            g.people[g.limbs[l].Person].Consciousness = 0.2;
+        }
+        let charge = g.physicals[pad].Charge();
+        g.defibrillate(0, pad, layer);
+        assert_eq!(g.physicals[pad].Charge(), charge + 0.2);
+        let hit: Vec<usize> = (first_limb..g.limbs.len()).filter(|&l| g.circulations[l].BloodFlow == 1.0).collect();
+        assert!(!hit.is_empty(), "no limb under the pad at {at:?}");
+        for l in hit {
+            assert_eq!(g.circulations[l].IsPump, g.circulations[l].WasInitiallyPumping);
+            assert_eq!(g.people[g.limbs[l].Person].Consciousness, 1.0);
+            assert!(g.people[g.limbs[l].Person].AdrenalineLevel >= 20.0);
+        }
+    }
+
+    #[test]
+    fn running_chainsaw_saws_a_human_on_its_blade() {
+        let Some((mut g, _)) = spawned("Chainsaw") else { return };
+        let saw = g.chainsaws[0].physical;
+        let at = g.transform_point3(saw, [0.2, 0.0, 0.0]);
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        let health: f32 = (first_limb..g.limbs.len()).map(|l| g.limbs[l].Health).sum();
+        let (mut connected, mut joints) = (false, 0);
+        for _ in 0..120 {
+            g.chainsaws[0].rotationSpeed = 10.0;
+            frames(&mut g, 1);
+            connected |= !g.chainsaws[0].softConnections.keys().is_empty();
+            joints = joints.max(g.fixed_joints.iter().filter(|f| f.friction.is_some() && !f.destroyed).count());
+        }
+        let after: f32 = (first_limb..g.limbs.len()).map(|l| g.limbs[l].Health).sum();
+        assert!(connected && joints > 0, "the blade never soft-connected a limb");
+        assert!(after < health, "no limb took damage ({health} -> {after})");
+    }
+
+    #[test]
+    fn sword_side_blade_soft_connects_a_human() {
+        let Some((mut g, _)) = spawned("Sword") else { return };
+        let blade = g.sharp_on_all_sides[0].physical;
+        let at = g.physicals[blade].transform.position;
+        let first_limb = g.limbs.len();
+        g.catalog_selected = Some("Human".into());
+        g.input.mouse = [at[0], at[1], 0.0];
+        ctl(&mut g, "spawnRight", false, false, true);
+        frames(&mut g, 1);
+        assert!(g.limbs.len() > first_limb, "no human spawned");
+        g.sharp_on_all_sides_process(0, true, 10.0);
+        let keys = g.sharp_on_all_sides[0].softConnections.keys();
+        assert!(!keys.is_empty(), "the blade connected nothing");
+        for k in keys {
+            let f = g.sharp_on_all_sides[0].softConnections.get(k).unwrap().joint;
+            assert_eq!(g.fixed_joints[f].friction, Some((10.0, 10.0)));
+        }
+        frames(&mut g, 5);
     }
 }

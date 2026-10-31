@@ -965,6 +965,8 @@ impl Game {
                 (Phase::Update, B::InfraredThermometer(i)) => self.infrared_update(i),
                 (Phase::Fixed, B::Syringe(i)) => self.syringe_fixed_update(i),
                 (Phase::Fixed, B::JetEngine(i)) => self.jet_engine_fixed_update(i),
+                (Phase::Fixed, B::Chainsaw(i)) => self.chainsaw_fixed_update(i),
+                (Phase::Update, B::Chainsaw(i)) => self.chainsaw_update(i),
                 (Phase::Update, B::Syringe(i)) => self.syringe_update(i),
                 (Phase::Update, B::Piston(i)) => self.piston_update(i),
                 // TemperatureRayGunBehaviour.Update: the line renderer's start.
@@ -991,6 +993,7 @@ impl Game {
                 (Phase::Update, B::Valve(v)) => self.valve_update(v),
                 (Phase::Update, B::HeartMonitor(h)) => self.heart_monitor_update(h),
                 (Phase::Update, B::Excalibur(e)) => self.excalibur_update(e),
+                (Phase::Fixed, B::SharpOnAllSides(s)) => self.sharp_on_all_sides_fixed_update(s),
                 (Phase::Update, B::BloodTank(t)) => self.blood_tank_update(t),
                 // LagboxBehaviour.Update only turns the knob (presentation).
                 (Phase::Update, B::TimedGate(_)) => {}

@@ -27,7 +27,7 @@ const CRACK_COOLDOWN: f32 = 0.25;
 const WATER_LAYER: u32 = 1 << 4;
 
 /// The classes with a Shot(Shot) / ExitShot(Shot) method, and their subclasses.
-const SHOT_RECEIVERS: &[&str] = &[
+pub(super) const SHOT_RECEIVERS: &[&str] = &[
     "PhysicalBehaviour", "DestroyableBehaviour", "ExplosiveBehaviour", "DamagableMachineryBehaviour", "TyreDeflationBehaviour", "ActOnShot", "BalloonBehaviour",
     "BreakJointOnShotBehaviour", "BulbBehaviour", "CathodeLightBehaviour", "CirculationBehaviour", "DebugTargetDamageMeter", "DroneBehaviour", "FireworksBehaviour",
     "GlowtubeBehaviour", "JavelinMissileBehaviour", "LimbBehaviour", "LiquidContainerLeakingBehaviour", "OldSyringeBehaviour", "PersonBehaviour",
@@ -682,6 +682,13 @@ impl Game {
     /// the collider's bare object. Every component on it with the method runs (disabled ones too), in order.
     /// `cartridge` is Shot.cartridge: a bullet's emitter Cartridge, None for a Shot built without one.
     pub(super) fn send_shot(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool, cartridge: Option<Cartridge>) {
+        self.send_shot_flags(collider, physical, normal, point, damage, exit, cartridge, true, true);
+    }
+
+    /// `send_shot` with Shot.CanCrush and Shot.triggersExplosiveOverride (both true from the Shot constructor's
+    /// defaults unless the caller clears them).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn send_shot_flags(&mut self, collider: i32, physical: Option<usize>, normal: [f32; 2], point: [f32; 2], damage: f32, exit: bool, cartridge: Option<Cartridge>, can_crush: bool, triggers_explosive: bool) {
         let receivers = if exit { EXIT_SHOT_RECEIVERS } else { SHOT_RECEIVERS };
         let Some(p) = physical.or_else(|| self.physical_of_collider(collider)) else {
             if self.bare_colliders[&collider].receives(receivers) {
@@ -716,9 +723,11 @@ impl Game {
                     let x = self.destroyables.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's DestroyableBehaviour");
                     self.destroyable_shot(x, normal, damage);
                 }
-                ("ExplosiveBehaviour", _) => {
+                // ExplosiveBehaviour has no ExitShot.
+                ("ExplosiveBehaviour", true) => {}
+                ("ExplosiveBehaviour", false) => {
                     let e = self.explosives.iter().position(|e| e.physical == Some(p) && !e.added).expect("the object's ExplosiveBehaviour");
-                    self.explosive_shot(e);
+                    self.explosive_shot(e, triggers_explosive);
                 }
                 ("DamagableMachineryBehaviour", _) => {
                     let m = self.machinery.iter().position(|m| m.PhysicalBehaviour == p).expect("the object's DamagableMachineryBehaviour");
@@ -728,7 +737,7 @@ impl Game {
                     // A limb's CirculationBehaviour shares its index.
                     let l = self.limbs.iter().position(|x| x.PhysicalBehaviour == p).expect("the object's LimbBehaviour");
                     match (class.as_str(), exit) {
-                        ("LimbBehaviour", false) => self.limb_shot(l, normal, point, damage),
+                        ("LimbBehaviour", false) => self.limb_shot(l, normal, point, damage, can_crush),
                         ("LimbBehaviour", true) => self.limb_exit_shot(l, normal, point, damage),
                         (_, false) => self.circulation_shot(l, normal, point, damage),
                         (_, true) => self.circulation_exit_shot(l, normal, point),
@@ -766,7 +775,7 @@ impl Game {
         // ExplosiveBehaviours added at run time come last on the GameObject (ExplosiveBehaviour has no ExitShot).
         if !exit {
             for e in self.added_explosives_on(p) {
-                self.explosive_shot(e);
+                self.explosive_shot(e, triggers_explosive);
             }
         }
     }
@@ -864,7 +873,7 @@ impl Game {
     }
 
     /// LimbBehaviour.Shot
-    fn limb_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2], damage: f32) {
+    fn limb_shot(&mut self, l: usize, normal: [f32; 2], point: [f32; 2], damage: f32, can_crush: bool) {
         use super::misc::damage_type::BULLET;
         if self.limbs[l].ImmuneToDamage {
             return;
@@ -941,8 +950,7 @@ impl Game {
                 }
             }
         }
-        // Shot.CanCrush is true for the emitter's shots.
-        if self.prefs.LimbCrushing && damage > 149.0 && mathf::clamp(((d(damage) - 149.0f32) * 0.005f32).f(), 0.3, 0.8) > self.random.value() {
+        if can_crush && self.prefs.LimbCrushing && damage > 149.0 && mathf::clamp(((d(damage) - 149.0f32) * 0.005f32).f(), 0.3, 0.8) > self.random.value() {
             if self.prefs.StopAnimationOnDamage {
                 self.people[person].OverridePoseIndex = -1;
             }
@@ -950,7 +958,7 @@ impl Game {
         } else if self.limbs[l].shotHeat > 5.0 && self.random.value() > 0.35 {
             if self.limbs[l].HasJoint && self.random.value() > 0.8 {
                 self.limb_slice(l);
-            } else if self.prefs.LimbCrushing {
+            } else if can_crush && self.prefs.LimbCrushing {
                 if self.prefs.StopAnimationOnDamage {
                     self.people[person].OverridePoseIndex = -1;
                 }
@@ -1146,8 +1154,9 @@ impl Game {
     }
 
     /// ExplosiveBehaviour.Shot (triggersExplosiveOverride is always true for bullets).
-    fn explosive_shot(&mut self, e: usize) {
-        if self.random.value() < self.explosives[e].ShotExplodeChance {
+    /// ExplosiveBehaviour.Shot: `triggers` is shot.triggersExplosiveOverride (it short-circuits the draw).
+    fn explosive_shot(&mut self, e: usize, triggers: bool) {
+        if triggers && self.random.value() < self.explosives[e].ShotExplodeChance {
             let delay = self.random.value() * 0.2;
             self.explosive_start_explode(e, delay, true);
         }

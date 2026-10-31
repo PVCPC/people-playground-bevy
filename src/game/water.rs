@@ -411,6 +411,15 @@ impl Game {
                             }
                         }
                     }
+                    // OnEnable shows the text screen (presentation).
+                    "DefibrillatorBehaviour" => {}
+                    // OnEnable: UpdateActivation.
+                    "CardiopulmonaryBypassMachineBehaviour" => {
+                        if self.script_enabled(id, *enabled) {
+                            let i = self.cardiopulmonary_bypasses.iter().position(|c| c.id == id).expect("a CardiopulmonaryBypassMachineBehaviour in the arena");
+                            self.cardiopulmonary_bypass_update_activation(i, inst);
+                        }
+                    }
                     "ColorWave" => {
                         if *enabled && !self.script_disabled(id) {
                             self.color_wave_on_enable();
@@ -450,6 +459,21 @@ impl Game {
                         self.physical_on_disable(p);
                     }
                 }
+                // OnDisable -> OnDestroy
+                "SharpOnAllSidesBehaviour" => {
+                    let i = self.sharp_on_all_sides.iter().position(|c| c.id == id).expect("a SharpOnAllSidesBehaviour in the arena");
+                    if self.sharp_on_all_sides[i].enabled {
+                        self.sharp_on_all_sides_destroy(i);
+                    }
+                }
+                "DefibrillatorBehaviour" => {
+                    let i = self.defibrillators.iter().position(|c| c.id == id).expect("a DefibrillatorBehaviour in the arena");
+                    if self.defibrillators[i].enabled {
+                        self.defibrillator_on_disable(i);
+                    }
+                }
+                // OnDisable only stops the loop sound.
+                "CardiopulmonaryBypassMachineBehaviour" => {}
                 "CarBehaviour" => {
                     let car = self.cars.iter().position(|c| c.id == id).expect("a CarBehaviour in the arena");
                     self.car_on_disable(car, inst);

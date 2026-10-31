@@ -286,6 +286,14 @@ impl Game {
                         "NoCollide" => g.no_collide_destroy(cid),
                         "NoCollideGm" => g.no_collide_gm_destroy(cid, inst),
                         "TyreDeflationBehaviour" => g.tyre_destroy(cid),
+                        "SharpOnAllSidesBehaviour" => {
+                            let i = g.sharp_on_all_sides.iter().position(|s| s.id == cid).expect("the SharpOnAllSidesBehaviour");
+                            g.sharp_on_all_sides_destroy(i);
+                        }
+                        "ChainsawBehaviour" => {
+                            let i = g.chainsaws.iter().position(|s| s.id == cid).expect("the ChainsawBehaviour");
+                            g.chainsaw_destroy(i);
+                        }
                         // Global.RemoveAudioSource
                         "ExplosionSoundBehviour" | "AudioSourceTimeScaleBehaviour" | "ExistInDetailView" => {}
                         // DeregisterBehaviour.OnDestroy: FindRelevantAction / DeregisterAction of this object.

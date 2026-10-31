@@ -36,9 +36,11 @@ pub mod wrench;
 pub mod valve;
 pub mod no_collide;
 pub mod heart_monitor;
+pub mod sharp_on_all_sides;
 pub mod excalibur;
 pub mod blood_tank;
 pub mod timed_gate;
+pub mod resuscitation;
 pub mod display;
 pub mod activation_toggle;
 pub mod gauge;
@@ -47,6 +49,8 @@ pub mod flare;
 pub mod thermometer;
 pub mod syringe;
 pub mod jet_engine;
+pub mod chainsaw;
+pub mod soft_connect;
 pub mod signal_converter;
 pub mod flamethrower;
 pub mod rocket;
@@ -1149,8 +1153,11 @@ pub enum Behaviour {
     UniversalBell(usize),
     Valve(usize),
     TimedGate(usize),
+    Defibrillator(usize),
+    CardiopulmonaryBypass(usize),
     HeartMonitor(usize),
     Excalibur(usize),
+    SharpOnAllSides(usize),
     BloodTank(usize),
     ToggleableMirror(usize),
     PointToVelocity(usize),
@@ -1195,6 +1202,7 @@ pub enum Behaviour {
     InfraredThermometer(usize),
     Syringe(usize),
     JetEngine(usize),
+    Chainsaw(usize),
     SignalConverter(usize),
     Blaster(usize),
     Blasterbolt(usize),
@@ -1262,6 +1270,7 @@ impl Behaviour {
             Behaviour::Television(_) => "TelevisionBehaviour",
             Behaviour::Display(_) => "DisplayBehaviour",
             Behaviour::JetEngine(_) => "JetEngineBehaviour",
+            Behaviour::Chainsaw(_) => "ChainsawBehaviour",
             Behaviour::Blaster(_) => "BlasterBehaviour",
             Behaviour::Blasterbolt(_) => "BlasterboltBehaviour",
             Behaviour::Beamformer(_) => "BeamformerBehaviour",
@@ -1285,8 +1294,11 @@ impl Behaviour {
             Behaviour::UniversalBell(_) => "UniversalBellBehaviour",
             Behaviour::Valve(_) => "ValveBehaviour",
             Behaviour::TimedGate(_) => "TimedGateBehaviour",
+            Behaviour::Defibrillator(_) => "DefibrillatorBehaviour",
+            Behaviour::CardiopulmonaryBypass(_) => "CardiopulmonaryBypassMachineBehaviour",
             Behaviour::HeartMonitor(_) => "HeartMonitorBehaviour",
             Behaviour::Excalibur(_) => "ExcaliburBehaviour",
+            Behaviour::SharpOnAllSides(_) => "SharpOnAllSidesBehaviour",
             Behaviour::BloodTank(_) => "BloodTankBehaviour",
             Behaviour::ToggleableMirror(_) => "ToggleableMirrorBehaviour",
             Behaviour::Translated(t) => t.class(),
@@ -1454,12 +1466,16 @@ pub struct Game {
     pub valves: Vec<valve::Valve>,
     pub no_collide_body_parts: Vec<no_collide::NoCollideWithBodyPart>,
     pub timed_gates: Vec<timed_gate::TimedGate>,
+    pub defibrillators: Vec<resuscitation::Defibrillator>,
+    pub cardiopulmonary_bypasses: Vec<resuscitation::CardiopulmonaryBypass>,
     pub heart_monitors: Vec<heart_monitor::HeartMonitor>,
     pub excaliburs: Vec<excalibur::Excalibur>,
+    pub sharp_on_all_sides: Vec<sharp_on_all_sides::SharpOnAllSides>,
     pub blood_tanks: Vec<blood_tank::BloodTank>,
     pub displays: Vec<display::Display>,
     pub syringes: Vec<syringe::Syringe>,
     pub jet_engines: Vec<jet_engine::JetEngine>,
+    pub chainsaws: Vec<chainsaw::Chainsaw>,
     pub blasters: Vec<blaster::Blaster>,
     pub blasterbolts: Vec<blaster::Blasterbolt>,
     pub beamformers: Vec<scifi::Beamformer>,

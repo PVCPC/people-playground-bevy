@@ -503,7 +503,7 @@ impl Game {
 
     /// gameObject.SendMessage("Lodged", stabbing): ExcaliburBehaviour, OldSyringeBehaviour and SyringeBehaviour are the
     /// only receivers; an item without one (Knife, Sword) does nothing.
-    fn send_lodged(&mut self, p: usize, stabbing: Stabbing) {
+    pub(super) fn send_lodged(&mut self, p: usize, stabbing: Stabbing) {
         if self.physicals[p].active && !self.physicals[p].lodge_receiver.is_empty() {
             let r = &self.physicals[p].lodge_receiver;
             if !r.starts_with("Old") && super::syringe::is_syringe(r) {

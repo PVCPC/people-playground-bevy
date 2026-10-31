@@ -68,8 +68,11 @@ pub struct Linked {
     pub toggleable_mirrors: HashMap<usize, usize>,
     pub valves: HashMap<usize, usize>,
     pub timed_gates: HashMap<usize, usize>,
+    pub defibrillators: HashMap<usize, usize>,
+    pub cardiopulmonary_bypasses: HashMap<usize, usize>,
     pub heart_monitors: HashMap<usize, usize>,
     pub excaliburs: HashMap<usize, usize>,
+    pub sharp_on_all_sides: HashMap<usize, usize>,
     pub blood_tanks: HashMap<usize, usize>,
     pub explosives: HashMap<usize, usize>,
     pub delete_afters: HashMap<usize, usize>,
@@ -113,6 +116,7 @@ pub struct Linked {
     pub displays: HashMap<usize, usize>,
     pub syringes: HashMap<usize, usize>,
     pub jet_engines: HashMap<usize, usize>,
+    pub chainsaws: HashMap<usize, usize>,
     pub blasters: HashMap<usize, usize>,
     pub blasterbolts: HashMap<usize, usize>,
     pub beamformers: HashMap<usize, usize>,
@@ -552,6 +556,9 @@ pub(super) fn check_rewritten(class: &str) {
         "ActivationToggleBehaviour" => {}
         // jet_engine.rs: Awake caches components and clears the plasma colour (rendering).
         "JetEngineBehaviour" => {}
+        // chainsaw.rs: Start draws the seed, FixedUpdate saws, Update adds speed, OnDestroy destroys the joints; the
+        // audio, particles and the saw sprite are presentation.
+        "ChainsawBehaviour" => {}
         // blaster.rs, scifi.rs: Awake caches components (the Disassembler's takes an AudioSource id), Start flips the
         // muzzle flash (BlasterBehaviour), shows or hides lines (BeamformerBehaviour); the bolt only has Update.
         "BlasterBehaviour" | "BlasterboltBehaviour" | "BeamformerBehaviour" | "GenericScifiWeapon40Behaviour" => {}
@@ -627,11 +634,17 @@ pub(super) fn check_rewritten(class: &str) {
         "ValveBehaviour" => {}
         // Awake sets the physical's delay, Start and OnEnable resume a busy DoLag, Use and OnDisable are rewritten (timed_gate.rs).
         "TimedGateBehaviour" => {}
+        // Use, DefibRoutine and OnDisable are rewritten (resuscitation.rs); Start and OnEnable only set the text screen.
+        "DefibrillatorBehaviour" => {}
+        // Start, Use, OnEnable (UpdateActivation) and OnDisable are rewritten (resuscitation.rs); the pumping is BloodWireBehaviour's.
+        "CardiopulmonaryBypassMachineBehaviour" => {}
         // Use and Update are rewritten (heart_monitor.rs); Awake, Start, OnEnable and the display are presentation.
         "HeartMonitorBehaviour" => {}
         // Use and Update are rewritten (excalibur.rs); Awake, the glow and the sounds are presentation. CastSpell and
         // the fireball stop there.
         "ExcaliburBehaviour" => {}
+        // FixedUpdate, OnDisable and OnDestroy are rewritten (sharp_on_all_sides.rs, soft_connect.rs).
+        "SharpOnAllSidesBehaviour" => {}
         // Start sets the static Instance that the bolt's lightning calls Emit on (lightning.rs); it has no other state.
         "SimpleLightningEmitterBehaviour" => {}
         // Awake only subscribes SyncSprite to the parent's OnAfterChange (the sprite is presentation). It draws nothing.
@@ -1792,8 +1805,10 @@ impl Game {
         let (mut syringes, mut syringe_explosions) = (HashMap::new(), HashMap::new());
         let mut valves = HashMap::new();
         let mut timed_gates = HashMap::new();
+        let (mut defibrillators, mut cardiopulmonary_bypasses) = (HashMap::new(), HashMap::new());
         let mut heart_monitors = HashMap::new();
         let mut excaliburs = HashMap::new();
+        let mut sharp_on_all_sides = HashMap::new();
         let mut point_liquids = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "LiquidContainerController") {
@@ -2265,6 +2280,26 @@ impl Game {
                 excaliburs.insert(o, self.excaliburs.len());
                 self.excaliburs.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "SharpOnAllSidesBehaviour") {
+                let file = prefab.objects[o].game_object.file;
+                let mut x = super::sharp_on_all_sides::SharpOnAllSides::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = *l.arenas.physical.get(&o).unwrap_or_else(|| unimplemented!("SharpOnAllSidesBehaviour without a PhysicalBehaviour (NullReferenceException in FixedUpdate)"));
+                // SharpCollider's fixtures (the query shape of OverlapCollider).
+                let sc = field(v, "SharpCollider")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("SharpOnAllSidesBehaviour.SharpCollider null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                let (so, scc) = *prefab.index.get(&ObjRef { file, path_id: sc.path_id }).ok_or("SharpOnAllSidesBehaviour.SharpCollider: dangling reference")?;
+                x.SharpCollider = inst.fixtures.get(&(so, scc)).cloned().unwrap_or_default();
+                x.sharp_collider_id = inst.objects[so].components[scc];
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                // OnAfterDeserialise reconnects SerialisableVictims; a field the prefab omits is an empty array.
+                if v.get("SerialisableVictims").and_then(Value::array).is_some_and(|a| !a.is_empty()) {
+                    unimplemented!("SharpOnAllSidesBehaviour.SerialisableVictims: OnAfterDeserialise (GUID lookup of the victims)");
+                }
+                sharp_on_all_sides.insert(o, self.sharp_on_all_sides.len());
+                self.sharp_on_all_sides.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "TimedGateBehaviour") {
                 let mut x = super::timed_gate::TimedGate::default();
                 load_values(x.fields(), v)?;
@@ -2277,6 +2312,37 @@ impl Game {
                 }
                 timed_gates.insert(o, self.timed_gates.len());
                 self.timed_gates.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "DefibrillatorBehaviour") {
+                let mut x = super::resuscitation::Defibrillator::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // PlayClipOnce on the PhysicalBehaviour, TextScreen (Start, OnEnable) and both pads are used without a null check.
+                if l.physical(field(v, "PhysicalBehaviour")?)?.is_none() || field(v, "TextScreen")?.pptr().ok_or("TextScreen")?.is_null() {
+                    unimplemented!("DefibrillatorBehaviour.PhysicalBehaviour or TextScreen is null (NullReferenceException)");
+                }
+                x.Pad1 = l.physical(field(v, "Pad1")?)?.unwrap_or_else(|| unimplemented!("DefibrillatorBehaviour.Pad1 is null (NullReferenceException)"));
+                x.Pad2 = l.physical(field(v, "Pad2")?)?.unwrap_or_else(|| unimplemented!("DefibrillatorBehaviour.Pad2 is null (NullReferenceException)"));
+                x.PadLayer = field(field(v, "PadLayer")?, "m_Bits")?.i64().ok_or("PadLayer.m_Bits")? as u32;
+                let clip = field(v, "AudioIndicator")?.pptr().ok_or("AudioIndicator")?;
+                x.AudioIndicator = if clip.is_null() { None } else { Some(crate::assets::classes::AudioClip::read(db.data(db.resolve(file, clip).ok_or("AudioIndicator outside the data")?))?.length) };
+                defibrillators.insert(o, self.defibrillators.len());
+                self.defibrillators.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "CardiopulmonaryBypassMachineBehaviour") {
+                let mut x = super::resuscitation::CardiopulmonaryBypass::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                // UpdateActivation (Start, OnEnable) uses Cosmetics and StatusText, and OnDisable the LoopSource, without a null check.
+                let cosmetics = field(v, "Cosmetics")?.pptr().ok_or("Cosmetics")?;
+                if cosmetics.is_null() || cosmetics.file != 0 || field(v, "StatusText")?.pptr().ok_or("StatusText")?.is_null() || field(v, "LoopSource")?.pptr().ok_or("LoopSource")?.is_null() {
+                    unimplemented!("CardiopulmonaryBypassMachineBehaviour.Cosmetics, StatusText or LoopSource is null (NullReferenceException)");
+                }
+                x.Cosmetics = prefab.index[&ObjRef { file, path_id: cosmetics.path_id }].0;
+                cardiopulmonary_bypasses.insert(o, self.cardiopulmonary_bypasses.len());
+                self.cardiopulmonary_bypasses.push(x);
             }
             if let Some((c, _, v)) = script(prefab, o, "SyringeExplosionBehaviour") {
                 let mut x = super::syringe::SyringeExplosion::default();
@@ -3056,6 +3122,7 @@ impl Game {
         }
         // The classes that read the translated behaviours: JetEngineBehaviour toggles its GuideTemperatureBehaviour.
         let mut jet_engines = HashMap::new();
+        let mut chainsaws = HashMap::new();
         let mut signal_converters = HashMap::new();
         for o in 0..n {
             if let Some((c, _, v)) = script(prefab, o, "JetEngineBehaviour") {
@@ -3085,6 +3152,29 @@ impl Game {
                 jet_engines.insert(o, self.jet_engines.len());
                 self.jet_engines.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "ChainsawBehaviour") {
+                let mut x = super::chainsaw::Chainsaw::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.unwrap_or_else(|| unimplemented!("ChainsawBehaviour.PhysicalBehaviour null (NullReferenceException in FixedUpdate)"));
+                let m = l.object(field(v, "DamagableMachinery")?)?.unwrap_or_else(|| unimplemented!("ChainsawBehaviour.DamagableMachinery null (NullReferenceException in Start)"));
+                x.DamagableMachinery = *machinery.get(&m).ok_or("ChainsawBehaviour: no DamagableMachineryBehaviour on its object")?;
+                let sc = field(v, "SawCollider")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("ChainsawBehaviour.SawCollider null or outside its prefab (NullReferenceException in FixedUpdate)"));
+                let key = *prefab.index.get(&ObjRef { file, path_id: sc.path_id }).ok_or("ChainsawBehaviour.SawCollider: dangling reference")?;
+                if !matches!(prefab.objects[key.0].components[key.1].1, Component::Collider2D(_)) {
+                    return Err("ChainsawBehaviour.SawCollider is not a Collider2D".into());
+                }
+                x.SawCollider = key;
+                x.saw_collider_id = inst.objects[key.0].components[key.1];
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                // OnAfterDeserialise reconnects SerialisableVictims; a field the prefab omits is an empty array.
+                if v.get("SerialisableVictims").and_then(Value::array).is_some_and(|a| !a.is_empty()) {
+                    unimplemented!("ChainsawBehaviour.SerialisableVictims: OnAfterDeserialise (GUID lookup of the victims)");
+                }
+                chainsaws.insert(o, self.chainsaws.len());
+                self.chainsaws.push(x);
+            }
             if let Some((_, _, v)) = script(prefab, o, "SignalConverterBehaviour") {
                 let mut x = super::signal_converter::SignalConverter::default();
                 load_values(x.fields(), v)?;
@@ -3093,7 +3183,7 @@ impl Game {
                 self.signal_converters.push(x);
             }
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, heart_monitors, blood_tanks, excaliburs, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3413,6 +3503,54 @@ impl Game {
         self.pending_starts.push(super::misc::PendingStart::SerialiseInstructions(identities));
     }
 
+    /// GameObject.SetActive(false) on object `o` while its clone is being awoken: the OnDisable of the scripts below it
+    /// whose OnEnable already ran.
+    fn awake_set_inactive(&mut self, prefab: &Prefab, inst: &mut Instance, linked: &Linked, enabled_behaviours: &mut std::collections::HashSet<(usize, usize)>, o: usize) {
+        for (d, k) in self.set_active(inst, o, false) {
+            if !enabled_behaviours.remove(&(d, k)) {
+                continue;
+            }
+            let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
+            match class.as_str() {
+                "PhysicalBehaviour" => self.physical_on_disable(linked.physicals[&d]),
+                "LEDBulbBehaviour" => self.led_on_disable(linked.leds[&d]),
+                "DetectorBehaviour" => self.detector_on_disable(linked.detectors[&d]),
+                "GeneratorBehaviour" => self.generator_on_disable(linked.generators[&d]),
+                "SingleFloodlightBehaviour" => self.floodlight_on_disable(linked.floodlights[&d], inst),
+                "SpikeGrenadeBehaviour" => self.spike_grenade_on_disable(linked.spike_grenades[&d]),
+                "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
+                "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
+                "MetronomeBehaviour" => self.metronome_on_disable(linked.metronomes[&d]),
+                "TimedGateBehaviour" => self.timed_gate_on_disable(linked.timed_gates[&d]),
+                "DefibrillatorBehaviour" => self.defibrillator_on_disable(linked.defibrillators[&d]),
+                // OnDisable only stops the loop sound.
+                "CardiopulmonaryBypassMachineBehaviour" => {}
+                "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
+                // OnDisable -> OnDestroy: clears softConnections, empty before the first FixedUpdate.
+                "SharpOnAllSidesBehaviour" => {}
+                "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
+                "ActivationToggleBehaviour" => self.activation_toggle_on_disable(linked.activation_toggles[&d]),
+                "DisplayBehaviour" => self.display_on_disable(linked.displays[&d]),
+                // OnDisable only hides the light (button.rs).
+                "ButtonBehaviour" => {}
+                "LaserBehaviour" => {}
+                // OnDisable only hides the readout (TextMesh and Light).
+                "ThermometerBehaviour" => {}
+                // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
+                "ActivateIfTutorial" | "ActivateIfFancyEffects" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "DebrisComponent" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
+                name if super::translated::CLASSES.contains(&name) => self.tr_on_disable(linked.translated[&(d, k)]),
+                c if super::lifecycle::LIFECYCLE.iter().any(|(k, m)| *k == c && !m.contains(&"OnDisable")) => {}
+                _ => unimplemented!("{class}.OnDisable"),
+            }
+        }
+        for (&d, &p) in &linked.physicals {
+            self.physicals[p].active = inst.objects[d].active;
+        }
+        for (&d, &w) in &linked.waters {
+            self.waters[w].active = inst.objects[d].active;
+        }
+    }
+
     /// Awake of each queue 0x14 behaviour, in `instantiate_native`'s order, skipping objects inactive by then.
     /// The classes left out have no Awake that touches simulation state (ConnectedNodeBehaviour, GripBehaviour
     /// and GoreStringBehaviour only read components; MapConfig, MapLightBehaviour and WindControllerBehaviour
@@ -3435,46 +3573,7 @@ impl Game {
                 "ActivateIfTutorial" if self.prefs.ShowTutorial => self.prefs.ShowTutorial = false,
                 // SetActive(Chance > Random.value && FancyEffects): the draw happens whatever the preference.
                 "ActivateIfFancyEffects" if { let chance = float(v, "Chance").unwrap(); chance > self.random.value() && self.prefs.FancyEffects } => {}
-                "ActivateIfTutorial" | "ActivateIfFancyEffects" => {
-                    for (d, k) in self.set_active(inst, o, false) {
-                        if !enabled_behaviours.remove(&(d, k)) {
-                            continue;
-                        }
-                        let Component::Script { class, .. } = &prefab.objects[d].components[k].1 else { unreachable!() };
-                        match class.as_str() {
-                            "PhysicalBehaviour" => self.physical_on_disable(linked.physicals[&d]),
-                            "LEDBulbBehaviour" => self.led_on_disable(linked.leds[&d]),
-                            "DetectorBehaviour" => self.detector_on_disable(linked.detectors[&d]),
-                            "GeneratorBehaviour" => self.generator_on_disable(linked.generators[&d]),
-                            "SingleFloodlightBehaviour" => self.floodlight_on_disable(linked.floodlights[&d], inst),
-                            "SpikeGrenadeBehaviour" => self.spike_grenade_on_disable(linked.spike_grenades[&d]),
-                            "TemperatureRayGunBehaviour" => self.ray_gun_on_disable(linked.ray_guns[&d]),
-                            "ThrusterbedBehaviour" => self.thrusterbed_on_disable(linked.thrusterbeds[&d]),
-                            "MetronomeBehaviour" => self.metronome_on_disable(linked.metronomes[&d]),
-                            "TimedGateBehaviour" => self.timed_gate_on_disable(linked.timed_gates[&d]),
-                            "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
-                            "InfraredThermometer" => self.infrared_on_disable(linked.infrared_thermometers[&d]),
-                            "ActivationToggleBehaviour" => self.activation_toggle_on_disable(linked.activation_toggles[&d]),
-                            "DisplayBehaviour" => self.display_on_disable(linked.displays[&d]),
-                            // OnDisable only hides the light (button.rs).
-                            "ButtonBehaviour" => {}
-                            "LaserBehaviour" => {}
-                            // OnDisable only hides the readout (TextMesh and Light).
-                            "ThermometerBehaviour" => {}
-                            // No OnDisable; TextMeshPro's only touches its mesh and the font atlas.
-                            "ActivateIfTutorial" | "ActivateIfFancyEffects" | "AudioSourceTimeScaleBehaviour" | "DetachFromParentOnStart" | "DebrisComponent" | "Optout" | "MaintainScaleSignBehaviour" | "TextMeshProControlReplacer" | "TextMeshPro" => {}
-                            name if super::translated::CLASSES.contains(&name) => self.tr_on_disable(linked.translated[&(d, k)]),
-                            c if super::lifecycle::LIFECYCLE.iter().any(|(k, m)| *k == c && !m.contains(&"OnDisable")) => {}
-                            _ => unimplemented!("{class}.OnDisable"),
-                        }
-                    }
-                    for (&d, &p) in &linked.physicals {
-                        self.physicals[p].active = inst.objects[d].active;
-                    }
-                    for (&d, &w) in &linked.waters {
-                        self.waters[w].active = inst.objects[d].active;
-                    }
-                }
+                "ActivateIfTutorial" | "ActivateIfFancyEffects" => self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, o),
                 name if super::translated::CLASSES.contains(&name) => {
                     let b = linked.translated[&(o, c)];
                     // The translated code reaches its clone through the instance lists.
@@ -3499,6 +3598,16 @@ impl Game {
                 }
                 "DetectorBehaviour" => self.detector_awake(linked.detectors[&o]),
                 "TelevisionBehaviour" => self.television_awake(linked.televisions[&o]),
+                "CardiopulmonaryBypassMachineBehaviour" if *enabled => {
+                    // OnEnable: UpdateActivation. Activated shows the Cosmetics object, which the prefab has active already.
+                    let x = &self.cardiopulmonary_bypasses[linked.cardiopulmonary_bypasses[&o]];
+                    let cosmetics = x.Cosmetics;
+                    match x.Activated {
+                        true if inst.objects[cosmetics].active => {}
+                        true => unimplemented!("CardiopulmonaryBypassMachineBehaviour.OnEnable: Cosmetics.SetActive(true) of an inactive object while the clone is awoken"),
+                        false => self.awake_set_inactive(prefab, inst, linked, &mut enabled_behaviours, cosmetics),
+                    }
+                }
                 "TimedGateBehaviour" => {
                     self.timed_gate_awake(linked.timed_gates[&o]);
                     if *enabled {
@@ -3653,8 +3762,11 @@ impl Game {
                 "ToggleableMirrorBehaviour" => Some(Behaviour::ToggleableMirror(linked.toggleable_mirrors[&o])),
                 "ValveBehaviour" => Some(Behaviour::Valve(linked.valves[&o])),
                 "TimedGateBehaviour" => Some(Behaviour::TimedGate(linked.timed_gates[&o])),
+                "DefibrillatorBehaviour" => Some(Behaviour::Defibrillator(linked.defibrillators[&o])),
+                "CardiopulmonaryBypassMachineBehaviour" => Some(Behaviour::CardiopulmonaryBypass(linked.cardiopulmonary_bypasses[&o])),
                 "HeartMonitorBehaviour" => Some(Behaviour::HeartMonitor(linked.heart_monitors[&o])),
                 "ExcaliburBehaviour" => Some(Behaviour::Excalibur(linked.excaliburs[&o])),
+                "SharpOnAllSidesBehaviour" => Some(Behaviour::SharpOnAllSides(linked.sharp_on_all_sides[&o])),
                 "BloodTankBehaviour" => Some(Behaviour::BloodTank(linked.blood_tanks[&o])),
                 "ExplosiveBehaviour" => Some(Behaviour::Explosive(linked.explosives[&o])),
                 "DeleteAfterTime" => Some(Behaviour::DeleteAfter(linked.delete_afters[&o])),
@@ -3698,6 +3810,7 @@ impl Game {
                 "ThermometerBehaviour" => Some(Behaviour::Thermometer(linked.thermometers[&o])),
                 "InfraredThermometer" => Some(Behaviour::InfraredThermometer(linked.infrared_thermometers[&o])),
                 "JetEngineBehaviour" => Some(Behaviour::JetEngine(linked.jet_engines[&o])),
+                "ChainsawBehaviour" => Some(Behaviour::Chainsaw(linked.chainsaws[&o])),
                 "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
                 "BlasterboltBehaviour" => Some(Behaviour::Blasterbolt(linked.blasterbolts[&o])),
                 "BeamformerBehaviour" => Some(Behaviour::Beamformer(linked.beamformers[&o])),
@@ -3859,6 +3972,7 @@ impl Game {
                 "SingleFloodlightBehaviour" => PendingStart::Floodlight(linked.floodlights[&o]),
                 "SpikeGrenadeBehaviour" => PendingStart::SpikeGrenade(linked.spike_grenades[&o]),
                 "BulbBehaviour" => PendingStart::Bulb(linked.bulbs[&o]),
+                "ChainsawBehaviour" => PendingStart::Chainsaw(linked.chainsaws[&o]),
                 "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
                 // Start reads Slider.limits: the component's state, taken from the spawn when the Start runs.
                 "PistonBehaviour" => {
@@ -3881,6 +3995,7 @@ impl Game {
                 "AirfoilBehaviour" => PendingStart::Airfoil(linked.airfoils[&o]),
                 "MetronomeBehaviour" => PendingStart::Metronome(linked.metronomes[&o]),
                 "TimedGateBehaviour" => PendingStart::TimedGate(linked.timed_gates[&o]),
+                "CardiopulmonaryBypassMachineBehaviour" => PendingStart::CardiopulmonaryBypass(linked.cardiopulmonary_bypasses[&o]),
                 "BloodTankBehaviour" => PendingStart::BloodTank(linked.blood_tanks[&o]),
                 "ArchelixCasterBehaviour" => PendingStart::ArchelixCaster(linked.archelix_casters[&o]),
                 "ArchelixCasterBoltBehaviour" => PendingStart::ArchelixBolt(linked.archelix_bolts[&o]),

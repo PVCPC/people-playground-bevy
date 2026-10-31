@@ -461,6 +461,8 @@ pub enum PendingStart {
     UniversalBell(usize),
     /// TimedGateBehaviour.Start: a busy gate resumes DoLag (timed_gate.rs).
     TimedGate(usize),
+    /// CardiopulmonaryBypassMachineBehaviour.Start: UpdateActivation (resuscitation.rs).
+    CardiopulmonaryBypass(usize),
     /// ArchelixCasterBehaviour.Start and ArchelixCasterBoltBehaviour.Start (archelix.rs).
     ArchelixCaster(usize),
     ArchelixBolt(usize),
@@ -510,6 +512,8 @@ pub enum PendingStart {
     SpikeGrenade(usize),
     /// BulbBehaviour.Start: the `Game::bulbs` index.
     Bulb(usize),
+    /// ChainsawBehaviour.Start: the `Game::chainsaws` index.
+    Chainsaw(usize),
     /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
     Thrusterbed(usize),
     /// PistonBehaviour.Start: the `Game::pistons` index and the `autofix_joints` entry holding its SliderJoint2D.
@@ -853,6 +857,7 @@ impl Game {
             state: a.state.clone(),
             slider: a.slider.clone(),
             spring: None,
+            friction: None,
             joint: a.joint,
             attached: a.attached,
             connected: a.connected,
@@ -951,6 +956,7 @@ impl Game {
                 PendingStart::Destroyable(x) => self.destroyable_start(x),
                 PendingStart::UniversalBell(b) => self.universal_bell_start(b),
                 PendingStart::TimedGate(g) => self.timed_gate_start(g),
+                PendingStart::CardiopulmonaryBypass(c) => self.cardiopulmonary_bypass_start(c),
                 PendingStart::ArchelixCaster(c) => self.archelix_caster_start(c),
                 PendingStart::ArchelixBolt(b) => self.archelix_bolt_start(b),
                 PendingStart::FireMap(f) => self.fire_map_start(f),
@@ -993,6 +999,7 @@ impl Game {
                 PendingStart::Floodlight(i) => self.floodlight_start(i),
                 PendingStart::SpikeGrenade(i) => self.spike_grenade_start(i),
                 PendingStart::Bulb(i) => self.bulb_start(i),
+                PendingStart::Chainsaw(i) => self.chainsaw_start(i),
                 PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
                 PendingStart::Piston(i, joints) => {
                     let a = std::mem::take(&mut self.autofix_joints[joints]).sliders.remove(0);

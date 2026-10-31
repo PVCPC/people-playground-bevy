@@ -466,6 +466,10 @@ impl Game {
                     let f = p.reaction_force(inv_dt);
                     ([f.x, f.y], p.reaction_torque(inv_dt))
                 }
+                Some(JointKind::Friction(f)) => {
+                    let force = f.reaction_force(inv_dt);
+                    ([force.x, force.y], f.reaction_torque(inv_dt))
+                }
             };
             let broken = (force != f32::INFINITY && (fx * fx + fy * fy).sqrt() > force) || (torque != f32::INFINITY && t > torque);
             if broken {
@@ -680,6 +684,8 @@ pub struct FixedJoint {
     pub slider: Option<SliderJoint2d>,
     /// A SpringJoint2D's own fields (a b2DistanceJoint): distance, damping ratio, frequency and autoConfigureDistance.
     pub spring: Option<super::spawn::SpringState>,
+    /// A FrictionJoint2D's maxForce (+0x98) and maxTorque (+0x9c).
+    pub friction: Option<(f32, f32)>,
     /// m_Joint (+0x58)
     pub joint: Option<JointId>,
     /// The owner of the Rigidbody2D that is body A, and the connectedBody's (None: the scene's ground body).
@@ -725,7 +731,7 @@ impl Game {
     /// ground body: connectedBody is still unset) when the GameObject is active and the component enabled.
     pub fn add_fixed_joint_component(&mut self, attached: usize) -> usize {
         let f = self.fixed_joints.len();
-        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -736,7 +742,7 @@ impl Game {
         let f = self.fixed_joints.len();
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
-        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), spring: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: Some(SliderJoint2d::reset()), spring: None, friction: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
     }
@@ -749,9 +755,37 @@ impl Game {
         let mut state = FixedJoint2d::reset();
         state.auto_configure_connected_anchor = false;
         let spring = super::spawn::SpringState { auto_configure_distance: true, distance: 1.0, damping_ratio: 0.0, frequency: 1.0 };
-        self.fixed_joints.push(FixedJoint { state, slider: None, spring: Some(spring), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joints.push(FixedJoint { state, slider: None, spring: Some(spring), friction: None, joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
         self.fixed_joint_create_if_active(f);
         f
+    }
+
+    /// AddComponent<FrictionJoint2D>(): FrictionJoint2D::Reset (180bf79a0) over Joint2D::Reset: zero anchors,
+    /// autoConfigureConnectedAnchor on, maxForce and maxTorque 1; AddToManager creates the joint (to the ground body)
+    /// when the GameObject is active and the component enabled.
+    pub fn add_friction_joint_component(&mut self, attached: usize) -> usize {
+        let f = self.fixed_joints.len();
+        self.fixed_joints.push(FixedJoint { state: FixedJoint2d::reset(), slider: None, spring: None, friction: Some((1.0, 1.0)), joint: None, attached: BodyOwner::Physical(attached), connected: None, active: true, enabled: true, destroyed: false });
+        self.fixed_joint_create_if_active(f);
+        f
+    }
+
+    /// FrictionJoint2D::SetMaxForce (180bf8700) / SetMaxTorque (180bf8730): clamped to [0, 1e6] (a NaN is kept),
+    /// written through to the live b2 joint.
+    pub fn friction_joint_set_max_force(&mut self, f: usize, v: f32) {
+        let v = if 0.0 > v { 0.0 } else if 1_000_000.0 < v { 1_000_000.0 } else { v };
+        self.fixed_joints[f].friction.as_mut().expect("a FrictionJoint2D").0 = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            self.world.joints[id].as_mut().unwrap().friction_mut().def.max_force = v;
+        }
+    }
+
+    pub fn friction_joint_set_max_torque(&mut self, f: usize, v: f32) {
+        let v = if 0.0 > v { 0.0 } else if 1_000_000.0 < v { 1_000_000.0 } else { v };
+        self.fixed_joints[f].friction.as_mut().expect("a FrictionJoint2D").1 = v;
+        if let Some(id) = self.fixed_joints[f].joint {
+            self.world.joints[id].as_mut().unwrap().friction_mut().def.max_torque = v;
+        }
     }
 
     fn fixed_joint_create_if_active(&mut self, f: usize) {
@@ -776,6 +810,12 @@ impl Game {
         };
         let j = &mut self.fixed_joints[f];
         let def: JointKind = match (j.slider.as_mut(), j.spring.as_mut()) {
+            // FrictionJoint2D::Create (180bebf40): the anchors, maxForce and maxTorque.
+            (None, None) if j.friction.is_some() => {
+                let (anchor_a, anchor_b) = j.state.configure_anchors(ends.scale_a, &frame_a, &connected);
+                let (max_force, max_torque) = j.friction.unwrap();
+                crate::b2::friction_joint::FrictionDef { local_anchor_a: anchor_a, local_anchor_b: anchor_b, max_force, max_torque }.into()
+            }
             (Some(slider), _) => slider.create_def(&mut j.state, ends.scale_a, &frame_a, &connected).into(),
             // SpringJoint2D::Create: the anchors, then the distance between them when it autoconfigures.
             (None, Some(sp)) => {
@@ -815,8 +855,8 @@ impl Game {
     /// FixedJoint2D::Cleanup (180c03480): a live b2 joint is destroyed (DestroyJoint wakes both ends; the
     /// FlushSimulationChanges after it does nothing while playing).
     pub(super) fn fixed_joint_cleanup(&mut self, f: usize, destroyed: bool) {
-        if self.fixed_joints[f].spring.is_some() {
-            // SpringJoint2D: Joint2D::Cleanup alone; the next Create redoes the auto-configuration.
+        if self.fixed_joints[f].spring.is_some() || self.fixed_joints[f].friction.is_some() {
+            // SpringJoint2D and FrictionJoint2D: Joint2D::Cleanup alone; the next Create redoes the auto-configuration.
             if let Some(id) = self.fixed_joints[f].joint.take() {
                 self.fixed_joints[f].state.anchor_configured = false;
                 self.world.destroy_joint(id);
