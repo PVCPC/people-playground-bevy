@@ -5,7 +5,7 @@
 
 use super::explosion::normalized3;
 use super::physical::{dot2, get_min_impulse};
-use super::{d, mathf, script, Game};
+use super::{mathf, script, Game};
 use crate::assets::db::ObjRef;
 use crate::b2::contacts2d::ScriptCollision;
 use crate::b2::math::Vec2 as V;

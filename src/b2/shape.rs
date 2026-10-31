@@ -172,6 +172,18 @@ pub struct Circle {
     pub p: Vec2,
 }
 
+impl Circle {
+    /// b2CircleShape::ComputeMass (180bb34f0).
+    pub fn compute_mass(&self, density: f32) -> MassData {
+        let r = self.radius;
+        let area = r * std::f32::consts::PI * r;
+        let mass = area * density;
+        let disc = r * 0.5 * r;
+        let offset = self.p.y * self.p.y + self.p.x * self.p.x;
+        MassData { mass, center: self.p, inertia: (offset + disc) * mass, area }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MassData {
     pub mass: f32,

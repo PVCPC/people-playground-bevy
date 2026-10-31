@@ -151,12 +151,7 @@ impl Shape {
 
     fn compute_mass(&self, density: f32) -> MassData {
         match self {
-            // ponytail: Box2D 2.3's b2CircleShape::ComputeMass, not yet compared against the DLL.
-            Shape::Circle(c) => {
-                let area = std::f32::consts::PI * c.radius * c.radius;
-                let mass = density * area;
-                MassData { mass, center: c.p, inertia: mass * (0.5 * c.radius * c.radius + (c.p.x * c.p.x + c.p.y * c.p.y)), area }
-            }
+            Shape::Circle(c) => c.compute_mass(density),
             Shape::Polygon(p) => p.compute_mass(density),
             // b2ChainShape::ComputeMass (180bb34e0)
             Shape::Chain(_) => MassData::default(),

@@ -211,9 +211,9 @@ impl Game {
 
     /// Physics2D.Raycast(origin, direction, distance, layerMask, minDepth, maxDepth).
     pub(super) fn raycast(&mut self, origin: V, direction: [f32; 2], distance: f32, mask: u32, min_depth: f32, max_depth: f32) -> Option<RayHit2D> {
-        if distance == f32::INFINITY {
-            unimplemented!("Physics2D.Raycast with an infinite distance");
-        }
+        // PhysicsQuery2D::Raycast (180bf6290): an infinite distance casts 100000 and scales each hit's fraction by it.
+        let infinite = distance == f32::INFINITY;
+        let distance = if infinite { 100000.0 } else { distance };
         let len2 = direction[0] * direction[0] + direction[1] * direction[1];
         let dir = if len2 != 0.0 {
             let inv = 1.0 / len2.sqrt();
@@ -226,7 +226,12 @@ impl Game {
         if hits.len() > 32 {
             unimplemented!("Physics2D.Raycast with more than 32 hits (std::sort is not a stable insertion sort)");
         }
-        hits.first().copied()
+        hits.first().copied().map(|mut h| {
+            if infinite {
+                h.fraction *= 100000.0;
+            }
+            h
+        })
     }
 
     /// Physics2D.LinecastNonAlloc(start, end, buffer[8], layerMask): the number of hits.

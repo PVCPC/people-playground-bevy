@@ -164,9 +164,9 @@ impl Game {
         let nw = (w ^ (w >> 19)) ^ (t ^ (t >> 8));
         self.point_effectors[e].rng = [y, z, w, nw];
         let force = (nw & 0x7fffff) as f32 * f32::from_bits(0x34000001) * p.force_variation + p.force_magnitude;
-        // std::sort with PredecateContactGrouping: by the other body, then its fixture (their addresses; the
-        // rewrite's creation order stands in for them). The array keeps the sorted order.
-        // ponytail: creation order for heap addresses; only the order of the force sums within a group can differ.
+        // std::sort with PredecateContactGrouping: by the other body, then its fixture, by address. The addresses
+        // differ from session to session in the game itself, so they go in creation order. The array keeps the sorted
+        // order.
         let mut contacts = std::mem::take(&mut self.world.effectors.get_mut(&p.id).unwrap().contacts);
         contacts.sort_by_key(|c| (c.other_body, c.other_fixture, c.other_child));
         self.world.effectors.get_mut(&p.id).unwrap().contacts = contacts.clone();

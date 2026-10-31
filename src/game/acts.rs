@@ -79,6 +79,8 @@ pub enum ActTarget {
     Fire(usize),
     /// PhysicalBehaviour.ForceSendUse (`Game::physicals`)
     ForceSendUse(usize),
+    /// JavelinMissileBehaviour.Explode (`Game::javelin_missiles`)
+    Explode(usize),
     /// A CarBehaviour call (SetHealth or set_enabled(false)) on the car with component id `.0` (car.rs car_invoke).
     Car(i32, super::car::CarCall),
     /// PhysicalBehaviour.Ignite(bool ignoreFlammability) (`Game::physicals`): ignite(p, ignore) in physical.rs.
@@ -116,6 +118,8 @@ pub enum CollisionScript {
     Torch(usize),
     /// TelevisionBehaviour: OnCollisionEnter2D (television.rs).
     Television(usize),
+    /// JavelinMissileBehaviour: OnCollisionEnter2D (javelin.rs).
+    JavelinMissile(usize),
     /// WrenchBehaviour: OnCollisionEnter2D only (wrench.rs).
     Wrench(usize),
     /// NoCollideWithBodyPart: OnCollisionEnter2D only (no_collide.rs).
@@ -136,6 +140,7 @@ impl Game {
             CollisionScript::Balloon(_) => {}
             CollisionScript::Torch(t) => self.torch_on_collision_enter(t, c),
             CollisionScript::Television(t) => self.television_on_collision_enter(t, c),
+            CollisionScript::JavelinMissile(m) => self.javelin_missile_on_collision_enter(m, c),
             CollisionScript::Wrench(w) => self.wrench_on_collision_enter(w, c),
             CollisionScript::NoCollideBodyPart(n) => self.no_collide_body_part_enter(n, c),
             CollisionScript::Translated(t) => self.tr_on_collision_enter2d(t, c),
@@ -192,6 +197,7 @@ impl Game {
             ActTarget::Beam(b) => self.beamformer_shoot(b),
             ActTarget::Fire(f) => self.scifi40_fire(f),
             ActTarget::ForceSendUse(p) => self.physical_force_send_use(p),
+            ActTarget::Explode(m) => self.javelin_missile_explode(m),
         }
     }
 

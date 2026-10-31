@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 const SET: u32 = 0xbb4b90;
 const COMPUTE_MASS: u32 = 0xbb35a0;
 const CAPSULE_COMPUTE_MASS: u32 = 0xbb3390;
+const CIRCLE_COMPUTE_MASS: u32 = 0xbb34f0;
 const CAPSULE_COMPUTE_AABB: u32 = 0xbb2910;
 const CAPSULE_TEST_POINT: u32 = 0xbb5d40;
 const SET_AS_EDGE: u32 = 0xbb59e0;
@@ -782,6 +783,32 @@ fn capsule_bytes(capsule: &Capsule) -> Vec<u8> {
     b
 }
 
+/// b2CircleShape::ComputeMass (180bb34f0).
+fn compare_circle_mass(executable: &std::path::Path) -> Result<(), String> {
+    let mut random = Random(0x5eed_c1c1);
+    let (mut circles, mut calls) = (Vec::new(), Vec::new());
+    for i in 0..4096 {
+        let circle = Circle { radius: random.range(0.001, 2.0), p: if i % 5 == 0 { Vec2::ZERO } else { random.vec(1.5) } };
+        let density = random.range(0.05, 5.0);
+        calls.push(call(CIRCLE_COMPUTE_MASS, vec![circle_bytes(&circle), vec![0; 20]], &["b0", "b1", &format!("f{}", density.to_bits())]));
+        circles.push((circle, density));
+    }
+    let count = calls.len();
+    let replies: Vec<Reply> = crate::motor::run_probe(executable, &Batch { globals: vec![], calls }, count)?;
+    let (mut bad, mut first) = (0, None);
+    for (i, (circle, density)) in circles.iter().enumerate() {
+        let m = circle.compute_mass(*density);
+        let rust = [m.mass, m.center.x, m.center.y, m.inertia, m.area].map(f32::to_bits);
+        let b = unhex(&replies[i].buffers[1]);
+        let native = [0, 4, 8, 12, 16].map(|o| get(&b, o));
+        if rust != native {
+            bad += 1;
+            first.get_or_insert_with(|| format!("{circle:?} density {density}: native={native:x?} rust={rust:x?}"));
+        }
+    }
+    report("CIRCLE MASS", bad, circles.len(), first)
+}
+
 /// b2CapsuleShape ComputeMass / ComputeAABB / TestPoint and b2PolygonShape::SetAsEdge (the capsule contacts' segment).
 fn compare_capsules(executable: &std::path::Path) -> Result<(), String> {
     let mut random = Random(0x5eed_0ca9);
@@ -826,6 +853,7 @@ fn compare_capsules(executable: &std::path::Path) -> Result<(), String> {
 
 pub fn compare_reference(executable: &std::path::Path) -> Result<(), String> {
     compare_shapes(executable)?;
+    compare_circle_mass(executable)?;
     compare_capsules(executable)?;
     compare_manifolds(executable)?;
     compare_edge_manifolds(executable)?;
@@ -2049,4 +2077,28 @@ fn compare_edge_manifolds(executable: &std::path::Path) -> Result<(), String> {
     report("EDGE MANIFOLD", bad, replies.len(), first)?;
     println!("  ({touching} of them touching)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// b2CircleShape::ComputeMass: area pi r², mass density * area, inertia mass * (r²/2 + |p|²), centre p.
+    #[test]
+    fn circle_mass_hand_worked() {
+        let m = Circle { radius: 1.0, p: Vec2::new(3.0, 4.0) }.compute_mass(2.0);
+        assert_eq!(m.area, std::f32::consts::PI);
+        assert_eq!(m.mass, 2.0 * std::f32::consts::PI);
+        assert_eq!(m.center, Vec2::new(3.0, 4.0));
+        assert_eq!(m.inertia, 25.5 * m.mass);
+    }
+
+    /// The circle mass bit for bit against UnityPlayer.dll; skipped where NativeProbe is not built.
+    #[test]
+    fn circle_mass_matches_the_engine() {
+        let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(r"reference-probe\native\bin\Debug\net9.0\NativeProbe.exe");
+        if probe.exists() {
+            compare_circle_mass(&probe).unwrap();
+        }
+    }
 }

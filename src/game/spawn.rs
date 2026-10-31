@@ -726,12 +726,12 @@ impl Game {
         }
         // GetAttachedColliders (180c1f350): the fixtures' colliders (a collider disabled earlier has none left) sorted
         // by address and deduplicated; on the inactive GameObject each gets Collider2D::Cleanup with Deactivate's
-        // arguments, which its own Deactivate repeats later on an empty collider.
-        let attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
-        match attached[..] {
-            [] => {}
-            [(co, cc)] => self.collider2d_deactivate(inst, co, cc),
-            _ => unimplemented!("{}: Rigidbody2D::Cleanup of several attached colliders (heap-address order)", prefab.objects[o].name),
+        // arguments, which its own Deactivate repeats later on an empty collider. The addresses differ from session to
+        // session in the game itself, so the colliders go in creation order (prefab object, then component).
+        let mut attached: Vec<(usize, usize)> = inst.fixtures.iter().filter(|(_, f)| f.iter().any(|&f| self.world.fixture_alive(f) && self.world.fixture(f).body == body)).map(|(&k, _)| k).collect();
+        attached.sort_unstable();
+        for (co, cc) in attached {
+            self.collider2d_deactivate(inst, co, cc);
         }
         if !self.world.body(body).fixtures.is_empty() {
             unimplemented!("{}: Rigidbody2D::Cleanup with another instance's colliders attached", prefab.objects[o].name);

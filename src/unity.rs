@@ -1,5 +1,6 @@
 //! UnityEngine natives the game scripts call, rewritten from UnityPlayer.dll (Unity 2020.3).
 
+pub mod crt;
 pub mod tess;
 pub mod transform;
 
@@ -61,8 +62,7 @@ impl Random {
     /// Random.insideUnitSphere
     pub fn inside_unit_sphere(&mut self) -> [f32; 3] {
         let v = self.on_unit_sphere();
-        // ponytail: host powf; rewrite the CRT powf FMA path if a script ever calls insideUnitSphere.
-        let scale = self.value().powf(f32::from_bits(0x3eaaaaab));
+        let scale = crt::powf(self.value(), f32::from_bits(0x3eaaaaab));
         [v[0] * scale, v[1] * scale, v[2] * scale]
     }
 
@@ -115,12 +115,19 @@ fn reduce(a: f64) -> (f64, u32) {
     (r1 - nd * f64::from_bits(0x3dd0b4611a626331), n as u32 & 3)
 }
 
+/// The CRT's handler for an infinite or NaN argument of sinf/cosf (1815b7d98): the default NaN for an infinity (and
+/// errno, which is not modelled), the quieted NaN otherwise.
+fn trig_special(x: f32) -> f32 {
+    if x.to_bits() & 0x7fffff == 0 { f32::from_bits(0xffc00000) } else { f32::from_bits(x.to_bits() | 0x400000) }
+}
+
 /// The engine's statically linked CRT cosf, FMA3 path (taken on every CPU with FMA3/AVX2).
-/// ponytail: |x| >= 3373259520 needs the CRT's Payne-Hanek reduction; script callers pass angles in [0, 2pi].
 pub fn cosf(x: f32) -> f32 {
+    if !x.is_finite() {
+        return trig_special(x);
+    }
     let xd = x as f64;
     let a = xd.abs();
-    assert!(a < 3373259520.0, "cosf: large-argument reduction not rewritten");
     if a.to_bits() <= PI_4 {
         return if a < 0.0001220703125 {
             1.0
@@ -130,17 +137,19 @@ pub fn cosf(x: f32) -> f32 {
             cos_kernel(xd, false) as f32
         };
     }
-    let (r, q) = reduce(a);
+    // 181598b05: from 3373259520 on, the Payne-Hanek reduction.
+    let (r, q) = if a < 3373259520.0 { reduce(a) } else { crt::cos_large(a) };
     let v = if q & 1 == 1 { sin_kernel(r) } else { cos_kernel(r, false) };
     (if (q + 1) & 2 != 0 { -v } else { v }) as f32
 }
 
 /// The engine's statically linked CRT sinf, FMA3 path.
-/// ponytail: |x| >= 16779436 needs the CRT's Payne-Hanek reduction; script callers pass angles in [0, 2pi].
 pub fn sinf(x: f32) -> f32 {
+    if !x.is_finite() {
+        return trig_special(x);
+    }
     let xd = x as f64;
     let a = xd.abs();
-    assert!(a < 16779436.0, "sinf: large-argument reduction not rewritten");
     if a.to_bits() <= PI_4 {
         return if a < 0.0001220703125 {
             x
@@ -150,7 +159,8 @@ pub fn sinf(x: f32) -> f32 {
             sin_kernel(xd) as f32
         };
     }
-    let (r, q) = reduce(a);
+    // 18159b8f5: from 16779436 on, the Payne-Hanek reduction.
+    let (r, q) = if a < 16779436.0 { reduce(a) } else { crt::sin_large(a) };
     let v = if q & 1 == 1 { cos_kernel(r, true) } else { sin_kernel(r) };
     let v = if q >= 2 { -v } else { v };
     (if xd < 0.0 { -v } else { v }) as f32
@@ -193,27 +203,72 @@ pub fn acosf(x: f32) -> f32 {
     ((s + s) * u + (t + t)) + s1 * 2.0
 }
 
-/// Checks cosf/sinf against the engine's (NativeProbe `trig`) on every angle Random.Range(0, 2pi) yields.
-pub fn compare_trig(probe: &std::path::Path) -> Result<(), String> {
-    let output = std::process::Command::new(probe).arg("trig").output().map_err(|e| e.to_string())?;
-    let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let mut h: u64 = 0xcbf29ce484222325;
-    let mut mix = |v: f32| {
+/// FNV-1a over the bit patterns of the floats, as NativeProbe mixes them.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf29ce484222325)
+    }
+
+    fn mix(&mut self, v: f32) {
         for byte in v.to_bits().to_le_bytes() {
-            h = (h ^ byte as u64).wrapping_mul(0x100000001b3);
+            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x100000001b3);
         }
-    };
+    }
+}
+
+/// The hash NativeProbe `trig` prints: cosf and sinf of every angle Random.Range(0, 2pi) yields.
+pub fn trig_hash() -> u64 {
+    let mut h = Fnv::new();
     for u in 0..1u32 << 23 {
         let t = u as f32 * f32::from_bits(0x34000001);
         let a = (1.0 - t) * TWO_PI + t * 0.0;
-        mix(cosf(a));
-        mix(sinf(a));
+        h.mix(cosf(a));
+        h.mix(sinf(a));
     }
-    let actual = format!("{h:016x}");
-    if actual != expected {
-        return Err(format!("cosf/sinf differ from the engine: {actual} vs {expected}"));
+    h.0
+}
+
+/// The hash NativeProbe `trigbig` prints: cosf and sinf of 2^21 pseudo-random floats of magnitude 2^24 to 2^128.
+pub fn trig_big_hash() -> u64 {
+    let mut h = Fnv::new();
+    let mut s = 12345u32;
+    for _ in 0..1u32 << 21 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let r = s;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = f32::from_bits(((r >> 31) << 31) | ((0x97 + (s >> 8) % 0x68) << 23) | (r & 0x7fffff));
+        h.mix(cosf(x));
+        h.mix(sinf(x));
     }
-    println!("cosf/sinf: 2^23 angles bit-exact with the engine");
+    h.0
+}
+
+/// The hash NativeProbe `powf` prints: powf(v, 1/3) for every v Random.value yields.
+pub fn powf_third_hash() -> u64 {
+    let mut h = Fnv::new();
+    for u in 0..=1u32 << 23 {
+        h.mix(crt::powf(u as f32 * f32::from_bits(0x34000001), f32::from_bits(0x3eaaaaab)));
+    }
+    h.0
+}
+
+/// Checks cosf, sinf and powf against the engine's (NativeProbe `trig`, `trigbig` and `powf`).
+pub fn compare_trig(probe: &std::path::Path) -> Result<(), String> {
+    for (mode, actual, what) in [
+        ("trig", trig_hash as fn() -> u64, "cosf/sinf: 2^23 angles in [0, 2pi]"),
+        ("trigbig", trig_big_hash, "cosf/sinf: 2^21 floats from 2^24 up"),
+        ("powf", powf_third_hash, "powf(v, 1/3): every Random.value"),
+    ] {
+        let output = std::process::Command::new(probe).arg(mode).output().map_err(|e| e.to_string())?;
+        let expected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let actual = format!("{:016x}", actual());
+        if actual != expected {
+            return Err(format!("{what} differ from the engine: {actual} vs {expected}"));
+        }
+        println!("{what}: bit-exact with the engine");
+    }
     Ok(())
 }
 
@@ -433,6 +488,48 @@ mod tests {
             let x = i as f32 / 1000.0;
             let (ours, exact) = (acosf(x), (x as f64).acos() as f32);
             assert!((ours.to_bits() as i32 - exact.to_bits() as i32).abs() <= 1, "acosf({x}) = {ours} vs {exact}");
+        }
+    }
+
+    fn ulps(a: f32, b: f32) -> u32 {
+        (a.to_bits() as i32 - b.to_bits() as i32).unsigned_abs()
+    }
+
+    #[test]
+    fn trig_of_large_arguments_within_an_ulp() {
+        let mut s = 99u32;
+        for _ in 0..4000 {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let r = s;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let x = f32::from_bits(((r >> 31) << 31) | ((0x97 + (s >> 8) % 0x68) << 23) | (r & 0x7fffff));
+            let (c, sn) = ((x as f64).cos() as f32, (x as f64).sin() as f32);
+            assert!(ulps(cosf(x), c) <= 1, "cosf({x}) = {} vs {c}", cosf(x));
+            assert!(ulps(sinf(x), sn) <= 1, "sinf({x}) = {} vs {sn}", sinf(x));
+        }
+        assert!(cosf(f32::INFINITY).is_nan() && sinf(f32::NEG_INFINITY).is_nan());
+        assert_eq!(cosf(f32::from_bits(0x7f800001)).to_bits(), 0x7fc00001);
+    }
+
+    #[test]
+    fn powf_third_within_an_ulp() {
+        let third = f32::from_bits(0x3eaaaaab);
+        assert_eq!(crt::powf(0.0, third), 0.0);
+        assert_eq!(crt::powf(1.0, third), 1.0);
+        for u in (0..=1u32 << 23).step_by(997) {
+            let x = u as f32 * f32::from_bits(0x34000001);
+            let exact = (x as f64).powf(third as f64) as f32;
+            assert!(ulps(crt::powf(x, third), exact) <= 1, "powf({x}) = {} vs {exact}", crt::powf(x, third));
+        }
+    }
+
+    /// cosf, sinf and powf bit for bit against UnityPlayer.dll (NativeProbe `trig`, `trigbig`, `powf`); skipped where the
+    /// probe is not built.
+    #[test]
+    fn trig_and_powf_match_the_engine() {
+        let probe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(r"reference-probe\native\bin\Debug\net9.0\NativeProbe.exe");
+        if probe.exists() {
+            compare_trig(&probe).unwrap();
         }
     }
 

@@ -124,13 +124,18 @@ pub struct Linked {
     pub ceiling_turrets: HashMap<usize, usize>,
     pub temperature_transfers: HashMap<usize, usize>,
     pub worm_staffs: HashMap<usize, usize>,
+    pub atom_explosions: HashMap<usize, usize>,
     pub prefab_bombs: HashMap<usize, usize>,
     pub laser_turrets: HashMap<usize, usize>,
     pub sentry_turrets: HashMap<usize, usize>,
     pub sentry_guns: HashMap<usize, usize>,
+    pub ion_bolts: HashMap<usize, usize>,
     pub emps: HashMap<usize, usize>,
     pub decimators: HashMap<usize, usize>,
     pub immobility_fields: HashMap<usize, usize>,
+    pub lightning_guns: HashMap<usize, usize>,
+    pub javelins: HashMap<usize, usize>,
+    pub javelin_missiles: HashMap<usize, usize>,
     pub tesla_coils: HashMap<usize, usize>,
     /// What each coil's bolt prefab gives its clones, by the coil's object.
     pub tesla_bolt_sources: HashMap<usize, super::tesla_coil::BoltSource>,
@@ -604,6 +609,8 @@ pub(super) fn check_rewritten(class: &str) {
         "TemperatureTransferBehaviour" => {}
         // worm_staff.rs: Start and Update (the line vertices are rendering).
         "WormStaffBehaviour" => {}
+        // atom_explosion.rs: Start heats and vaporises, Update grows the shockwave (Awake only finds the camera).
+        "NewAtomBombExplosionBehaviour" => {}
         // prefab_bomb.rs: Use instantiates ExplosionPrefab and destroys the GameObject.
         "AtomBombBehaviour" | "SeismicChargeBehaviour" => {}
         // laser_turret.rs: FixedUpdate aims and fires (automatic_sentry.rs), Use shoots, OnEMPHit breaks it.
@@ -617,6 +624,14 @@ pub(super) fn check_rewritten(class: &str) {
         "DecimatorBehaviour" => {}
         // immobility_field.rs
         "ImmobilityFieldBehaviour" => {}
+        // lightning_gun.rs: Update, FixedUpdate and OnDisable are rewritten; the particles and sounds are presentation.
+        "LightningGunBehaviour" => {}
+        // javelin.rs: Start subscribes TransferTarget to OnLaunch (the line is presentation). OnEnable and FixedUpdate only
+        // recast the laser for the line, its colour and the lock-on sound, and TransferTarget casts it again; OnDestroy only
+        // unsubscribes, and a destroyed launcher launches nothing.
+        "JavelinBehaviour" => {}
+        // javelin.rs: Start, FixedUpdate, OnCollisionEnter2D, Explode, OnEMPHit and Shot are rewritten; Update is the fins' scale.
+        "JavelinMissileBehaviour" => {}
         // tesla_coil.rs: Awake instantiates the bolts (their Update is rewritten there), Start, Use, FixedUpdate,
         // OnDisable and OnDestroy; the audio is presentation.
         "TeslaCoilBehaviour" => {}
@@ -917,14 +932,14 @@ impl Game {
                     Component::Collider2D(_) => {
                         let (anchor, chain) = anchor_of(o);
                         let scripts = prefab.objects[o].components.iter().filter_map(|(_, x)| if let Component::Script { class, .. } = x { Some(class.clone()) } else { None }).collect();
-                        self.bare_colliders.insert(inst.objects[o].components[c], BareCollider { anchor, chain, scripts, active_self: prefab.objects[o].active });
+                        self.bare_colliders.insert(inst.objects[o].components[c], BareCollider { anchor, chain, scripts, active_self: prefab.objects[o].active, root: (inst.objects[0].game_object, inst.objects[0].components[0]) });
                     }
                     Component::SpriteRenderer(r) => {
                         let Some(sprite) = db.resolve(file, r.sprite) else { continue };
                         let (anchor, chain) = anchor_of(o);
                         let visible = inst.objects[o].active && r.enabled;
                         let bounds = renderer_bounds(&Sprite::read(db.data(sprite))?, r);
-                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size), visible, bounds });
+                        self.renderers.push(Renderer { anchor, chain, sprite: (sprite, r.color, r.sorting_order), layer: r.sorting_layer_id, id: inst.objects[o].components[c], draw: ([r.flip_x, r.flip_y], r.draw_mode, r.size), visible, bounds });
                     }
                     _ => {}
                 }
@@ -1012,6 +1027,7 @@ impl Game {
                 let sprite = db.resolve(file, r.sprite).ok_or("a SpriteRenderer without a sprite")?;
                 p.sprite_bounds = Some(renderer_bounds(&Sprite::read(db.data(sprite))?, r));
                 p.sprite = Some((sprite, r.color, r.sorting_order));
+                p.sprite_layer = r.sorting_layer_id;
                 p.sprite_draw = ([r.flip_x, r.flip_y], r.draw_mode, r.size);
             }
             self.physicals.push(p);
@@ -1909,7 +1925,95 @@ impl Game {
         // The sci-fi weapons the ActOnCollide and ActOnShot Actions call.
         let (mut blasters, mut blasterbolts, mut beamformers, mut scifi40s) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
         let mut effect_guns = HashMap::new();
+        let (mut lightning_guns, mut javelins, mut javelin_missiles) = (HashMap::new(), HashMap::new(), HashMap::new());
+        // The local TRS chain from object `at` up to (excluding) `top`.
+        let chain_below = |mut at: usize, top: usize, what: &str| -> Result<Vec<crate::unity::transform::Trs>, String> {
+            let mut chain = Vec::new();
+            while at != top {
+                chain.push(inst.objects[at].trs);
+                at = inst.objects[at].parent.ok_or_else(|| format!("{what} is outside its object"))?;
+            }
+            Ok(chain)
+        };
+        // A prefab an effect field instantiates: its pose is the script's, so it must have no physics.
+        let no_physics = |db: &mut AssetDb, r: ObjRef| -> Result<(), String> {
+            if db.prefab(r)?.objects.iter().any(|x| x.components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                unimplemented!("a spawned effect with physics (its pose)");
+            }
+            Ok(())
+        };
         for o in 0..n {
+            if let Some((c, enabled, v)) = script(prefab, o, "LightningGunBehaviour") {
+                let mut x = super::lightning_gun::LightningGun::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Phys = l.in_arena(field(v, "Phys")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("LightningGunBehaviour.Phys is null")?;
+                if l.arenas.physical.get(&o) != Some(&x.Phys) {
+                    unimplemented!("LightningGunBehaviour on another GameObject than its PhysicalBehaviour");
+                }
+                x.Layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("Layers.m_Bits")? as u32;
+                let particles = l.object(field(v, "ParticleSystem")?)?.ok_or("LightningGunBehaviour.ParticleSystem is null (NullReferenceException)")?;
+                x.RayOrigin = chain_below(particles, o, "LightningGunBehaviour.ParticleSystem")?;
+                if x.RayOrigin.is_empty() {
+                    unimplemented!("LightningGunBehaviour.ParticleSystem on the gun's own object");
+                }
+                // The bolt, the target marker and the particles are presentation: their subtrees must not hold physics.
+                let target = l.object(field(v, "TargetPosition")?)?.ok_or("LightningGunBehaviour.TargetPosition is null (NullReferenceException)")?;
+                for root in [particles, target] {
+                    if std::iter::once(root).chain(inst.descendants(root)).any(|d| prefab.objects[d].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)))) {
+                        unimplemented!("LightningGunBehaviour: a ParticleSystem or TargetPosition object with physics");
+                    }
+                }
+                lightning_guns.insert(o, self.lightning_guns.len());
+                self.lightning_guns.push(x);
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "JavelinBehaviour") {
+                let mut x = super::javelin::Javelin::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.physical = l.in_arena(field(v, "PhysicalBehaviour")?, &l.arenas.physical, "PhysicalBehaviour")?.ok_or("JavelinBehaviour.PhysicalBehaviour is null (NullReferenceException)")?;
+                if l.arenas.physical.get(&o) != Some(&x.physical) {
+                    unimplemented!("JavelinBehaviour on another GameObject than its PhysicalBehaviour");
+                }
+                x.launcher = l.in_arena(field(v, "ProjectileLauncher")?, &launchers, "ProjectileLauncherBehaviour")?.ok_or("JavelinBehaviour.ProjectileLauncher is null (NullReferenceException)")?;
+                x.LayerMask = field(field(v, "LayerMask")?, "m_Bits")?.i64().ok_or("LayerMask.m_Bits")? as u32;
+                let ray = l.object(field(v, "RayStart")?)?.ok_or("JavelinBehaviour.RayStart is null (NullReferenceException)")?;
+                x.RayStart = chain_below(ray, o, "JavelinBehaviour.RayStart")?;
+                if x.RayStart.len() != 1 {
+                    unimplemented!("JavelinBehaviour.RayStart that is not a direct child of the launcher");
+                }
+                javelins.insert(o, self.javelins.len());
+                self.javelins.push(x);
+            }
+            if let Some((c, _, v)) = script(prefab, o, "JavelinMissileBehaviour") {
+                let mut x = super::javelin::JavelinMissile::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.physical = l.arenas.physical.get(&o).copied().unwrap_or_else(|| unimplemented!("JavelinMissileBehaviour without a PhysicalBehaviour (its collisions are not delivered)"));
+                x.index = c;
+                x.after_physical = script(prefab, o, "PhysicalBehaviour").is_some_and(|(pc, _, _)| pc < c);
+                let trail = l.object(field(v, "TrailParticleEffect")?)?.unwrap_or_else(|| unimplemented!("JavelinMissileBehaviour.TrailParticleEffect null (NullReferenceException)"));
+                let glow = l.object(field(v, "Glow")?)?.unwrap_or_else(|| unimplemented!("JavelinMissileBehaviour.Glow null (NullReferenceException)"));
+                for root in [trail, glow] {
+                    if std::iter::once(root).chain(inst.descendants(root)).any(|d| prefab.objects[d].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::Rigidbody2D(_)) || matches!(c, Component::Script { class, .. } if super::declares(class, "OnEnable") || super::declares(class, "OnDisable") || super::declares(class, "Update") || super::declares(class, "FixedUpdate")))) {
+                        unimplemented!("JavelinMissileBehaviour: a Trail or Glow object with physics or scripts");
+                    }
+                }
+                x.trail = inst.objects[trail].components[0];
+                x.glow = inst.objects[glow].components[0];
+                for (name, slot) in [("ExplosionEffect", &mut x.ExplosionEffect), ("SparkPrefab", &mut x.SparkPrefab)] {
+                    let p = field(v, name)?.pptr().ok_or(name)?;
+                    if !p.is_null() {
+                        let r = db.resolve(file, p).ok_or_else(|| format!("JavelinMissileBehaviour.{name} outside the data"))?;
+                        no_physics(db, r)?;
+                        *slot = Some(r);
+                    }
+                }
+                javelin_missiles.insert(o, self.javelin_missiles.len());
+                self.javelin_missiles.push(x);
+            }
             if let Some((c, enabled, v)) = script(prefab, o, "BlasterBehaviour") {
                 let mut x = super::blaster::Blaster::default();
                 load_values(x.fields(), v)?;
@@ -2040,6 +2144,7 @@ impl Game {
                         let before = (0..to).filter(|&x| script(prefab, x, "DamagableMachineryBehaviour").is_some()).count();
                         targets.push(ActTarget::ForceBreak(machinery + before));
                     }
+                    Some((to, tc)) if class_of(to, tc) == "JavelinMissileBehaviour" && method == "Explode" => targets.push(ActTarget::Explode(javelin_missiles[&to])),
                     Some((to, tc)) if class_of(to, tc) == "BlasterBehaviour" && method == "Shoot" => targets.push(ActTarget::Blast(blasters[&to])),
                     Some((to, tc)) if class_of(to, tc) == "BeamformerBehaviour" && method == "Shoot" => targets.push(ActTarget::Beam(beamformers[&to])),
                     Some((to, tc)) if class_of(to, tc) == "GenericScifiWeapon40Behaviour" && method == "Fire" => targets.push(ActTarget::Fire(scifi40s[&to])),
@@ -3238,10 +3343,12 @@ impl Game {
         let mut ceiling_turrets = HashMap::new();
         let mut temperature_transfers = HashMap::new();
         let mut worm_staffs = HashMap::new();
+        let mut atom_explosions = HashMap::new();
         let mut prefab_bombs = HashMap::new();
         let mut laser_turrets = HashMap::new();
         let mut sentry_turrets = HashMap::new();
         let mut sentry_guns = HashMap::new();
+        let mut ion_bolts = HashMap::new();
         let mut emps = HashMap::new();
         let mut decimators = HashMap::new();
         let mut immobility_fields = HashMap::new();
@@ -3520,6 +3627,19 @@ impl Game {
                 sentry_guns.insert(o, self.sentry_guns.len());
                 self.sentry_guns.push(x);
             }
+            if let Some((c, enabled, v)) = script(prefab, o, "IonBoltBehaviour") {
+                let mut x = super::ion_bolt::IonBolt::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                x.Layers = field(field(v, "Layers")?, "m_Bits")?.i64().ok_or("Layers.m_Bits")? as u32;
+                // DeleteAfterTime: this object's (its Update loses a tenth of its life on each hit).
+                let dat = field(v, "DeleteAfterTime")?.pptr().filter(|p| !p.is_null() && p.file == 0).unwrap_or_else(|| unimplemented!("IonBoltBehaviour.DeleteAfterTime null (NullReferenceException in Update)"));
+                let (dato, _) = *prefab.index.get(&ObjRef { file, path_id: dat.path_id }).ok_or("IonBoltBehaviour.DeleteAfterTime: dangling reference")?;
+                x.delete_after = *delete_afters.get(&dato).ok_or("IonBoltBehaviour.DeleteAfterTime is not a DeleteAfterTime in this clone")?;
+                ion_bolts.insert(o, self.ion_bolts.len());
+                self.ion_bolts.push(x);
+            }
             for class in ["AtomBombBehaviour", "SeismicChargeBehaviour"] {
                 if let Some((c, enabled, v)) = script(prefab, o, class) {
                     let mut x = super::prefab_bomb::PrefabBomb { id: inst.objects[o].components[c], enabled, ..Default::default() };
@@ -3531,6 +3651,33 @@ impl Game {
                     prefab_bombs.insert(o, self.prefab_bombs.len());
                     self.prefab_bombs.push(x);
                 }
+            }
+            if let Some((c, enabled, v)) = script(prefab, o, "NewAtomBombExplosionBehaviour") {
+                let mut x = super::atom_explosion::AtomExplosion::default();
+                load_values(x.fields(), v)?;
+                x.id = inst.objects[o].components[c];
+                x.enabled = enabled;
+                if l.arenas.physical.contains_key(&o) || inst.objects[o].parent.is_some() {
+                    unimplemented!("NewAtomBombExplosionBehaviour on a moving or parented object (its transform.position)");
+                }
+                let t = inst.objects[o].trs.t;
+                x.position = [t[0], t[1], t[2]];
+                let local = |name: &str| -> Result<(usize, usize), String> {
+                    let pp = field(v, name)?.pptr().ok_or_else(|| name.to_string())?;
+                    prefab.index.get(&ObjRef { file, path_id: pp.path_id }).copied().filter(|_| !pp.is_null() && pp.file == 0).ok_or_else(|| format!("NewAtomBombExplosionBehaviour.{name} outside the prefab or null"))
+                };
+                x.ShockwaveCollider = local("ShockwaveCollider")?;
+                if !matches!(&prefab.objects[x.ShockwaveCollider.0].components[x.ShockwaveCollider.1].1, Component::Collider2D(k) if matches!(k.shape, crate::assets::components::ColliderShape::Circle { .. })) {
+                    return Err("NewAtomBombExplosionBehaviour.ShockwaveCollider is not a CircleCollider2D".into());
+                }
+                let (eo, ec) = local("PointEffector")?;
+                if !matches!(prefab.objects[eo].components[ec].1, Component::PointEffector2D(_)) {
+                    return Err("NewAtomBombExplosionBehaviour.PointEffector is not a PointEffector2D".into());
+                }
+                x.PointEffector = inst.objects[eo].components[ec];
+                x.ShockwaveGrowth = Some(curve(field(v, "ShockwaveGrowth")?)?);
+                atom_explosions.insert(o, self.atom_explosions.len());
+                self.atom_explosions.push(x);
             }
             if let Some((c, enabled, v)) = script(prefab, o, "WormStaffBehaviour") {
                 let mut x = super::worm_staff::WormStaff::default();
@@ -3630,7 +3777,7 @@ impl Game {
             let go = self.sentry_guns[i].sentry_object;
             self.sentry_guns[i].sentry = *sentry_turrets.get(&go).ok_or("SentryTurretGunBehaviour.sentryBehaviour is not a SentryTurretBehaviour")?;
         }
-        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns,decimators, immobility_fields, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
+        Ok(Linked { person, limbs: l.arenas.limb, nodes: l.arenas.node, physicals: l.arenas.physical, hinges: l.arenas.hinge, map_lights, waters, machinery, destroyables, fire_maps, firearms, launchers, bells, machine_guns, miniguns, accelerators, accelerator_bolts, archelix_casters, archelix_bolts, universal_bells, toggleable_mirrors, valves, timed_gates, defibrillators, cardiopulmonary_bypasses, heart_monitors, blood_tanks, excaliburs, sharp_on_all_sides, explosives, delete_afters, point_to_velocities, android_sparks, cars, act_on_collides, tyres, flasks, truck_doors, liquid_containers, glowtubes, leds, detectors, sticky_grenades, generators, floodlights, spike_grenades, heating_elements, ray_guns, bulbs, thrusterbeds, pistons, flamethrowers, rockets, airfoils, stunners, soaps, power_hammers, balloons, metronomes, physics_guns, activator_electrodes, thermometers, infrared_thermometers, activation_toggles, power_gauges, torches, flares, buttons, displays, lasers, firearm_attachments, televisions, syringes, jet_engines, chainsaws, freezes, emps, freeze_serialisations, ceiling_turrets, temperature_transfers, worm_staffs, atom_explosions, prefab_bombs, laser_turrets, sentry_turrets, sentry_guns, ion_bolts,decimators, immobility_fields, lightning_guns, javelins, javelin_missiles, tesla_coils, tesla_bolt_sources, energy_swords, blasters, blasterbolts, beamformers, scifi40s, effect_guns, signal_converters, syringe_explosions, point_liquids, lavas, spawners, heat_rects, random_sprites, node_rigidbodies, parent_audio: None, translated })
     }
 
     /// Object.Instantiate of a Person prefab up to the end of the Instantiate call: the native clone and its
@@ -3831,8 +3978,9 @@ impl Game {
             self.transform_nodes[n].parent = None;
             self.transform_nodes[n].trs = inst.objects[o].trs;
         }
-        if physical.is_none() && node.is_none() && subtree.iter().any(|&x| prefab.objects[x].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_) | Component::SpriteRenderer(_)))) {
-            unimplemented!("{}: SetParent(null) of a bare Transform above colliders or sprites", prefab.objects[o].name);
+        if physical.is_none() && node.is_none() && subtree.iter().any(|&x| prefab.objects[x].components.iter().any(|(_, c)| matches!(c, Component::Collider2D(_)) || (matches!(c, Component::SpriteRenderer(_)) && prefab.objects[x].components.iter().any(|(_, k)| matches!(k, Component::Script { .. }))))) {
+            // A sprite without a script on its object is presentation: nothing reads its pose.
+            unimplemented!("{}: SetParent(null) of a bare Transform above colliders or scripted sprites", prefab.objects[o].name);
         }
         for &x in &subtree {
             let Some(k) = prefab.objects[x].components.iter().position(|(_, c)| matches!(c, Component::Rigidbody2D(_))) else { continue };
@@ -3977,6 +4125,7 @@ impl Game {
                 "CardiopulmonaryBypassMachineBehaviour" => {}
                 "HeartMonitorBehaviour" => self.heart_monitor_on_disable(linked.heart_monitors[&d]),
                 "ImmobilityFieldBehaviour" => self.immobility_field_on_disable(linked.immobility_fields[&d], inst),
+                "LightningGunBehaviour" => self.lightning_gun_on_disable(linked.lightning_guns[&d]),
                 "CeilingTurretBehaviour" => self.ceiling_turret_on_disable(linked.ceiling_turrets[&d]),
                 "TeslaCoilBehaviour" => self.tesla_coil_on_disable(linked.tesla_coils[&d]),
                 // OnDisable -> OnDestroy: clears softConnections, empty before the first FixedUpdate.
@@ -4292,14 +4441,18 @@ impl Game {
                 "CeilingTurretBehaviour" => Some(Behaviour::CeilingTurret(linked.ceiling_turrets[&o])),
                 "TemperatureTransferBehaviour" => Some(Behaviour::TemperatureTransfer(linked.temperature_transfers[&o])),
                 "WormStaffBehaviour" => Some(Behaviour::WormStaff(linked.worm_staffs[&o])),
+                "NewAtomBombExplosionBehaviour" => Some(Behaviour::AtomExplosion(linked.atom_explosions[&o])),
                 "AtomBombBehaviour" => Some(Behaviour::AtomBomb(linked.prefab_bombs[&o])),
                 "SeismicChargeBehaviour" => Some(Behaviour::SeismicCharge(linked.prefab_bombs[&o])),
                 "LaserTurretBehaviour" => Some(Behaviour::LaserTurret(linked.laser_turrets[&o])),
                 "SentryTurretBehaviour" => Some(Behaviour::SentryTurret(linked.sentry_turrets[&o])),
                 "SentryTurretGunBehaviour" => Some(Behaviour::SentryTurretGun(linked.sentry_guns[&o])),
+                "IonBoltBehaviour" => Some(Behaviour::IonBolt(linked.ion_bolts[&o])),
                 "EMPBehaviour" => Some(Behaviour::Emp(linked.emps[&o])),
                 "DecimatorBehaviour" => Some(Behaviour::Decimator(linked.decimators[&o])),
                 "ImmobilityFieldBehaviour" => Some(Behaviour::ImmobilityField(linked.immobility_fields[&o])),
+                "LightningGunBehaviour" => Some(Behaviour::LightningGun(linked.lightning_guns[&o])),
+                "JavelinMissileBehaviour" => Some(Behaviour::JavelinMissile(linked.javelin_missiles[&o])),
                 "TeslaCoilBehaviour" => Some(Behaviour::TeslaCoil(linked.tesla_coils[&o])),
                 "EnergySwordBehaviour" => Some(Behaviour::EnergySword(linked.energy_swords[&o])),
                 "BlasterBehaviour" => Some(Behaviour::Blaster(linked.blasters[&o])),
@@ -4470,8 +4623,11 @@ impl Game {
                 "FreezeSerialisationHelper" => PendingStart::FreezeSerialisation(linked.freeze_serialisations[&o]),
                 "CeilingTurretBehaviour" => PendingStart::CeilingTurret(linked.ceiling_turrets[&o]),
                 "WormStaffBehaviour" => PendingStart::WormStaff(linked.worm_staffs[&o]),
+                "NewAtomBombExplosionBehaviour" => PendingStart::AtomExplosion(linked.atom_explosions[&o]),
                 "DecimatorBehaviour" => PendingStart::Decimator(linked.decimators[&o]),
                 "ImmobilityFieldBehaviour" => PendingStart::ImmobilityField(linked.immobility_fields[&o]),
+                "JavelinBehaviour" => PendingStart::Javelin(linked.javelins[&o]),
+                "JavelinMissileBehaviour" => PendingStart::JavelinMissile(linked.javelin_missiles[&o]),
                 "TeslaCoilBehaviour" => PendingStart::TeslaCoil(linked.tesla_coils[&o]),
                 "EnergySwordBehaviour" => PendingStart::EnergySword(linked.energy_swords[&o]),
                 "ThrusterbedBehaviour" => PendingStart::Thrusterbed(linked.thrusterbeds[&o]),
@@ -4571,6 +4727,7 @@ pub(super) fn read_physical_properties(db: &mut AssetDb, asset: ObjRef) -> Resul
         p.Softness = float(&v, "Softness")?;
         p.Flammability = float(&v, "Flammability")?;
         p.Conducting = b("Conducting")?;
+        p.MagneticAttractionIntensity = Some(float(&v, "MagneticAttractionIntensity")?);
         p.Burnrate = float(&v, "Burnrate")?;
         p.BurningTemperatureThreshold = float(&v, "BurningTemperatureThreshold")?;
         p.HeatTransferSpeedMultiplier = float(&v, "HeatTransferSpeedMultiplier")?;
@@ -4740,7 +4897,7 @@ mod tests {
         for b in &g.properties {
             match want.properties.iter().find(|a| a.name == b.name) {
                 // Recordings name the ShotImpact asset without a reference to it.
-                Some(a) => check(format!("properties {}", a.name), format!("{a:?}"), format!("{:?}", super::physical::PhysicalProperties { ShotImpact: b.ShotImpact.map(|(_, puff)| (None, puff)), ..b.clone() })),
+                Some(a) => check(format!("properties {}", a.name), format!("{a:?}"), format!("{:?}", super::physical::PhysicalProperties { ShotImpact: b.ShotImpact.map(|(_, puff)| (None, puff)), MagneticAttractionIntensity: a.MagneticAttractionIntensity, ..b.clone() })),
                 None => check(format!("properties {}", b.name), "recorded".into(), "missing".into()),
             }
         }

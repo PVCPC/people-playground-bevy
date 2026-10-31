@@ -648,8 +648,8 @@ fn game_frame(time: Res<Time<Real>>, mut ui: ResMut<Ui>, settings: Res<Settings>
     }
     let real = time.delta_secs();
     // Time.timeScale is stepped from the unscaled delta once the frame is done, so it applies from the next one.
-    if ui.mode == Mode::Game && play.game.time.timeScale >= 1.0e-3 {
-        // ponytail: below 0.001 the frame is skipped; Unity still runs the Update scripts at a zero scale.
+    // At a zero scale Time.deltaTime is 0: no fixed step runs, the Update scripts still do.
+    if ui.mode == Mode::Game {
         if let Err(m) = play::step(&mut play.game, real) {
             play.stopped = Some(m);
             return;

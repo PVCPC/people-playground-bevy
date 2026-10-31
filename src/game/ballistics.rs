@@ -756,6 +756,10 @@ impl Game {
                     let g = self.glowtubes.iter().position(|g| g.Phys == p).expect("the object's GlowtubeBehaviour");
                     self.glowtube_shot(g, damage);
                 }
+                ("JavelinMissileBehaviour", false) => {
+                    let m = self.javelin_missiles.iter().position(|x| x.id == id).expect("the object's JavelinMissileBehaviour");
+                    self.javelin_missile_shot(m, damage);
+                }
                 ("TelevisionBehaviour", _) => {
                     let t = self.televisions.iter().position(|x| x.physical == p).expect("the object's TelevisionBehaviour");
                     self.television_shot(t);

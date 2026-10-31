@@ -25,6 +25,8 @@ pub struct PhysicalProperties {
     pub Softness: f32,
     pub Flammability: f32,
     pub Conducting: bool,
+    /// MagneticAttractionIntensity; None for a recorded asset (recordings do not carry it).
+    pub MagneticAttractionIntensity: Option<f32>,
     pub Burnrate: f32,
     pub BurningTemperatureThreshold: f32,
     pub HeatTransferSpeedMultiplier: f32,
@@ -203,6 +205,8 @@ script! {
         sprite: Option<(crate::assets::db::ObjRef, [f32; 4], i16)> = None,
         /// For drawing: the spriteRenderer's flipX/flipY, drawMode (Simple 0, Sliced 1, Tiled 2) and size.
         sprite_draw: ([bool; 2], i32, [f32; 2]) = ([false; 2], 0, [0.0; 2]),
+        /// For drawing: the spriteRenderer's sortingLayerID (0, the Default layer, without a renderer).
+        sprite_layer: i32 = 0,
         MaximumStabVictims: i32 = 64,
         LooseEndSize: f32 = 0.49,
         /// OverrideImpactSounds length (0 when null).

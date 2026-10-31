@@ -57,11 +57,16 @@ pub mod automatic_sentry;
 pub mod ceiling_turret;
 pub mod temperature_transfer;
 pub mod worm_staff;
+pub mod atom_explosion;
 pub mod prefab_bomb;
 pub mod laser_turret;
 pub mod sentry_turret;
+pub mod ion_bolt;
+pub mod player_prefs;
 pub mod decimator;
 pub mod immobility_field;
+pub mod javelin;
+pub mod lightning_gun;
 pub mod tesla_coil;
 pub mod emp;
 pub mod freeze;
@@ -552,11 +557,16 @@ impl Default for Prefs {
 
 impl Prefs {
     /// UserPreferenceManager.Load: config.json in the game folder (the working directory), deserialized by
-    /// Newtonsoft over the defaults with unknown members ignored; without the file, the defaults.
+    /// Newtonsoft over the defaults with unknown members ignored. Without the file, the defaults; a file that fails
+    /// to read or deserialize goes to LoadFromLegacyStorage (PlayerPrefs, player_prefs.rs).
     pub fn load(game: &std::path::Path) -> Prefs {
-        match std::fs::read_to_string(game.join("config.json")) {
-            Ok(text) => Prefs::from_json(&text).unwrap_or_else(|e| unimplemented!("UserPreferenceManager.LoadFromLegacyStorage (config.json: {e})")),
-            Err(_) => Prefs::default(),
+        let path = game.join("config.json");
+        if !path.exists() {
+            return Prefs::default();
+        }
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| Prefs::from_json(&text)) {
+            Ok(p) => p,
+            Err(_) => player_prefs::legacy_preferences(&player_prefs::store()),
         }
     }
 
@@ -686,7 +696,7 @@ pub struct MovementState {
     pub body: ([f32; 3], [f32; 4]),
     pub interpolating: bool,
     /// In PhysicsScene2D.m_RigidbodyMovementStates (m_MovementIndex != -1).
-    // ponytail: membership only; the index is the scripts' Start order and never changes a result.
+    // Membership only: the index is the scripts' Start order and no result reads it.
     pub listed: bool,
 }
 
@@ -1070,6 +1080,8 @@ pub struct BareCollider {
     pub scripts: Vec<String>,
     /// GameObject.activeSelf.
     pub active_self: bool,
+    /// `transform.root` of the GameObject as (GameObject id, Transform id): its clone's root.
+    pub root: (i32, i32),
 }
 
 impl BareCollider {
@@ -1095,6 +1107,8 @@ pub struct Renderer {
     pub anchor: BareAnchor,
     pub chain: Vec<crate::unity::transform::Trs>,
     pub sprite: (crate::assets::db::ObjRef, [f32; 4], i16),
+    /// The SpriteRenderer's sortingLayerID.
+    pub layer: i32,
     /// The SpriteRenderer component's instance id.
     pub id: i32,
     /// flipX/flipY, drawMode, size.
@@ -1244,6 +1258,8 @@ pub enum Behaviour {
     TemperatureTransfer(usize),
     /// WormStaffBehaviour.Update: the `Game::worm_staffs` index.
     WormStaff(usize),
+    /// NewAtomBombExplosionBehaviour.Update: the `Game::atom_explosions` index.
+    AtomExplosion(usize),
     /// AtomBombBehaviour.Use: the `Game::prefab_bombs` index.
     AtomBomb(usize),
     /// SeismicChargeBehaviour.Use: the `Game::prefab_bombs` index.
@@ -1254,8 +1270,14 @@ pub enum Behaviour {
     SentryTurret(usize),
     /// SentryTurretGunBehaviour.Update/FixedUpdate: the `Game::sentry_guns` index.
     SentryTurretGun(usize),
+    /// IonBoltBehaviour.Update: the `Game::ion_bolts` index.
+    IonBolt(usize),
     Decimator(usize),
     ImmobilityField(usize),
+    /// LightningGunBehaviour.Update/FixedUpdate: the `Game::lightning_guns` index.
+    LightningGun(usize),
+    /// JavelinMissileBehaviour.FixedUpdate: the `Game::javelin_missiles` index.
+    JavelinMissile(usize),
     TeslaCoil(usize),
     TeslaBolt(usize),
     /// EMPBehaviour.Use: the `Game::emps` index.
@@ -1336,13 +1358,17 @@ impl Behaviour {
             Behaviour::CeilingTurret(_) => "CeilingTurretBehaviour",
             Behaviour::TemperatureTransfer(_) => "TemperatureTransferBehaviour",
             Behaviour::WormStaff(_) => "WormStaffBehaviour",
+            Behaviour::AtomExplosion(_) => "NewAtomBombExplosionBehaviour",
             Behaviour::AtomBomb(_) => "AtomBombBehaviour",
             Behaviour::SeismicCharge(_) => "SeismicChargeBehaviour",
             Behaviour::LaserTurret(_) => "LaserTurretBehaviour",
             Behaviour::SentryTurret(_) => "SentryTurretBehaviour",
             Behaviour::SentryTurretGun(_) => "SentryTurretGunBehaviour",
+            Behaviour::IonBolt(_) => "IonBoltBehaviour",
             Behaviour::Decimator(_) => "DecimatorBehaviour",
             Behaviour::ImmobilityField(_) => "ImmobilityFieldBehaviour",
+            Behaviour::LightningGun(_) => "LightningGunBehaviour",
+            Behaviour::JavelinMissile(_) => "JavelinMissileBehaviour",
             Behaviour::TeslaCoil(_) => "TeslaCoilBehaviour",
             Behaviour::TeslaBolt(_) => "TeslaCoilLightningBoltBehaviour",
             Behaviour::Emp(_) => "EMPBehaviour",
@@ -1560,6 +1586,9 @@ pub struct Game {
     pub chainsaws: Vec<chainsaw::Chainsaw>,
     pub decimators: Vec<decimator::Decimator>,
     pub immobility_fields: Vec<immobility_field::ImmobilityField>,
+    pub lightning_guns: Vec<lightning_gun::LightningGun>,
+    pub javelins: Vec<javelin::Javelin>,
+    pub javelin_missiles: Vec<javelin::JavelinMissile>,
     pub tesla_coils: Vec<tesla_coil::TeslaCoil>,
     pub tesla_bolts: Vec<tesla_coil::TeslaBolt>,
     /// DecimatorBehaviour.lastDestroyedRootId (static, -1 until set).
@@ -1570,10 +1599,12 @@ pub struct Game {
     pub ceiling_turrets: Vec<ceiling_turret::CeilingTurret>,
     pub temperature_transfers: Vec<temperature_transfer::TemperatureTransfer>,
     pub worm_staffs: Vec<worm_staff::WormStaff>,
+    pub atom_explosions: Vec<atom_explosion::AtomExplosion>,
     pub prefab_bombs: Vec<prefab_bomb::PrefabBomb>,
     pub laser_turrets: Vec<laser_turret::LaserTurret>,
     pub sentry_turrets: Vec<sentry_turret::SentryTurret>,
     pub sentry_guns: Vec<sentry_turret::SentryTurretGun>,
+    pub ion_bolts: Vec<ion_bolt::IonBolt>,
     pub energy_swords: Vec<energy_sword::EnergySword>,
     /// EnergySwordBladeClashBehaviour: its id, its GameObject's colliders and CollideWithOtherSwordVFX.
     pub blade_clashes: Vec<(i32, Vec<i32>, crate::assets::db::ObjRef)>,

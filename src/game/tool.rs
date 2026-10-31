@@ -1476,6 +1476,25 @@ mod tests {
     }
 
     #[test]
+    fn atom_bomb_heats_a_human_and_leaves() {
+        let Some((mut g, bomb)) = spawned("Atom Bomb") else { return };
+        let at = g.physicals[bomb].transform.position;
+        let first_limb = g.limbs.len();
+        spawn_at(&mut g, "Human", [at[0] + 6.0, at[1] + 1.0, 0.0]);
+        frames(&mut g, 30);
+        let limbs: Vec<usize> = (first_limb..g.limbs.len()).map(|l| g.limbs[l].PhysicalBehaviour).collect();
+        assert!(limbs.iter().all(|&q| g.physicals[q].Temperature < 500.0), "the human starts hot");
+        g.activate_direct(bomb);
+        frames(&mut g, 2);
+        assert_eq!(g.atom_explosions.len(), 1, "Use instantiated no explosion");
+        assert!(g.physicals[bomb].destroyed, "the bomb outlived its Use");
+        // Limbs absorb lasers: the ones in line of sight are heated to at least 500, the ones behind them are shaded.
+        assert!(limbs.iter().any(|&q| g.physicals[q].Temperature >= 500.0), "no limb was heated");
+        frames(&mut g, 30);
+        assert!(g.atom_explosions[0].time > 0.0, "the shockwave never grew");
+    }
+
+    #[test]
     fn worm_staff_cuts_a_human() {
         let Some((mut g, _)) = spawned("Worm Staff") else { return };
         let staff = g.worm_staffs[0].physical;
@@ -1596,6 +1615,20 @@ mod tests {
             }
         }
         assert!(hit, "the sentry turret never hit the human ({before} health)");
+    }
+
+    #[test]
+    fn sentry_turret_explodes_into_debris() {
+        let Some((mut g, _)) = spawned("Sentry Turret") else { return };
+        let s = g.sentry_turrets.len() - 1;
+        let turret = g.sentry_turrets[s].phys;
+        let live = |g: &Game| g.physicals.iter().filter(|p| !p.destroyed && p.in_world).count();
+        let before = live(&g);
+        g.sentry_turret_explode(s);
+        frames(&mut g, 2);
+        assert!(g.physicals[turret].destroyed || !g.physicals[turret].in_world, "the turret was not destroyed");
+        assert!(live(&g) >= before, "the debris did not replace the turret ({before} -> {})", live(&g));
+        assert!(g.sentry_turrets[s].exploded, "Explode did not run");
     }
 
     #[test]

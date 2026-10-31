@@ -342,10 +342,23 @@ impl Game {
                     self.ceiling_turret_on_disable(i);
                 }
             }
+            // No OnDisable and no manager message: Use checks enabled.
+            "AtomBombBehaviour" | "SeismicChargeBehaviour" => {
+                let i = self.prefab_bombs.iter().position(|x| x.id == id).expect("a bomb in the arena");
+                self.prefab_bombs[i].enabled = false;
+            }
             "EMPBehaviour" => {
                 let i = self.emps.iter().position(|x| x.id == id).expect("an EMPBehaviour in the arena");
                 // No OnDisable.
                 self.emps[i].enabled = false;
+            }
+            // No OnDisable: Use checks enabled, and Update and FixedUpdate stop with the behaviour.
+            "ProjectileLauncherBehaviour" => {
+                let i = self.launchers.iter().position(|x| x.id == id).expect("a ProjectileLauncherBehaviour in the arena");
+                if !std::mem::replace(&mut self.launchers[i].enabled, false) {
+                    return;
+                }
+                self.behaviours.remove(super::Behaviour::Launcher(i));
             }
             _ => unimplemented!("DamagableMachineryBehaviour.SetAsBroken: {class}.enabled = false"),
         }

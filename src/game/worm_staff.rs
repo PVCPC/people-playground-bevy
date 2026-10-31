@@ -147,7 +147,7 @@ impl Game {
     }
 
     /// A physical object's GameObject id.
-    fn physical_game_object(&mut self, p: usize) -> i32 {
+    pub(super) fn physical_game_object(&mut self, p: usize) -> i32 {
         self.with_component_instance(self.physicals[p].id, |_, inst, o| inst.objects[o].game_object)
     }
 

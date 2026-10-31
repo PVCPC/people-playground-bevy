@@ -86,8 +86,6 @@ pub struct PoseAngle {
 }
 
 /// RagdollPose.LimbPose animation fields (Animated limbs only).
-// ponytail: random_* are read once EvaluateAngle's Time.time + Perlin path is rewritten.
-#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct PoseAnimation {
     pub start: f32,
@@ -382,16 +380,9 @@ impl Default for SimulationSettings {
 
 impl SimulationSettings {
     /// VideoSettingsInitBehaviour.Sync overrides both Physics2D iteration counts with the user's
-    /// PhysicsIterations preference (Preferences default 32) from config.json in the game folder.
-    // ponytail: no config.json falls back to PlayerPrefs (LoadFromLegacyStorage); keep the project values then.
+    /// The PhysicsIterations preference (UserPreferenceManager.Current, loaded by Prefs::load) for both iteration counts.
     fn apply_preferences(&mut self, game: &Path) {
-        let Ok(text) = std::fs::read_to_string(game.join("config.json")) else {
-            return;
-        };
-        let Ok(preferences) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return;
-        };
-        let iterations = preferences.get("PhysicsIterations").and_then(|v| v.as_u64()).unwrap_or(32) as u32;
+        let iterations = crate::game::Prefs::load(game).PhysicsIterations as u32;
         self.velocity_iterations = iterations;
         self.position_iterations = iterations;
     }
@@ -645,6 +636,36 @@ pub fn find_game(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temporary game folder: `config` is written as config.json when given.
+    fn game_folder(name: &str, config: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ppg-prefs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(text) = config {
+            std::fs::write(dir.join("config.json"), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn missing_config_keeps_the_preference_default_iterations() {
+        let dir = game_folder("missing", None);
+        let mut s = SimulationSettings { velocity_iterations: 16, position_iterations: 16, ..Default::default() };
+        s.apply_preferences(&dir);
+        assert_eq!((s.velocity_iterations, s.position_iterations), (32, 32));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_sets_the_physics_iterations() {
+        let dir = game_folder("set", Some(r#"{"PhysicsIterations": 8}"#));
+        let mut s = SimulationSettings::default();
+        s.apply_preferences(&dir);
+        assert_eq!((s.velocity_iterations, s.position_iterations), (8, 8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn test_rig() -> HumanRig {
         let part = serde_json::json!({"name":"A","position":[0,0],"angle":0,"mass":1,
             "linear_drag":0,"angular_drag":0,"colliders":[{"offset":[0,0],"size":[1,1]}],

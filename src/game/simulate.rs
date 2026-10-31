@@ -73,8 +73,8 @@ fn written_pose(b: &crate::b2::world::Body, z: f32, rotation: [f32; 4]) -> ([f32
 
 impl Game {
     /// PhysicsManager2D::Simulate after the FixedUpdate scripts.
-    // ponytail: the MovePosition/MoveRotation half of SetupMovementStates does nothing here: no rewritten script
-    // calls MovePosition/MoveRotation.
+    // The MovePosition/MoveRotation half of SetupMovementStates never acts: its only callers,
+    // CustomFixedConstrainedBehaviour and FunLittleGames.Linkage, are on no prefab or scene of the game.
     pub fn simulate_physics(&mut self) {
         self.sync_pending();
         let dt = self.time.fixedDeltaTime;
@@ -663,6 +663,9 @@ impl Game {
             }
             if let Some(t) = g.televisions.iter().position(|x| x.physical == p && x.after_physical == after) {
                 v.push((g.televisions[t].index, S::Television(t)));
+            }
+            if let Some(m) = g.javelin_missiles.iter().position(|x| x.physical == p && x.after_physical == after) {
+                v.push((g.javelin_missiles[m].index, S::JavelinMissile(m)));
             }
             if let Some(w) = g.wrenches.iter().position(|x| x.physical == p && x.after_physical == after) {
                 v.push((g.wrenches[w].index, S::Wrench(w)));

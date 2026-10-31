@@ -530,10 +530,16 @@ pub enum PendingStart {
     Decimator(usize),
     /// ImmobilityFieldBehaviour.Start: the `Game::immobility_fields` index.
     ImmobilityField(usize),
+    /// JavelinBehaviour.Start: the `Game::javelins` index.
+    Javelin(usize),
+    /// JavelinMissileBehaviour.Start: the `Game::javelin_missiles` index.
+    JavelinMissile(usize),
     /// TeslaCoilBehaviour.Start: the `Game::tesla_coils` index.
     TeslaCoil(usize),
     /// WormStaffBehaviour.Start: the `Game::worm_staffs` index.
     WormStaff(usize),
+    /// NewAtomBombExplosionBehaviour.Start: the `Game::atom_explosions` index.
+    AtomExplosion(usize),
     /// EnergySwordBehaviour.Start: the `Game::energy_swords` index.
     EnergySword(usize),
     /// ThrusterbedBehaviour.Start: the `Game::thrusterbeds` index.
@@ -1032,8 +1038,11 @@ impl Game {
                 PendingStart::SentryTurret(i) => self.sentry_turret_start(i),
                 PendingStart::Decimator(i) => self.decimator_start(i),
                 PendingStart::ImmobilityField(i) => self.immobility_field_start(i),
+                PendingStart::Javelin(i) => self.javelin_start(i),
+                PendingStart::JavelinMissile(i) => self.javelin_missile_start(i),
                 PendingStart::TeslaCoil(i) => self.tesla_coil_start(i),
                 PendingStart::WormStaff(i) => self.worm_staff_start(i),
+                PendingStart::AtomExplosion(i) => self.atom_explosion_start(i),
                 PendingStart::EnergySword(i) => self.energy_sword_start(i),
                 PendingStart::Thrusterbed(i) => self.thrusterbed_start(i),
                 PendingStart::Piston(i, joints) => {

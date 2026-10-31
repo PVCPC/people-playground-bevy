@@ -293,29 +293,101 @@ pub(crate) struct RendererSprite(usize, f32);
 
 type Textures = std::collections::HashMap<(usize, i64), Handle<Image>>;
 
+/// TagManager.asset's m_SortingLayers uniqueIDs, in draw order (Bottom first). A SpriteRenderer's sortingLayerID is one of them.
+const SORTING_LAYERS: [u32; 8] = [334215217, 1370879715, 0, 182652991, 1377110059, 2185794113, 2257819283, 2607693843];
+
+/// A sprite's draw key: its sorting layer's index, its sortingOrder, then its group (objects before renderers) and index
+/// (the spawn order). Unity's tie rule for sprites with the same layer and order is not in the export, so ties keep the
+/// spawn order.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SortKey {
+    layer: usize,
+    order: i16,
+    group: u8,
+    index: usize,
+}
+
+/// The index of a sortingLayerID in TagManager's order.
+fn sorting_layer_index(id: i32) -> usize {
+    SORTING_LAYERS.iter().position(|&u| u == id as u32).unwrap_or_else(|| unimplemented!("SpriteRenderer sortingLayerID {id} is not in TagManager's sortingLayers"))
+}
+
+/// Each key's z: its rank in draw order over all the keys, spread over -0.5 (drawn first) to 0.5 (drawn last).
+fn sprite_depths(keys: &[SortKey]) -> Vec<f32> {
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by_key(|&i| keys[i]);
+    let n = keys.len() as f32;
+    let mut z = vec![0.0; keys.len()];
+    for (rank, &i) in order.iter().enumerate() {
+        z[i] = -0.5 + (rank as f32 + 0.5) / n;
+    }
+    z
+}
+
+/// A sprite made this frame, with the key that ranks it.
+enum NewSprite {
+    Object(usize, f32, Sprite, Anchor),
+    Renderer(usize, f32, Sprite, Anchor),
+}
+
 /// A sprite from the game's data for each non-limb physical object and each other SpriteRenderer without one;
-/// textures decoded once.
-pub(crate) fn object_sprites(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut play: ResMut<Play>, mut textures: Local<Textures>) {
+/// textures decoded once. Every sprite's z is its rank in draw order (sorting layer, sortingOrder, spawn order) over all
+/// the sprites, so a new one is ranked among the placed ones and they are re-ranked with it.
+pub(crate) fn object_sprites(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut play: ResMut<Play>,
+    mut textures: Local<Textures>,
+    mut placed: Query<(Entity, &SortKey, &mut Transform)>,
+    limbs_added: Query<(), (Added<SortKey>, With<LimbSprite>)>,
+) {
     let mut done = (play.done.1, play.done.2);
     let g = &play.game;
     let Some(db) = g.assets.as_deref() else { return };
     let limbs: Vec<usize> = g.limbs.iter().map(|l| l.PhysicalBehaviour).collect();
+    let mut new: Vec<(SortKey, NewSprite)> = Vec::new();
     for p in done.0..g.physicals.len() {
         let Some((r, color, order)) = g.physicals[p].sprite else { continue };
         if limbs.contains(&p) {
             continue;
         }
         let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.physicals[p].sprite_draw) else { continue };
-        // ponytail: sorting order only; sorting layers (TagManager order) when two layers overlap wrongly.
-        commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+        let key = SortKey { layer: sorting_layer_index(g.physicals[p].sprite_layer), order, group: 0, index: p };
+        new.push((key, NewSprite::Object(p, scale, sprite, anchor)));
     }
     for i in done.1..g.renderers.len() {
         let (r, color, order) = g.renderers[i].sprite;
         let Some((sprite, anchor, scale)) = make_sprite(db, &mut images, &mut textures, r, color, g.renderers[i].draw) else { continue };
-        commands.spawn((RendererSprite(i, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, order as f32 * 0.01 - 0.5)));
+        let key = SortKey { layer: sorting_layer_index(g.renderers[i].layer), order, group: 1, index: i };
+        new.push((key, NewSprite::Renderer(i, scale, sprite, anchor)));
     }
     done = (g.physicals.len(), g.renderers.len());
     (play.done.1, play.done.2) = done;
+    // limb_sprites ran just before: its new limbs are ranked here too.
+    if new.is_empty() && limbs_added.is_empty() {
+        return;
+    }
+
+    let placed_now: Vec<(Entity, SortKey)> = placed.iter().map(|(e, k, _)| (e, *k)).collect();
+    let mut keys: Vec<SortKey> = placed_now.iter().map(|&(_, k)| k).collect();
+    keys.extend(new.iter().map(|(k, _)| *k));
+    let depths = sprite_depths(&keys);
+    let (old, fresh) = depths.split_at(placed_now.len());
+    for ((entity, _), &depth) in placed_now.iter().zip(old) {
+        if let Ok((_, _, mut transform)) = placed.get_mut(*entity) {
+            transform.translation.z = depth;
+        }
+    }
+    for ((key, sprite), &depth) in new.into_iter().zip(fresh) {
+        match sprite {
+            NewSprite::Object(p, scale, sprite, anchor) => {
+                commands.spawn((ObjectSprite(p, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, depth), key));
+            }
+            NewSprite::Renderer(i, scale, sprite, anchor) => {
+                commands.spawn((RendererSprite(i, scale), sprite, anchor, Transform::from_xyz(0.0, 0.0, depth), key));
+            }
+        }
+    }
 }
 
 /// The Bevy sprite for a Unity Sprite: its packed region, colour, flips and draw mode, the anchor at its pivot, and
@@ -388,7 +460,10 @@ pub(crate) fn limb_sprites(mut commands: Commands, assets: Res<AssetServer>, rig
         let mut sprite = Sprite::from_image(assets.load(part.texture.clone()));
         sprite.rect = Some(Rect::new(x, y, x + w, y + h));
         sprite.custom_size = Some(Vec2::from_array(part.size));
-        commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default()));
+        let p = g.limbs[l].PhysicalBehaviour;
+        let Some((_, _, order)) = g.physicals[p].sprite else { unimplemented!("limb {name} without a SpriteRenderer") };
+        let key = SortKey { layer: sorting_layer_index(g.physicals[p].sprite_layer), order, group: 0, index: p };
+        commands.spawn((LimbSprite(l), sprite, Anchor(Vec2::from_array(part.pivot) - Vec2::splat(0.5)), Transform::default(), key));
     }
     play.done.0 = play.game.limbs.len();
 }
@@ -408,7 +483,8 @@ pub(crate) fn draw(
         let [sx, sy, _] = g.people[limb.Person].localScale;
         let [x, y, _] = p.transform.position;
         let [qx, qy, qz, qw] = p.transform.rotation;
-        *transform = Transform::from_xyz(x, y, l as f32 * 0.001)
+        let z = transform.translation.z;
+        *transform = Transform::from_xyz(x, y, z)
             .with_rotation(Quat::from_xyzw(qx, qy, qz, qw))
             .with_scale(Vec3::new(sx * p.transform.localScale[0], sy * p.transform.localScale[1], 1.0));
         *visibility = if p.active { Visibility::Inherited } else { Visibility::Hidden };
@@ -480,5 +556,38 @@ pub(crate) fn draw(
             let [x, y, _] = g.physicals[p].transform.position;
             gizmos.circle_2d(Vec2::new(x, y), 0.05, Color::srgb(0.4, 0.9, 0.5));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sorting layers are drawn in TagManager's order before sortingOrder: a Default-layer sprite with a higher order is
+    /// still behind a Foreground one, and within a layer the lower order is behind.
+    #[test]
+    fn sprites_are_ranked_by_layer_then_order() {
+        let key = |layer: i32, order: i16, index: usize| SortKey { layer: sorting_layer_index(layer), order, group: 0, index };
+        let foreground = 1377110059u32 as i32;
+        let default_layer = 0;
+        let keys = [key(foreground, 0, 0), key(default_layer, 100, 1), key(default_layer, 3, 2), key(default_layer, 5, 3)];
+        let z = sprite_depths(&keys);
+        assert!(z[1] < z[0], "the Default layer is behind Foreground");
+        assert!(z[2] < z[3] && z[3] < z[1], "within a layer the lower sortingOrder is behind");
+        assert!(z.iter().all(|&d| (-0.5..0.5).contains(&d)), "depths stay in the camera range: {z:?}");
+        assert_eq!(sorting_layer_index(2607693843u32 as i32), 7, "Decals is the last layer");
+    }
+
+    /// A frame at Time.timeScale 0 still runs (the frame count moves) with deltaTime 0 and the game clock standing.
+    #[test]
+    fn a_zero_time_scale_frame_still_runs() {
+        let mut g = Game::default();
+        g.time.timeScale = 0.0;
+        g.time.fixedDeltaTime = 0.02;
+        let before = (g.time.timeAsDouble, g.time.fixedTimeAsDouble, g.time.frameCount);
+        step(&mut g, 1.0 / 60.0).unwrap();
+        assert_eq!((g.time.timeAsDouble, g.time.fixedTimeAsDouble), (before.0, before.1));
+        assert_eq!((g.time.deltaTime, g.time.frameCount), (0.0, before.2 + 1));
+        assert!(g.time.realtimeSinceStartup > 0.0);
     }
 }

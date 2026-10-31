@@ -583,7 +583,8 @@ impl Game {
             g.grips.push(gr);
         }
         let _ = grip_ids;
-        // ponytail: gore string joints (severed limbs) are not rewritten; their Update returns while Joint is null.
+        // ponytail: restoring a recording whose gore strings hold their SpringJoint2D is not written (the live game makes
+        // them through PrepareGoreBits); such recordings are refused.
         if s.of("GoreStringBehaviour").any(|r| r.get("Joint").is_some_and(|j| j != "null")) {
             return Err("gore string joints are not rewritten yet".into());
         }
@@ -979,11 +980,18 @@ impl Game {
                 (Phase::Update, B::SentryTurret(i)) => self.sentry_turret_update(i),
                 (Phase::Fixed, B::SentryTurretGun(i)) => self.sentry_gun_fixed_update(i),
                 (Phase::Update, B::SentryTurretGun(i)) => self.sentry_gun_update(i),
+                (Phase::Update, B::IonBolt(i)) => self.ion_bolt_update(i),
                 (Phase::Fixed, B::Decimator(i)) => self.decimator_fixed_update(i),
                 (Phase::Fixed, B::ImmobilityField(i)) => self.immobility_field_fixed_update(i),
+                (Phase::Fixed, B::LightningGun(i)) => self.lightning_gun_fixed_update(i),
+                (Phase::Update, B::LightningGun(i)) => self.lightning_gun_update(i),
+                (Phase::Fixed, B::JavelinMissile(i)) => self.javelin_missile_fixed_update(i),
+                // JavelinMissileBehaviour.Update: the fins' scale.
+                (Phase::Update, B::JavelinMissile(_)) => {}
                 (Phase::Fixed, B::TeslaCoil(i)) => self.tesla_coil_fixed_update(i),
                 (Phase::Update, B::TeslaBolt(k)) => self.tesla_bolt_update(k),
                 (Phase::Update, B::WormStaff(i)) => self.worm_staff_update(i),
+                (Phase::Update, B::AtomExplosion(i)) => self.atom_explosion_update(i),
                 (Phase::Update, B::Chainsaw(i)) => self.chainsaw_update(i),
                 (Phase::Update, B::CeilingTurret(i)) => self.ceiling_turret_update(i),
                 (Phase::Fixed, B::EnergySword(i)) => self.energy_sword_fixed_update(i),

@@ -10,7 +10,7 @@ use super::{script, Game};
 /// hit object stops the run.
 const EMP_RECEIVERS: &[&str] = &[
     "BatteryAttachmentBehaviour", "BulbBehaviour", "CarBehaviour", "CathodeLightBehaviour",
-    "GlowtubeBehaviour", "JavelinMissileBehaviour", "StickyGrenadeBehaviour",
+    "GlowtubeBehaviour", "StickyGrenadeBehaviour",
     "TelevisionBehaviour",
 ];
 
@@ -54,7 +54,7 @@ impl Game {
     }
 
     /// SendMessage("OnEMPHit") on the item's GameObject, its own components only.
-    fn emp_send_on_hit(&mut self, p: usize) {
+    pub(super) fn emp_send_on_hit(&mut self, p: usize) {
         if let Some(l) = self.limbs.iter().position(|x| x.PhysicalBehaviour == p) {
             // LimbBehaviour.OnEMPHit: an android's limb loses all its Health.
             if self.limbs[l].IsAndroid {
@@ -71,6 +71,11 @@ impl Game {
         let lasers: Vec<usize> = (0..self.laser_turrets.len()).filter(|&l| components.contains(&self.laser_turrets[l].id)).collect();
         for l in lasers {
             self.laser_turret_set_as_broken(l);
+        }
+        // JavelinMissileBehaviour.OnEMPHit (javelin.rs).
+        let missiles: Vec<usize> = (0..self.javelin_missiles.len()).filter(|&m| components.contains(&self.javelin_missiles[m].id)).collect();
+        for m in missiles {
+            self.javelin_missile_on_emp_hit(m);
         }
         // SentryTurretBehaviour.OnEMPHit: Explode (sentry_turret.rs).
         let sentries: Vec<usize> = (0..self.sentry_turrets.len()).filter(|&s| components.contains(&self.sentry_turrets[s].id)).collect();

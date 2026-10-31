@@ -50,7 +50,7 @@ fn circle_of(inst: &Instance, (o, c): (usize, usize)) -> (f32, [f32; 2]) {
 impl Game {
     /// CircleCollider2D.radius = v (CircleCollider2D::SetRadius 180c15c30): unchanged within 1e-6, else clamped to
     /// 0.0001..1e6 and the collider re-created.
-    fn circle_set_radius(&mut self, inst: &mut Instance, key: (usize, usize), v: f32) {
+    pub(super) fn circle_set_radius(&mut self, inst: &mut Instance, key: (usize, usize), v: f32) {
         let (radius, offset) = circle_of(inst, key);
         if 0.000_001f32 >= (radius - v).abs() {
             return;

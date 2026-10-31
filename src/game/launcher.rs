@@ -133,7 +133,8 @@ impl Game {
             let layer = x.LayerToPutProjectileOn;
             self.set_root_layer(&inst, layer);
         }
-        // OnLaunch: only JavelinBehaviour subscribes (not rewritten); OnLaunchEvent is presentation (link checks).
+        // OnLaunch: only JavelinBehaviour subscribes (TransferTarget, javelin.rs); OnLaunchEvent is presentation (link checks).
+        self.javelin_on_launch(l, linked.javelin_missiles.get(&0).copied());
         if let Some(&q) = linked.physicals.get(&0) {
             if self.physicals[q].SimulateTemperature && self.physicals[p].SimulateTemperature {
                 self.physicals[q].Temperature = self.physicals[p].Temperature;
